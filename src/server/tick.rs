@@ -195,11 +195,10 @@ impl Server {
         }
     }
 
-    /// Ship queued furnace flips as block changes to chunk-loaded
-    /// players (mirrors the C++ `markBlockNeedsUpdate` fan-out).
-    fn drain_furnace_updates(&mut self) {
-        let pending = std::mem::take(&mut self.world.furnace_updates);
-        for [x, y, z] in pending {
+    /// Ship queued block changes to chunk-loaded players (one packet
+    /// per changed cell per tick).
+    fn drain_block_updates(&mut self) {
+        for [x, y, z] in self.world.take_block_updates() {
             let bytes = pkt_block_change(x, y, z, self.world.get_block_id(x, y, z), self.world.get_block_meta(x, y, z));
             let cids = self.conns_with_chunk(chunk_key(x.div_euclid(16), z.div_euclid(16)));
             for cid in cids {
@@ -241,7 +240,7 @@ impl Server {
         for cid in cids {
             self.pump_one(cid);
         }
-        self.drain_furnace_updates();
+        self.drain_block_updates();
         let lines = std::mem::take(&mut self.console);
         for line in lines {
             self.handle_console(&line);

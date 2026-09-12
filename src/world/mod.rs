@@ -135,11 +135,11 @@ pub struct World {
     /// Block-entity storage by cell (mirrors the chunk `TileEntity` map;
     /// furnaces tick in [`World::tick_furnaces`], NBT here).
     pub tiles: HashMap<(i32, i32, i32), TileData>,
-    /// Cells whose furnace block flipped 61 <-> 62 on a recent tick
-    /// (mirrors the C++ `markBlockNeedsUpdate` after
-    /// `updateFurnaceBlockState`); the server tick drains these and fans
-    /// out block changes to chunk-loaded players.
-    pub furnace_updates: Vec<[i32; 3]>,
+    /// Cells changed since the last server tick (id or metadata writes
+    /// through [`World::set_block_id`] / [`World::set_block_meta`], plus
+    /// tree growth via the world accessor); the server tick drains these
+    /// and fans out block changes to chunk-loaded players.
+    pub block_updates: Vec<[i32; 3]>,
     /// Full pickups since the last server tick as `(item, player)` pairs
     /// (mirrors the collect packet in `EntityPlayerMP.onUpdate`); the
     /// server tick drains these into `Packet22Collect` fan-out plus an
@@ -211,7 +211,7 @@ impl World {
             unload_radius: 10,
             unloaded: HashMap::new(),
             tiles: HashMap::new(),
-            furnace_updates: Vec::new(),
+            block_updates: Vec::new(),
             item_pickups: Vec::new(),
             death_events: Vec::new(),
             status_events: Vec::new(),
@@ -387,12 +387,33 @@ impl World {
     /// NoChunkLoad setters swallowing silently). On change the skylight
     /// follows the C++ `setBlock` path (full regen while a world holds
     /// the chunk); population sets bypass it via [`World::populating`].
+    /// Every real change is queued in [`World::block_updates`] for the
+    /// server tick to broadcast.
     pub fn set_block_id(&mut self, x: i32, y: i32, z: i32, id: u8) -> bool {
-        Self::set_block_id_in(&mut self.chunks, self.populating, x, y, z, id)
+        if Self::set_block_id_in(&mut self.chunks, self.populating, x, y, z, id) {
+            self.block_updates.push([x, y, z]);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn set_block_meta(&mut self, x: i32, y: i32, z: i32, meta: u8) -> bool {
-        Self::set_block_meta_in(&mut self.chunks, x, y, z, meta)
+        if Self::set_block_meta_in(&mut self.chunks, x, y, z, meta) {
+            self.block_updates.push([x, y, z]);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drain queued block changes, deduplicated (one packet per cell per
+    /// tick no matter how many writes hit it).
+    pub(crate) fn take_block_updates(&mut self) -> Vec<[i32; 3]> {
+        let mut out = std::mem::take(&mut self.block_updates);
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     pub fn material_at(&self, x: i32, y: i32, z: i32) -> Material {

@@ -758,17 +758,18 @@
         w.set_block_id(2, 64, 2, 61);
         w.set_block_meta(2, 64, 2, 3);
         w.tiles.insert((2, 64, 2), furnace_tile_with((4, 1), (5, 1)));
+        w.take_block_updates();
         w.tick_furnaces();
         // Lit, facing (meta 3) preserved, update queued for broadcast.
         assert_eq!(w.get_block_id(2, 64, 2), 62);
         assert_eq!(w.get_block_meta(2, 64, 2), 3);
-        assert_eq!(w.furnace_updates, vec![[2, 64, 2]]);
-        // Tile row survives the swap (the C++ no-notify set).
+        assert_eq!(w.take_block_updates(), vec![[2, 64, 2]]);
+        // Tile row survives the swap.
         assert!(matches!(w.tiles.get(&(2, 64, 2)), Some(TileData::Furnace(_))));
         // Steady burn: no further swap, no new update.
         w.tick_furnaces();
         assert_eq!(w.get_block_id(2, 64, 2), 62);
-        assert_eq!(w.furnace_updates.len(), 1);
+        assert!(w.take_block_updates().is_empty());
     }
 
     #[test]
@@ -776,15 +777,16 @@
         let mut w = world_with_floor();
         w.set_block_id(2, 64, 2, 62);
         w.tiles.insert((2, 64, 2), furnace_tile_with((4, 1), (280, 1)));
+        w.take_block_updates();
         // Light it (stick: 100 ticks of burn).
         w.tick_furnaces();
-        assert_eq!(w.furnace_updates.len(), 0); // already lit: no flip
+        assert!(w.take_block_updates().is_empty()); // already lit: no flip
         for _ in 0..200 {
             w.tick_furnaces();
         }
         // Burnt out mid-run: back to idle, one update queued.
         assert_eq!(w.get_block_id(2, 64, 2), 61);
-        assert_eq!(w.furnace_updates, vec![[2, 64, 2]]);
+        assert_eq!(w.take_block_updates(), vec![[2, 64, 2]]);
     }
 
     #[test]
@@ -795,9 +797,10 @@
             (2, 64, 2),
             TileData::Chest(crate::tile_entity::chest::chest_create()),
         );
+        w.take_block_updates();
         w.tick_furnaces();
         assert_eq!(w.get_block_id(2, 64, 2), 54);
-        assert!(w.furnace_updates.is_empty());
+        assert!(w.take_block_updates().is_empty());
     }
 
     #[test]
@@ -805,9 +808,29 @@
         let mut w = world_with_floor();
         w.set_block_id(2, 64, 2, 61);
         w.tiles.insert((2, 64, 2), furnace_tile_with((12, 1), (263, 1)));
+        w.take_block_updates();
         w.tick_world();
         assert_eq!(w.get_block_id(2, 64, 2), 62);
-        assert_eq!(w.furnace_updates, vec![[2, 64, 2]]);
+        assert_eq!(w.take_block_updates(), vec![[2, 64, 2]]);
+    }
+
+    #[test]
+    fn test_block_updates_queue_on_write_and_dedup_on_take() {
+        let mut w = world_with_floor();
+        w.take_block_updates();
+        // No-op writes (same id, missing chunk) queue nothing.
+        assert!(w.set_block_id(3, 64, 4, 1));
+        w.take_block_updates();
+        assert!(!w.set_block_id(3, 64, 4, 1));
+        assert!(w.take_block_updates().is_empty());
+        assert!(!w.set_block_id(1000, 64, 1000, 5));
+        assert!(w.take_block_updates().is_empty());
+        // Repeated writes to one cell collapse to a single entry.
+        assert!(w.set_block_id(3, 64, 4, 0));
+        assert!(w.set_block_meta(3, 64, 4, 2));
+        assert!(w.set_block_id(3, 64, 4, 5));
+        assert_eq!(w.take_block_updates(), vec![[3, 64, 4]]);
+        assert!(w.take_block_updates().is_empty());
     }
 
     #[test]

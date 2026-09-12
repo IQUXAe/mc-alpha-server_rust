@@ -61,6 +61,7 @@ impl World {
             let mut fallback = crate::decorators::WorldAccess {
                 chunks: &mut self.chunks,
                 populating: self.populating,
+                queue: None,
             };
             let loot = populate_batch(
                 gen,

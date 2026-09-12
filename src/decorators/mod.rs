@@ -35,9 +35,12 @@ pub trait BlockAccess {
 
 /// Live-world backend (sapling growth path): the chunk map plus the
 /// population flag, sharing the `*_in` flows with `World` (one formula).
+/// `queue` collects written cells for the broadcast fan-out when `Some`
+/// (live ticks); chunk population passes `None` (fresh chunks stream whole).
 pub struct WorldAccess<'a> {
     pub chunks: &'a mut HashMap<(i32, i32), Chunk>,
     pub populating: bool,
+    pub queue: Option<&'a mut Vec<[i32; 3]>>,
 }
 
 impl<'a> BlockAccess for WorldAccess<'a> {
@@ -45,13 +48,21 @@ impl<'a> BlockAccess for WorldAccess<'a> {
         World::block_id_in(self.chunks, x, y, z)
     }
     fn set_block_id(&mut self, x: i32, y: i32, z: i32, id: u8) {
-        World::set_block_id_in(self.chunks, self.populating, x, y, z, id);
+        if World::set_block_id_in(self.chunks, self.populating, x, y, z, id) {
+            if let Some(q) = self.queue.as_deref_mut() {
+                q.push([x, y, z]);
+            }
+        }
     }
     fn get_block_meta(&mut self, x: i32, y: i32, z: i32) -> u8 {
         World::block_meta_in(self.chunks, x, y, z)
     }
     fn set_block_meta(&mut self, x: i32, y: i32, z: i32, meta: u8) {
-        World::set_block_meta_in(self.chunks, x, y, z, meta);
+        if World::set_block_meta_in(self.chunks, x, y, z, meta) {
+            if let Some(q) = self.queue.as_deref_mut() {
+                q.push([x, y, z]);
+            }
+        }
     }
     fn allows_attachment(&mut self, x: i32, y: i32, z: i32) -> bool {
         // Block::allowsAttachmentArr: registered plus the allowsAttachment flag.

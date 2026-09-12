@@ -467,6 +467,7 @@ impl World {
         let mut access = crate::decorators::WorldAccess {
             chunks: &mut self.chunks,
             populating: self.populating,
+            queue: Some(&mut self.block_updates),
         };
         let ok = if big {
             crate::generate_big_tree(&mut access, seed as i64, x, y, z)

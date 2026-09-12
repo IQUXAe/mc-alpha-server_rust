@@ -297,8 +297,8 @@ impl World {
     /// flip swaps the block 61 <-> 62 preserving metadata (mirrors
     /// `updateFurnaceBlockState`, whose no-notify set keeps the tile
     /// alive — here tiles live outside chunks, so any plain set is safe).
-    /// Swapped cells accumulate in `furnace_updates` for the server tick
-    /// to broadcast (the C++ `markBlockNeedsUpdate`).
+    /// The id/meta writes queue the cell in `block_updates` for the
+    /// server tick to broadcast.
     pub fn tick_furnaces(&mut self) {
         let cells: Vec<(i32, i32, i32)> = self.tiles.keys().copied().collect();
         for (x, y, z) in cells {
@@ -319,7 +319,6 @@ impl World {
             let new_id = if burning { 62 } else { 61 };
             if self.set_block_id(x, y, z, new_id) {
                 self.set_block_meta(x, y, z, meta);
-                self.furnace_updates.push([x, y, z]);
             }
         }
     }

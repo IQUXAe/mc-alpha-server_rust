@@ -113,6 +113,8 @@
             w.entities.get(oid).unwrap(),
             Entity::Item(e) if e.item_id == 50
         )));
+        // The break is queued for broadcast so observers see it too.
+        assert!(w.take_block_updates().contains(&[3, 64, 4]));
     }
 
     #[test]
@@ -138,6 +140,8 @@
             w.entities.get(oid).unwrap(),
             Entity::Item(e) if e.item_id == 3
         )));
+        // The break is queued for broadcast so observers see it too.
+        assert!(w.take_block_updates().contains(&[3, 64, 4]));
     }
 
     #[test]
