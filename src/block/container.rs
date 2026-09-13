@@ -13,6 +13,7 @@
 //! are intentionally not replicated (the chest stream was re-seeded per
 //! call anyway).
 
+use super::pos::{BlockPos, DropSpec};
 use crate::world::World;
 
 fn rng_int(w: &mut World, bound: i32) -> i32 {
@@ -37,47 +38,43 @@ fn gaussian(w: &mut World) -> f64 {
     (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
 }
 
-fn emit(
-    w: &mut World,
-    item_id: i32,
-    count: i32,
-    damage: i32,
-    fx: f64,
-    fy: f64,
-    fz: f64,
-    mx: f64,
-    my: f64,
-    mz: f64,
-) {
-    if count <= 0 {
+/// Item spawn: what + where + initial motion.
+#[derive(Clone, Copy, Debug)]
+struct Spawn {
+    drop: DropSpec,
+    at: (f64, f64, f64),
+    motion: (f64, f64, f64),
+}
+
+fn emit(w: &mut World, s: Spawn) {
+    if s.drop.is_empty() {
         return;
     }
-    let eid = w.spawn_item_entity(item_id, count, damage, fx, fy, fz);
+    let eid = w.spawn_item_entity(
+        s.drop.item,
+        s.drop.count,
+        s.drop.damage,
+        s.at.0,
+        s.at.1,
+        s.at.2,
+    );
     if let Some(crate::entity::table::Entity::Item(e)) = w.entities.get_mut(eid) {
-        e.body.motion = [mx, my, mz];
+        e.body.motion = [s.motion.0, s.motion.1, s.motion.2];
     }
 }
 
 /// One chest slot scattered in 10..30-sized chunks (mirrors
 /// `BlockChest::onBlockRemoval`). Returns the leftover (always 0).
-pub fn block_chest_scatter_stack(
-    w: &mut World,
-    item_id: i32,
-    count: i32,
-    damage: i32,
-    x: i32,
-    y: i32,
-    z: i32,
-) -> i32 {
-    if item_id <= 0 || count <= 0 {
-        return count.max(0);
+pub fn block_chest_scatter_stack(w: &mut World, drop: DropSpec, pos: BlockPos) -> i32 {
+    if drop.is_empty() {
+        return drop.count.max(0);
     }
     // Offsets stay in f32 like the C++ float distribution, then promote.
     // Positions add in f32 too (C++ int+float), widening only at the call.
     // Draws hoisted: one reborrow at a time (same left-to-right order).
     let (r1, r2, r3) = (rng_f32(w), rng_f32(w), rng_f32(w));
     let (ox, oy, oz) = (r1 * 0.8 + 0.1, r2 * 0.8 + 0.1, r3 * 0.8 + 0.1);
-    let mut left = count;
+    let mut left = drop.count;
     while left > 0 {
         let n = left.min(rng_int(w, 21) + 10);
         left -= n;
@@ -85,55 +82,43 @@ pub fn block_chest_scatter_stack(
         let (g1, g2, g3) = (gaussian(w), gaussian(w), gaussian(w));
         emit(
             w,
-            item_id,
-            n,
-            damage,
-            (x as f32 + ox) as f64,
-            (y as f32 + oy) as f64,
-            (z as f32 + oz) as f64,
-            g1 * 0.05,
-            g2 * 0.05 + 0.2,
-            g3 * 0.05,
+            Spawn {
+                drop: DropSpec::new(drop.item, n, drop.damage),
+                at: (
+                    (pos.x as f32 + ox) as f64,
+                    (pos.y as f32 + oy) as f64,
+                    (pos.z as f32 + oz) as f64,
+                ),
+                motion: (g1 * 0.05, g2 * 0.05 + 0.2, g3 * 0.05),
+            },
         );
     }
     left
 }
 
 /// One furnace slot scattered whole (mirrors `BlockFurnace::onBlockRemoval`).
-pub fn block_furnace_scatter_stack(
-    w: &mut World,
-    item_id: i32,
-    count: i32,
-    damage: i32,
-    x: i32,
-    y: i32,
-    z: i32,
-) {
-    if item_id <= 0 || count <= 0 {
+pub fn block_furnace_scatter_stack(w: &mut World, drop: DropSpec, pos: BlockPos) {
+    if drop.is_empty() {
         return;
     }
     let (mx, mz) = (rng_f64(w) * 0.2 - 0.1, rng_f64(w) * 0.2 - 0.1);
     emit(
         w,
-        item_id,
-        count,
-        damage,
-        x as f64 + 0.5,
-        y as f64 + 0.7,
-        z as f64 + 0.5,
-        mx,
-        0.2,
-        mz,
+        Spawn {
+            drop,
+            at: (pos.x as f64 + 0.5, pos.y as f64 + 0.7, pos.z as f64 + 0.5),
+            motion: (mx, 0.2, mz),
+        },
     );
 }
 
 /// Chest placement (mirrors `BlockChest::canPlaceBlockAt`): no more than
 /// one adjacent chest, and no adjacent double-chest.
-pub fn block_chest_can_place(w: &World, chest_id: u8, x: i32, y: i32, z: i32) -> bool {
-    let at = |dx: i32, dz: i32| w.get_block_id(x + dx, y, z + dz) == chest_id;
+pub fn block_chest_can_place(w: &World, chest_id: u8, pos: BlockPos) -> bool {
+    let at = |d: (i32, i32)| w.get_block_id(pos.x + d.0, pos.y, pos.z + d.1) == chest_id;
     let mut adjacent = 0;
-    for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-        if at(dx, dz) {
+    for d in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        if at(d) {
             adjacent += 1;
         }
     }
@@ -141,13 +126,13 @@ pub fn block_chest_can_place(w: &World, chest_id: u8, x: i32, y: i32, z: i32) ->
         return false;
     }
     // No neighbor that already has its own neighbor (would make a triple).
-    for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-        if !at(dx, dz) {
+    for d in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        if !at(d) {
             continue;
         }
-        let (nx, nz) = (x + dx, z + dz);
-        for (ex, ez) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-            if w.get_block_id(nx + ex, y, nz + ez) == chest_id {
+        let (nx, nz) = (pos.x + d.0, pos.z + d.1);
+        for e in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            if w.get_block_id(nx + e.0, pos.y, nz + e.1) == chest_id {
                 return false;
             }
         }
@@ -188,6 +173,10 @@ mod tests {
         out
     }
 
+    fn p(x: i32, y: i32, z: i32) -> BlockPos {
+        BlockPos::new(x, y, z)
+    }
+
     #[test]
     fn test_container_scenarios() {
         // 1. Chest stack of 25 scatters whole: chunk sizes vary with RNG,
@@ -195,7 +184,7 @@ mod tests {
         // The first chunk is always >= 10 (10 + roll); spawn order in the
         // table is unordered, so pin existence, not position.
         let mut w = harness(11);
-        let left = block_chest_scatter_stack(&mut w, 35, 25, 0, 10, 64, 10);
+        let left = block_chest_scatter_stack(&mut w, DropSpec::new(35, 25, 0), p(10, 64, 10));
         assert_eq!(left, 0);
         let l = spawns(&w);
         assert!(!l.is_empty(), "{l:?}");
@@ -212,16 +201,22 @@ mod tests {
 
         // 2. Empty/degenerate inputs scatter nothing.
         let mut w = harness(11);
-        assert_eq!(block_chest_scatter_stack(&mut w, 35, 0, 0, 0, 0, 0), 0);
-        assert_eq!(block_chest_scatter_stack(&mut w, 0, 5, 0, 0, 0, 0), 5);
+        assert_eq!(
+            block_chest_scatter_stack(&mut w, DropSpec::new(35, 0, 0), p(0, 0, 0)),
+            0
+        );
+        assert_eq!(
+            block_chest_scatter_stack(&mut w, DropSpec::new(0, 5, 0), p(0, 0, 0)),
+            5
+        );
         assert!(spawns(&w).is_empty());
-        block_furnace_scatter_stack(&mut w, 0, 5, 0, 0, 0, 0);
+        block_furnace_scatter_stack(&mut w, DropSpec::new(0, 5, 0), p(0, 0, 0));
         assert!(spawns(&w).is_empty());
 
         // 3. Furnace slot drops whole at block center-top (motion is
         // RNG-driven, only finiteness is pinned).
         let mut w = harness(11);
-        block_furnace_scatter_stack(&mut w, 265, 3, 0, 1, 2, 3);
+        block_furnace_scatter_stack(&mut w, DropSpec::new(265, 3, 0), p(1, 2, 3));
         let l = spawns(&w);
         assert_eq!(l.len(), 1);
         assert_eq!((l[0].0, l[0].1), (265, 3));
@@ -232,14 +227,14 @@ mod tests {
         // 4. Chest placement: solo ok, double ok, triple rejected.
         let mut w = harness(11);
         stage(&mut w, &[]);
-        assert!(block_chest_can_place(&w, 54, 0, 64, 0));
+        assert!(block_chest_can_place(&w, 54, p(0, 64, 0)));
         stage(&mut w, &[(1, 64, 0, 54)]);
-        assert!(block_chest_can_place(&w, 54, 0, 64, 0));
+        assert!(block_chest_can_place(&w, 54, p(0, 64, 0)));
         stage(&mut w, &[(1, 64, 0, 54), (2, 64, 0, 54)]);
-        assert!(!block_chest_can_place(&w, 54, 0, 64, 0));
+        assert!(!block_chest_can_place(&w, 54, p(0, 64, 0)));
         // Two adjacent directly: also rejected.
         let mut w = harness(11);
         stage(&mut w, &[(1, 64, 0, 54), (0, 64, 1, 54)]);
-        assert!(!block_chest_can_place(&w, 54, 0, 64, 0));
+        assert!(!block_chest_can_place(&w, 54, p(0, 64, 0)));
     }
 }

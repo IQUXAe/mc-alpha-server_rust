@@ -1,22 +1,24 @@
 //! Block placement, neighbor updates, drops and tick scheduling on [`World`].
 //! Split out of `world.rs`; behavior unchanged.
 
-use crate::block::table::block_properties_get;
 use crate::block::fire::{block_fire_added, block_fire_neighbor, block_fire_tick};
+use crate::block::pos::{BlockPos, DropSpec};
+use crate::block::table::block_properties_get;
 use crate::block::ticks::{
-     block_base_drop, block_cactus_added, block_cactus_neighbor, block_cactus_tick,
-     block_crops_added, block_crops_neighbor, block_crops_tick, block_flower_neighbor,
-     block_flower_tick, block_fluid_added, block_fluid_neighbor, block_fluid_tick,
-     block_leaves_added, block_leaves_neighbor, block_leaves_tick, block_mushroom_neighbor,
-     block_reed_added, block_reed_neighbor, block_reed_tick, block_sand_added, block_sand_neighbor,
-     block_sand_tick, block_sapling_added, block_sapling_neighbor, block_sapling_tick,
-     block_soil_added, block_soil_neighbor, block_soil_tick, block_torch_added, block_torch_neighbor,
+    block_base_drop, block_cactus_added, block_cactus_neighbor, block_cactus_tick,
+    block_crops_added, block_crops_neighbor, block_crops_tick, block_flower_neighbor,
+    block_flower_tick, block_fluid_added, block_fluid_neighbor, block_fluid_tick,
+    block_leaves_added, block_leaves_neighbor, block_leaves_tick, block_mushroom_neighbor,
+    block_reed_added, block_reed_neighbor, block_reed_tick, block_sand_added, block_sand_neighbor,
+    block_sand_tick, block_sapling_added, block_sapling_neighbor, block_sapling_tick,
+    block_soil_added, block_soil_neighbor, block_soil_tick, block_torch_added,
+    block_torch_neighbor, CropIds,
 };
 use crate::entity::table::{Body, Entity, EntityId};
 use crate::material::Material;
 use crate::world::{
-    TileData, WORLD_HEIGHT, World, animal_kind_of, animal_string_id, is_air_material, material_of,
-    mob_kind_of, mob_string_id, pending_creature,
+    animal_kind_of, animal_string_id, is_air_material, material_of, mob_kind_of, mob_string_id,
+    pending_creature, TileData, World, WORLD_HEIGHT,
 };
 
 /// Alpha wheat/seeds item ids for the crops drivers.
@@ -31,7 +33,29 @@ impl World {
     /// damage is always 0.
     pub(crate) fn native_drop_ids(bid: u8) -> (i32, i32, i32) {
         let p = block_properties_get(bid as u32);
-        (if p.id_dropped != 0 { p.id_dropped } else { bid as i32 }, p.quantity_dropped, 0)
+        (
+            if p.id_dropped != 0 {
+                p.id_dropped
+            } else {
+                bid as i32
+            },
+            p.quantity_dropped,
+            0,
+        )
+    }
+
+    pub(crate) fn native_drop_spec(bid: u8) -> DropSpec {
+        let (d, q, g) = Self::native_drop_ids(bid);
+        DropSpec::new(d, q, g)
+    }
+
+    fn crop_ids(bid: u8) -> CropIds {
+        CropIds {
+            block: bid,
+            crop: bid,
+            wheat: WHEAT_ITEM_ID,
+            seeds: SEEDS_ITEM_ID,
+        }
     }
 
     /// Placement write (mirrors `setBlockWithNotify`): run the removal hook
@@ -93,9 +117,9 @@ impl World {
     fn block_added(&mut self, x: i32, y: i32, z: i32, bid: u8) {
         match bid {
             54 => {
-                self.tiles.entry((x, y, z)).or_insert_with(|| {
-                    TileData::Chest(crate::tile_entity::chest::chest_create())
-                });
+                self.tiles
+                    .entry((x, y, z))
+                    .or_insert_with(|| TileData::Chest(crate::tile_entity::chest::chest_create()));
             }
             61 | 62 => {
                 self.tiles.entry((x, y, z)).or_insert_with(|| {
@@ -103,31 +127,31 @@ impl World {
                 });
             }
             63 | 68 => {
-                self.tiles.entry((x, y, z)).or_insert_with(|| {
-                    TileData::Sign(crate::tile_entity::sign::sign_create())
-                });
+                self.tiles
+                    .entry((x, y, z))
+                    .or_insert_with(|| TileData::Sign(crate::tile_entity::sign::sign_create()));
             }
             _ => {}
         }
         match bid {
-            12 | 13 => block_sand_added(&mut *self, bid, x, y, z),
+            12 | 13 => block_sand_added(&mut *self, bid, BlockPos::new(x, y, z)),
             8..=11 => {
                 let rate = if self.material_at(x, y, z) == Material::LAVA {
                     30
                 } else {
                     5
                 };
-                block_fluid_added(&mut *self, bid, rate, x, y, z);
+                block_fluid_added(&mut *self, bid, rate, BlockPos::new(x, y, z));
                 self.fluid_lava_contact(x, y, z, bid);
             }
-            81 => block_cactus_added(&mut *self, bid, x, y, z),
-            83 => block_reed_added(&mut *self, bid, x, y, z),
-            50 => block_torch_added(&mut *self, bid, x, y, z),
-            18 => block_leaves_added(&mut *self, bid, x, y, z),
-            6 => block_sapling_added(&mut *self, bid, x, y, z),
-            59 => block_crops_added(&mut *self, bid, x, y, z),
-            60 => block_soil_added(&mut *self, bid, x, y, z),
-            51 => block_fire_added(&mut *self, bid, 10, x, y, z),
+            81 => block_cactus_added(&mut *self, bid, BlockPos::new(x, y, z)),
+            83 => block_reed_added(&mut *self, bid, BlockPos::new(x, y, z)),
+            50 => block_torch_added(&mut *self, bid, BlockPos::new(x, y, z)),
+            18 => block_leaves_added(&mut *self, bid, BlockPos::new(x, y, z)),
+            6 => block_sapling_added(&mut *self, bid, BlockPos::new(x, y, z)),
+            59 => block_crops_added(&mut *self, bid, BlockPos::new(x, y, z)),
+            60 => block_soil_added(&mut *self, bid, BlockPos::new(x, y, z)),
+            51 => block_fire_added(&mut *self, bid, 10, BlockPos::new(x, y, z)),
             _ => {}
         }
     }
@@ -141,49 +165,70 @@ impl World {
         }
         let _meta = self.get_block_meta(x, y, z);
         match bid {
-            12 | 13 => block_sand_neighbor(&mut *self, bid, x, y, z),
+            12 | 13 => block_sand_neighbor(&mut *self, bid, BlockPos::new(x, y, z)),
             8..=11 => {
                 let rate = if self.material_at(x, y, z) == Material::LAVA {
                     30
                 } else {
                     5
                 };
-                block_fluid_neighbor(&mut *self, bid, rate, x, y, z);
+                block_fluid_neighbor(&mut *self, bid, rate, BlockPos::new(x, y, z));
                 self.fluid_lava_contact(x, y, z, bid);
             }
             37 | 38 => {
-                let (d, q, g) = Self::native_drop_ids(bid);
-                block_flower_neighbor(&mut *self, d, q, g, x, y, z);
+                block_flower_neighbor(
+                    &mut *self,
+                    Self::native_drop_spec(bid),
+                    BlockPos::new(x, y, z),
+                );
             }
             39 | 40 => {
-                let (d, q, g) = Self::native_drop_ids(bid);
-                block_mushroom_neighbor(&mut *self, d, q, g, x, y, z);
+                block_mushroom_neighbor(
+                    &mut *self,
+                    Self::native_drop_spec(bid),
+                    BlockPos::new(x, y, z),
+                );
             }
             50 => {
-                let (d, q, g) = Self::native_drop_ids(bid);
-                block_torch_neighbor(&mut *self, d, q, g, x, y, z);
+                block_torch_neighbor(
+                    &mut *self,
+                    Self::native_drop_spec(bid),
+                    BlockPos::new(x, y, z),
+                );
             }
             78 => self.snow_neighbor(x, y, z),
             81 => {
-                let (d, q, g) = Self::native_drop_ids(bid);
-                block_cactus_neighbor(&mut *self, bid, d, q, g, x, y, z);
+                block_cactus_neighbor(
+                    &mut *self,
+                    bid,
+                    Self::native_drop_spec(bid),
+                    BlockPos::new(x, y, z),
+                );
             }
             83 => {
-                let (d, q, g) = Self::native_drop_ids(bid);
-                block_reed_neighbor(&mut *self, bid, d, q, g, x, y, z);
+                block_reed_neighbor(
+                    &mut *self,
+                    bid,
+                    Self::native_drop_spec(bid),
+                    BlockPos::new(x, y, z),
+                );
             }
             18 => {
                 let mut guard = self.leaves_guard;
-                block_leaves_neighbor(&mut *self, bid, bid, &mut guard, x, y, z);
+                block_leaves_neighbor(&mut *self, bid, bid, &mut guard, BlockPos::new(x, y, z));
                 self.leaves_guard = guard;
             }
             6 => {
-                let (d, q, g) = Self::native_drop_ids(bid);
-                block_sapling_neighbor(&mut *self, bid, d, q, g, x, y, z);
+                block_sapling_neighbor(
+                    &mut *self,
+                    bid,
+                    Self::native_drop_spec(bid),
+                    BlockPos::new(x, y, z),
+                );
             }
-            59 => block_crops_neighbor(&mut *self, bid, bid, WHEAT_ITEM_ID, SEEDS_ITEM_ID, x, y, z),
-            60 => block_soil_neighbor(&mut *self, bid, x, y, z),
-            51 => block_fire_neighbor(&mut *self, x, y, z),
+            59 => block_crops_neighbor(&mut *self, Self::crop_ids(bid), BlockPos::new(x, y, z)),
+            60 => block_soil_neighbor(&mut *self, bid, BlockPos::new(x, y, z)),
+            51 => block_fire_neighbor(&mut *self, BlockPos::new(x, y, z)),
             63 | 68 => {}
             _ => {}
         }
@@ -196,9 +241,8 @@ impl World {
     /// attachable block below, else drops and vanishes.
     fn snow_neighbor(&mut self, x: i32, y: i32, z: i32) {
         let below = self.get_block_id(x, y - 1, z);
-        let ok = below != 0
-            && block_properties_get(below as u32).allows_attachment
-            && material_of(block_properties_get(below as u32).material).is_solid();
+        let props = block_properties_get(below as u32);
+        let ok = below != 0 && props.allows_attachment && material_of(props.material).is_solid();
         if !ok {
             self.drop_block_for(78, 0, x, y, z);
             self.apply_set_notify(x, y, z, 0);
@@ -221,14 +265,15 @@ impl World {
         // Player harvest of crops (BlockCrops.onBlockDestroyedByPlayer):
         // wheat when mature + 3 seed rolls. Multi-drop, so spawn here.
         if bid == 59 {
+            let pos = BlockPos::new(x, y, z);
             if meta >= 7 {
-                block_base_drop(&mut *self, 296, 1, 0, x, y, z, 1.0);
+                block_base_drop(&mut *self, DropSpec::new(296, 1, 0), pos, 1.0);
             }
             for _ in 0..3 {
                 // Draw from world RNG to keep the stream stable.
                 let r = self.rng.next_int_bound(15);
                 if r <= meta as i32 {
-                    block_base_drop(&mut *self, 295, 1, 0, x, y, z, 1.0);
+                    block_base_drop(&mut *self, DropSpec::new(295, 1, 0), pos, 1.0);
                 }
             }
             return;
@@ -238,7 +283,12 @@ impl World {
             return;
         }
         // Immature crops drop nothing (rolled returns 0,0) — no seeds here.
-        block_base_drop(&mut *self, drop, qty, 0, x, y, z, 1.0);
+        block_base_drop(
+            &mut *self,
+            DropSpec::new(drop, qty, 0),
+            BlockPos::new(x, y, z),
+            1.0,
+        );
     }
 
     /// idDropped/quantityDropped rolls that need world RNG or metadata
@@ -309,12 +359,8 @@ impl World {
                     if slot.count > 0 {
                         block_furnace_scatter_stack(
                             &mut *self,
-                            slot.item_id,
-                            slot.count,
-                            slot.damage,
-                            x,
-                            y,
-                            z,
+                            DropSpec::new(slot.item_id, slot.count, slot.damage),
+                            BlockPos::new(x, y, z),
                         );
                     }
                 }
@@ -324,12 +370,8 @@ impl World {
                     if slot.count > 0 {
                         block_chest_scatter_stack(
                             &mut *self,
-                            slot.item_id,
-                            slot.count,
-                            slot.damage,
-                            x,
-                            y,
-                            z,
+                            DropSpec::new(slot.item_id, slot.count, slot.damage),
+                            BlockPos::new(x, y, z),
                         );
                     }
                 }
@@ -356,7 +398,12 @@ impl World {
             self.material_at(x, y - 1, z).is_solid()
         };
         if !supported {
-            block_base_drop(&mut *self, SIGN_ITEM_ID, 1, 0, x, y, z, 1.0);
+            block_base_drop(
+                &mut *self,
+                DropSpec::new(SIGN_ITEM_ID, 1, 0),
+                BlockPos::new(x, y, z),
+                1.0,
+            );
             self.set_block_id(x, y, z, 0);
         }
     }
@@ -368,45 +415,53 @@ impl World {
             return;
         }
         match bid {
-            12 | 13 => block_sand_tick(&mut *self, bid, x, y, z),
+            12 | 13 => block_sand_tick(&mut *self, bid, BlockPos::new(x, y, z)),
             8..=11 => {
                 let lava = self.material_at(x, y, z) == Material::LAVA;
-                block_fluid_tick(&mut *self, bid, lava, x, y, z);
+                block_fluid_tick(&mut *self, bid, lava, BlockPos::new(x, y, z));
             }
             37 | 38 => {
-                let (d, q, g) = Self::native_drop_ids(bid);
-                block_flower_tick(&mut *self, d, q, g, x, y, z);
+                block_flower_tick(&mut *self, Self::native_drop_spec(bid), BlockPos::new(x, y, z));
             }
             81 => {
-                let (d, q, g) = Self::native_drop_ids(bid);
-                block_cactus_tick(&mut *self, bid, d, q, g, x, y, z);
+                block_cactus_tick(&mut *self, bid, Self::native_drop_spec(bid), BlockPos::new(x, y, z));
             }
             83 => {
-                let (d, q, g) = Self::native_drop_ids(bid);
-                block_reed_tick(&mut *self, bid, d, q, g, x, y, z);
+                block_reed_tick(&mut *self, bid, Self::native_drop_spec(bid), BlockPos::new(x, y, z));
             }
             18 => {
                 let mut guard = self.leaves_guard;
                 // Decayed leaves drop a sapling 1/20 (BlockLeaves);
                 // the tick itself always clears the cell.
                 let (did, dqty) = if self.rng.next_int_bound(20) == 0 { (6, 1) } else { (0, 0) };
-                block_leaves_tick(&mut *self, bid, bid, did, dqty, 0, &mut guard, x, y, z);
+                block_leaves_tick(
+                    &mut *self,
+                    bid,
+                    bid,
+                    DropSpec::new(did, dqty, 0),
+                    &mut guard,
+                    BlockPos::new(x, y, z),
+                );
                 self.leaves_guard = guard;
             }
             6 => {
-                let (d, q, g) = Self::native_drop_ids(bid);
-                let action = block_sapling_tick(&mut *self, bid, d, q, g, x, y, z);
+                let action = block_sapling_tick(
+                    &mut *self,
+                    bid,
+                    Self::native_drop_spec(bid),
+                    BlockPos::new(x, y, z),
+                );
                 if action.kind == 1 {
                     self.grow_sapling(x, y, z, bid, action.seed);
                 }
             }
-            59 => block_crops_tick(&mut *self, bid, bid, WHEAT_ITEM_ID, SEEDS_ITEM_ID, x, y, z),
-            60 => block_soil_tick(&mut *self, bid, x, y, z),
-            51 => block_fire_tick(&mut *self, bid, 10, x, y, z),
+            59 => block_crops_tick(&mut *self, Self::crop_ids(bid), BlockPos::new(x, y, z)),
+            60 => block_soil_tick(&mut *self, bid, BlockPos::new(x, y, z)),
+            51 => block_fire_tick(&mut *self, bid, 10, BlockPos::new(x, y, z)),
             50
                 // Torch re-seats meta 0 (Java BlockTorch.updateTick).
                 if self.get_block_meta(x, y, z) == 0 => {
-                    block_torch_added(&mut *self, bid, x, y, z);
+                    block_torch_added(&mut *self, bid, BlockPos::new(x, y, z));
                 }
             2 => self.grass_tick(x, y, z),
             78
@@ -464,17 +519,18 @@ impl World {
     pub(crate) fn grow_sapling(&mut self, x: i32, y: i32, z: i32, bid: u8, seed: u64) {
         self.apply_set_notify(x, y, z, 0);
         let big = self.rng.next_int_bound(10) == 0;
-        let mut access = crate::decorators::WorldAccess {
-            chunks: &mut self.chunks,
-            populating: self.populating,
-            queue: Some(&mut self.block_updates),
+        let ok = {
+            let mut access = crate::decorators::WorldAccess {
+                chunks: &mut self.chunks,
+                populating: self.populating,
+                queue: Some(&mut self.block_updates),
+            };
+            if big {
+                crate::generate_big_tree(&mut access, seed as i64, x, y, z)
+            } else {
+                crate::generate_tree(&mut access, seed as i64, x, y, z)
+            }
         };
-        let ok = if big {
-            crate::generate_big_tree(&mut access, seed as i64, x, y, z)
-        } else {
-            crate::generate_tree(&mut access, seed as i64, x, y, z)
-        };
-        drop(access);
         if !ok {
             self.apply_set_notify(x, y, z, bid);
         }

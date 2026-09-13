@@ -2,13 +2,13 @@
 //! Split out of `world.rs`; behavior unchanged.
 
 use crate::entity::ai::{
-     ai_animal_path_weight, ai_mob_path_weight, chase_speed, face_run, steer_run,
-     wander_pick,
+    ai_animal_path_weight, ai_mob_path_weight, chase_speed, face_run, steer_run, wander_pick,
+    SteerIn,
 };
 use crate::entity::living::{HeadingIo, MoveFeedback, living_fall_damage, living_heading_run};
 use crate::entity::physics::entity_push;
 use crate::entity::table::{
-    AnimalKind, Entity, EntityId, MobKind, mob_attack_reach, mob_burns_in_daylight,
+    mob_attack_reach, mob_burns_in_daylight, AnimalKind, Entity, EntityId, MobKind,
 };
 use crate::material::Material;
 use crate::math_helper::{floor_double, sqrt_float};
@@ -275,9 +275,16 @@ impl World {
         let chunks = &self.chunks;
         let is_liquid = |x: i32, y: i32, z: i32| World::material_in(chunks, x, y, z).is_liquid();
         let blocks = |x: i32, y: i32, z: i32| World::material_in(chunks, x, y, z).blocks_movement();
+        let q = crate::pathfinder::BlockQueries {
+            is_liquid: &is_liquid,
+            blocks_movement: &blocks,
+        };
         find_path_native(
-            &is_liquid, &blocks, start.0, start.1, start.2, target.0, target.1, target.2, width,
-            height, max_dist,
+            &q,
+            [start.0, start.1, start.2],
+            [target.0, target.1, target.2],
+            [width, height],
+            max_dist,
         )
         .into_iter()
         .map(|(x, y, z)| [x, y, z])
@@ -478,8 +485,14 @@ impl World {
                     Some(t) => (t.body().pos[0] - snap.pos[0], t.body().pos[2] - snap.pos[2]),
                     None => (0.0, 0.0),
                 };
-                let steer =
-                    steer_run(dx, dz, dy, snap.yaw, false, target.is_some(), tdx, tdz, 0.0);
+                let steer = steer_run(SteerIn {
+                    delta: [dx, dy, dz],
+                    cur_yaw: snap.yaw,
+                    attacking: false,
+                    has_target: target.is_some(),
+                    target: [tdx, tdz],
+                    forward_in: 0.0,
+                });
                 snap.yaw = steer.new_yaw;
                 *strafe = steer.strafe;
                 *forward = steer.forward;

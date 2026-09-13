@@ -83,21 +83,24 @@ pub struct SteerOut {
     pub jump: bool,
 }
 
+/// Steering input bundled to keep the arity clippy-clean.
+#[derive(Clone, Copy, Debug)]
+pub struct SteerIn {
+    pub delta: [f64; 3],
+    pub cur_yaw: f32,
+    pub attacking: bool,
+    pub has_target: bool,
+    pub target: [f64; 2],
+    pub forward_in: f32,
+}
+
 /// Pure steering core
 /// (mirrors the steering block in `EntityCreature::followPath`).
-pub fn steer_run(
-    dx: f64,
-    dz: f64,
-    dy: f64,
-    cur_yaw: f32,
-    is_attacking: bool,
-    has_target: bool,
-    tgt_dx: f64,
-    tgt_dz: f64,
-    forward_in: f32,
-) -> SteerOut {
+pub fn steer_run(v: SteerIn) -> SteerOut {
+    let (dx, dy, dz) = (v.delta[0], v.delta[1], v.delta[2]);
+    let (tgt_dx, tgt_dz) = (v.target[0], v.target[1]);
     let target_yaw = (dz.atan2(dx) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
-    let mut yaw_delta = target_yaw - cur_yaw;
+    let mut yaw_delta = target_yaw - v.cur_yaw;
     while yaw_delta < -180.0 {
         yaw_delta += 360.0;
     }
@@ -105,15 +108,15 @@ pub fn steer_run(
         yaw_delta -= 360.0;
     }
     yaw_delta = yaw_delta.clamp(-30.0, 30.0);
-    let new_yaw = cur_yaw + yaw_delta;
+    let new_yaw = v.cur_yaw + yaw_delta;
 
-    let (mut strafe, mut forward) = (0.0f32, forward_in);
-    if is_attacking && has_target {
+    let (mut strafe, mut forward) = (0.0f32, v.forward_in);
+    if v.attacking && v.has_target {
         let backup_yaw = new_yaw;
         let face_yaw = (tgt_dz.atan2(tgt_dx) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
         let strafe_angle = (backup_yaw - face_yaw + 90.0) * (std::f32::consts::PI / 180.0);
-        strafe = -sin(strafe_angle) * forward_in;
-        forward = cos(strafe_angle) * forward_in;
+        strafe = -sin(strafe_angle) * v.forward_in;
+        forward = cos(strafe_angle) * v.forward_in;
     }
 
     SteerOut { new_yaw, strafe, forward, jump: dy > 0.0 }
@@ -177,7 +180,14 @@ mod tests {
     #[test]
     fn test_steer_straight_ahead() {
         // Point due east of a creature facing east (yaw -90): no turn.
-        let out = steer_run(5.0, 0.0, 0.0, -90.0, false, false, 0.0, 0.0, 0.0);
+        let out = steer_run(SteerIn {
+            delta: [5.0, 0.0, 0.0],
+            cur_yaw: -90.0,
+            attacking: false,
+            has_target: false,
+            target: [0.0, 0.0],
+            forward_in: 0.0,
+        });
         assert!((out.new_yaw + 90.0).abs() < 1e-4);
         assert_eq!(out.strafe, 0.0);
         assert!(!out.jump);
@@ -187,7 +197,14 @@ mod tests {
     fn test_steer_turn_rate_limited() {
         // Point due west while facing east: 180 normalised to -180,
         // clamped to a -30 turn.
-        let out = steer_run(-5.0, 0.0, 1.0, -90.0, false, false, 0.0, 0.0, 0.0);
+        let out = steer_run(SteerIn {
+            delta: [-5.0, 1.0, 0.0],
+            cur_yaw: -90.0,
+            attacking: false,
+            has_target: false,
+            target: [0.0, 0.0],
+            forward_in: 0.0,
+        });
         assert!((out.new_yaw + 120.0).abs() < 1e-4);
         assert!(out.jump);
     }
@@ -195,7 +212,14 @@ mod tests {
         #[test]
     fn test_steer_strafe_uses_input_forward() {
         // Attacking: strafe formula applied to the passed forward value.
-        let out = steer_run(5.0, 0.0, 0.0, -90.0, true, true, 5.0, 0.0, 0.7);
+        let out = steer_run(SteerIn {
+            delta: [5.0, 0.0, 0.0],
+            cur_yaw: -90.0,
+            attacking: true,
+            has_target: true,
+            target: [5.0, 0.0],
+            forward_in: 0.7,
+        });
         // Target straight ahead: strafe angle 90deg -> sin=1, cos~0.
         assert!((out.strafe + 0.7).abs() < 1e-4);
         assert!(out.forward.abs() < 1e-4);
@@ -209,7 +233,14 @@ mod tests {
     #[test]
     fn test_steer_run() {
         // Point east-north-east: yaw turns partway toward it, jump from dy > 0.
-        let a = steer_run(5.0, 1.0, 1.0, -90.0, true, true, 5.0, 0.0, 0.7);
+        let a = steer_run(SteerIn {
+            delta: [5.0, 1.0, 1.0],
+            cur_yaw: -90.0,
+            attacking: true,
+            has_target: true,
+            target: [5.0, 0.0],
+            forward_in: 0.7,
+        });
         assert!((a.new_yaw + 78.69006).abs() < 1e-4);
         assert!(a.jump);
     }

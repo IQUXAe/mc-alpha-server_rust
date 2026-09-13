@@ -7,8 +7,8 @@ use crate::inventory::ItemStack;
 use crate::item_data::{item_food_heal, item_max_damage};
 use crate::item_use::item_food_bite;
 use crate::item_verbs::{
-    ItemUseWorld, item_block_use, item_boat_aim, item_boat_throw,
-    item_flint_use, item_hoe_use, item_seeds_use, item_sign_use,
+    item_block_use, item_boat_aim, item_boat_throw, item_flint_use, item_hoe_use, item_seeds_use,
+    item_sign_use, BlockPlace, BoatAimIn, ItemUseWorld,
 };
 use crate::session::play::PlaySession;
 use crate::session::{SessionCtx, SessionOutcome};
@@ -228,10 +228,14 @@ impl PlaySession {
         let yaw = ctx.world.entities.get(me).map(|e| e.body().yaw).unwrap_or(0.0);
         // Explicit borrow split: the world and the session reborrowed into
         // the verb context.
-        let mut u = ItemUseWorld { world: &mut *ctx.world, session: &mut *self };
-        let used = match s.item_id {
+        let mut u = ItemUseWorld {
+            world: &mut *ctx.world,
+            session: &mut *self,
+        };
+        let pos = crate::block::pos::BlockPos::new(x, y, z);
+        match s.item_id {
             290..=294 => {
-                if !item_hoe_use(&mut u, 295, x, y, z) {
+                if !item_hoe_use(&mut u, 295, pos) {
                     false
                 } else {
                     let max = item_max_damage(s.item_id);
@@ -240,7 +244,7 @@ impl PlaySession {
                 }
             }
             295 => {
-                if side != 1 || !item_seeds_use(&mut u, x, y, z, side) {
+                if side != 1 || !item_seeds_use(&mut u, pos, side) {
                     false
                 } else {
                     if s.count > 0 {
@@ -251,7 +255,7 @@ impl PlaySession {
             }
             259 => {
                 let max = item_max_damage(s.item_id);
-                let out = item_flint_use(&mut u, s.damage, max, x, y, z, side);
+                let out = item_flint_use(&mut u, s.damage, max, pos, side);
                 s.damage = out.new_damage;
                 if out.broke {
                     s.count = 0;
@@ -259,7 +263,7 @@ impl PlaySession {
                 true
             }
             323 => {
-                if !item_sign_use(&mut u, x, y, z, side, yaw) {
+                if !item_sign_use(&mut u, pos, side, yaw) {
                     false
                 } else {
                     if s.count > 0 {
@@ -270,8 +274,13 @@ impl PlaySession {
             }
             333 => false,
             1..=255 => {
-                if !item_block_use(&mut u, s.item_id as u8, s.count, x, y, z, side, yaw)
-                {
+                let place = BlockPlace {
+                    block_id: s.item_id as u8,
+                    stack_count: s.count,
+                    side,
+                    yaw,
+                };
+                if !item_block_use(&mut u, place, pos) {
                     false
                 } else {
                     if s.count > 0 {
@@ -281,9 +290,7 @@ impl PlaySession {
                 }
             }
             _ => false,
-        };
-        drop(u);
-        used
+        }
     }
 
     /// Right-click in air (mirrors `useItem`: food bites with heal,
@@ -331,21 +338,22 @@ impl PlaySession {
                     }
                     None => return false,
                 };
-            let aim = item_boat_aim(
-                prev_yaw, pyaw, prev_pitch, ppitch, prev_pos[0], ppos[0], prev_pos[1], ppos[1],
-                prev_pos[2], ppos[2], pyoff,
-            );
-            let mut u = ItemUseWorld { world: &mut *ctx.world, session: &mut *self };
-            let Some([hx, hy, hz]) = item_boat_throw(
-                &mut u,
-                aim.sx,
-                aim.sy,
-                aim.sz,
-                aim.ex,
-                aim.ey,
-                aim.ez,
-            ) else {
-                drop(u);
+            let aim = item_boat_aim(BoatAimIn {
+                prev_yaw,
+                yaw: pyaw,
+                prev_pitch,
+                pitch: ppitch,
+                prev: prev_pos,
+                cur: ppos,
+                y_offset: pyoff,
+            });
+            let mut u = ItemUseWorld {
+                world: &mut *ctx.world,
+                session: &mut *self,
+            };
+            let Some([hx, hy, hz]) =
+                item_boat_throw(&mut u, [aim.sx, aim.sy, aim.sz], [aim.ex, aim.ey, aim.ez])
+            else {
                 return false;
             };
             drop(u);

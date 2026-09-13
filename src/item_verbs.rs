@@ -9,6 +9,7 @@
 //! Face-offset tables, soil rules, and growth constants are centralized
 //! here so the six verbs share one tested source of truth.
 
+use crate::block::pos::{BlockPos, DropSpec};
 use crate::entity::table::Entity;
 use crate::item_use::{item_furnace_facing, item_sign_yaw_meta};
 use crate::math_helper::{cos, sin};
@@ -34,8 +35,8 @@ fn place_offset(side: i32) -> Option<(i32, i32, i32)> {
     Some((PLACE_DX[s], PLACE_DY[s], PLACE_DZ[s]))
 }
 
-fn q_id(u: &mut ItemUseWorld, x: i32, y: i32, z: i32) -> u8 {
-    u.world.get_block_id(x, y, z)
+fn q_id(u: &mut ItemUseWorld, pos: BlockPos) -> u8 {
+    u.world.id_at(pos)
 }
 fn rng_int(u: &mut ItemUseWorld, bound: i32) -> i32 {
     if bound <= 0 {
@@ -49,8 +50,8 @@ fn rng_f64(u: &mut ItemUseWorld) -> f64 {
 
 /// Collision-box check for cover/placement: fluids never collide, the rest
 /// follow the block-type table.
-fn is_collidable(w: &World, x: i32, y: i32, z: i32) -> bool {
-    let bid = w.get_block_id(x, y, z);
+fn is_collidable(w: &World, pos: BlockPos) -> bool {
+    let bid = w.id_at(pos);
     let props = crate::block::table::block_properties_get(bid as u32);
     bid != 0
         && props.block_type != crate::block::table::BlockType::Fluid as u8
@@ -58,34 +59,34 @@ fn is_collidable(w: &World, x: i32, y: i32, z: i32) -> bool {
 }
 
 /// canBlockStay drivers run straight on the live world.
-fn can_stay(u: &mut ItemUseWorld, id: u8, x: i32, y: i32, z: i32) -> bool {
+fn can_stay(u: &mut ItemUseWorld, id: u8, pos: BlockPos) -> bool {
     let w = &mut *u.world;
     match id {
-        37 | 38 => crate::block::ticks::block_flower_can_stay(w, x, y, z),
-        39 | 40 => crate::block::ticks::block_mushroom_can_stay(w, x, y, z),
-        50 => crate::block::ticks::block_torch_can_stay(w, x, y, z),
-        81 => crate::block::ticks::block_cactus_can_stay(w, x, y, z),
-        83 => crate::block::ticks::block_reed_can_stay(w, x, y, z),
-        6 => crate::block::ticks::block_sapling_can_stay(w, x, y, z),
-        59 => crate::block::ticks::block_crops_can_stay(w, id, x, y, z),
+        37 | 38 => crate::block::ticks::block_flower_can_stay(w, pos),
+        39 | 40 => crate::block::ticks::block_mushroom_can_stay(w, pos),
+        50 => crate::block::ticks::block_torch_can_stay(w, pos),
+        81 => crate::block::ticks::block_cactus_can_stay(w, pos),
+        83 => crate::block::ticks::block_reed_can_stay(w, pos),
+        6 => crate::block::ticks::block_sapling_can_stay(w, pos),
+        59 => crate::block::ticks::block_crops_can_stay(w, id, pos),
         _ => true,
     }
 }
 
 /// Placement volume check (mirrors `isPlacementVolumeClear`): no live
 /// boat/living intersecting the target box.
-fn placement_clear(u: &mut ItemUseWorld, id: u8, x: i32, y: i32, z: i32) -> bool {
+fn placement_clear(u: &mut ItemUseWorld, id: u8, pos: BlockPos) -> bool {
     let props = crate::block::table::block_properties_get(id as u32);
     if !crate::world::has_collision_box(props.block_type) {
         return true;
     }
     let mask = crate::aabb::AxisAlignedBB::get_bounding_box(
-        x as f64 + props.min_x as f64,
-        y as f64 + props.min_y as f64,
-        z as f64 + props.min_z as f64,
-        x as f64 + props.max_x as f64,
-        y as f64 + props.max_y as f64,
-        z as f64 + props.max_z as f64,
+        pos.x as f64 + props.min_x as f64,
+        pos.y as f64 + props.min_y as f64,
+        pos.z as f64 + props.min_z as f64,
+        pos.x as f64 + props.max_x as f64,
+        pos.y as f64 + props.max_y as f64,
+        pos.z as f64 + props.max_z as f64,
     );
     for oid in u.world.entities.alive_ids() {
         let blocks = matches!(
@@ -108,86 +109,76 @@ fn placement_clear(u: &mut ItemUseWorld, id: u8, x: i32, y: i32, z: i32) -> bool
 
 /// Torch facing like `onBlockPlaced` (the only `block_placed` override).
 /// The attach metadata reads straight from the live world.
-fn torch_placed(u: &mut ItemUseWorld, id: u8, x: i32, y: i32, z: i32, side: i32) {
+fn torch_placed(u: &mut ItemUseWorld, id: u8, pos: BlockPos, side: i32) {
     if id != 50 {
         return;
     }
     let w = &mut *u.world;
-    let meta = crate::block::ticks::block_torch_attach_meta(w, side, x, y, z);
-    w.set_block_id(x, y, z, id);
-    w.set_block_meta(x, y, z, meta);
+    let meta = crate::block::ticks::block_torch_attach_meta(w, side, pos);
+    w.set_id_at(pos, id);
+    w.set_meta_at(pos, meta);
 }
 
 /// Loose-item spawn with motion.
-fn spawn_drop(
-    u: &mut ItemUseWorld,
-    item_id: i32,
-    count: i32,
-    damage: i32,
-    fx: f64,
-    fy: f64,
-    fz: f64,
-    mx: f64,
-    my: f64,
-    mz: f64,
-) {
-    let eid = u.world.spawn_item_entity(item_id, count, damage, fx, fy, fz);
+#[derive(Clone, Copy, Debug)]
+struct ItemSpawn {
+    drop: DropSpec,
+    at: (f64, f64, f64),
+    motion: (f64, f64, f64),
+}
+
+fn spawn_drop(u: &mut ItemUseWorld, s: ItemSpawn) {
+    if s.drop.is_empty() {
+        return;
+    }
+    let eid = u.world.spawn_item_entity(
+        s.drop.item,
+        s.drop.count,
+        s.drop.damage,
+        s.at.0,
+        s.at.1,
+        s.at.2,
+    );
     if let Some(Entity::Item(e)) = u.world.entities.get_mut(eid) {
-        e.body.motion = [mx, my, mz];
+        e.body.motion = [s.motion.0, s.motion.1, s.motion.2];
     }
 }
 
 /// Tile-entity packet into the acting session's outbox.
-fn send_te(u: &mut ItemUseWorld, x: i32, y: i32, z: i32) {
-    if let Some(tile) = u.world.tiles.get(&(x, y, z)) {
-        u.session.outbox.push(crate::session_packets::tile_packet(x, y, z, tile));
+fn send_te(u: &mut ItemUseWorld, pos: BlockPos) {
+    if let Some(tile) = u.world.tiles.get(&(pos.x, pos.y, pos.z)) {
+        u.session.outbox.push(crate::session_packets::tile_packet(
+            pos.x, pos.y, pos.z, tile,
+        ));
     }
 }
 
 /// Liquid-aware raycast over `World::ray_trace_hit_liquids`.
-fn ray_hit(
-    u: &mut ItemUseWorld,
-    sx: f64,
-    sy: f64,
-    sz: f64,
-    ex: f64,
-    ey: f64,
-    ez: f64,
-) -> Option<[i32; 3]> {
-    u.world.ray_trace_hit_liquids([sx, sy, sz], [ex, ey, ez])
+fn ray_hit(u: &mut ItemUseWorld, start: [f64; 3], end: [f64; 3]) -> Option<[i32; 3]> {
+    u.world.ray_trace_hit_liquids(start, end)
 }
 
 /// Hoe tilling (mirrors `ItemHoe::onItemUse`): grass/dirt to soil, plus a
 /// 1/8 seed drop on grass. Returns true when the caller should damage the stack
 /// (and possibly destroy it when depleted).
-pub fn item_hoe_use(
-    w: &mut ItemUseWorld,
-    seeds_id: i32,
-    x: i32,
-    y: i32,
-    z: i32,
-) -> bool {
-    let block_id = q_id(w, x, y, z);
-    let cover = is_collidable(w.world, x, y + 1, z);
+pub fn item_hoe_use(w: &mut ItemUseWorld, seeds_id: i32, pos: BlockPos) -> bool {
+    let block_id = q_id(w, pos);
+    let cover = is_collidable(w.world, pos.above());
     if (cover || block_id != 2) && block_id != 3 {
         return false;
     }
-    if !w.world.apply_set_notify(x, y, z, 60) {
+    if !w.world.set_notify_at(pos, 60) {
         return false;
     }
     if block_id == 2 && seeds_id > 0 && rng_int(w, 8) == 0 {
         let (mx, mz) = (rng_f64(w) * 0.1 - 0.05, rng_f64(w) * 0.1 - 0.05);
         spawn_drop(
             w,
-            seeds_id,
-            1,
-            0,
-            x as f64 + 0.5,
-            y as f64 + 1.1,
-            z as f64 + 0.5,
-            mx,
-            0.12,
-            mz,
+            ItemSpawn {
+                drop: DropSpec::new(seeds_id, 1, 0),
+                at: (pos.x as f64 + 0.5, pos.y as f64 + 1.1, pos.z as f64 + 0.5),
+                motion: (mx, 0.12, mz),
+            },
         );
     }
     true
@@ -195,14 +186,14 @@ pub fn item_hoe_use(
 
 /// Seed planting (mirrors `ItemSeeds::onItemUse`). True means the caller should
 /// decrement the stack.
-pub fn item_seeds_use(w: &mut ItemUseWorld, x: i32, y: i32, z: i32, side: i32) -> bool {
+pub fn item_seeds_use(w: &mut ItemUseWorld, pos: BlockPos, side: i32) -> bool {
     if side != 1 {
         return false;
     }
-    if q_id(w, x, y, z) != 60 || q_id(w, x, y + 1, z) != 0 {
+    if q_id(w, pos) != 60 || q_id(w, pos.above()) != 0 {
         return false;
     }
-    w.world.apply_set_meta_notify(x, y + 1, z, 59, 0)
+    w.world.set_meta_notify_at(pos.above(), 59, 0)
 }
 
 /// Flint result: whether fire was placed, the new damage, and whether the stack broke
@@ -223,9 +214,7 @@ pub fn item_flint_use(
     w: &mut ItemUseWorld,
     damage_in: i32,
     max_damage: i32,
-    x: i32,
-    y: i32,
-    z: i32,
+    pos: BlockPos,
     side: i32,
 ) -> FlintOut {
     let Some((dx, dy, dz)) = place_offset(side) else {
@@ -234,10 +223,10 @@ pub fn item_flint_use(
         let new_damage = damage_in + 1;
         return FlintOut { placed: false, new_damage, broke: new_damage > max_damage };
     };
-    let (fx, fy, fz) = (x + dx, y + dy, z + dz);
+    let target = pos.offset(dx, dy, dz);
     let mut placed = false;
-    if q_id(w, fx, fy, fz) == 0 {
-        placed = w.world.apply_set_notify(fx, fy, fz, 51);
+    if q_id(w, target) == 0 {
+        placed = w.world.set_notify_at(target, 51);
     }
     let new_damage = damage_in + 1;
     FlintOut { placed, new_damage, broke: new_damage > max_damage }
@@ -245,93 +234,83 @@ pub fn item_flint_use(
 
 /// Sign placement (mirrors `ItemSign::onItemUse`). True means the caller should
 /// send the edit packet and decrement the stack.
-pub fn item_sign_use(
-    w: &mut ItemUseWorld,
-    x: i32,
-    y: i32,
-    z: i32,
-    side: i32,
-    yaw: f32,
-) -> bool {
+pub fn item_sign_use(w: &mut ItemUseWorld, pos: BlockPos, side: i32, yaw: f32) -> bool {
     if side == 0 {
         return false;
     }
-    let solid = w.world.material_at(x, y, z).is_solid();
+    let solid = w.world.material_at_pos(pos).is_solid();
     if !solid {
         return false;
     }
-    let (mut tx, mut ty, mut tz) = (x, y, z);
+    let mut target = pos;
     match side {
-        1 => ty += 1,
-        2 => tz -= 1,
-        3 => tz += 1,
-        4 => tx -= 1,
-        5 => tx += 1,
+        1 => target = target.above(),
+        2 => target = target.offset(0, 0, -1),
+        3 => target = target.offset(0, 0, 1),
+        4 => target = target.offset(-1, 0, 0),
+        5 => target = target.offset(1, 0, 0),
         _ => return false,
     }
-    if !(0..128).contains(&ty) || q_id(w, tx, ty, tz) != 0 {
+    if !(0..128).contains(&target.y) || q_id(w, target) != 0 {
         return false;
     }
     if side == 1 {
         let meta = item_sign_yaw_meta(yaw);
-        let ok = w.world.apply_set_meta_notify(tx, ty, tz, 63, meta);
+        let ok = w.world.set_meta_notify_at(target, 63, meta);
         if !ok {
             return false;
         }
-    } else if !w.world.apply_set_meta_notify(tx, ty, tz, 68, side as u8) {
+    } else if !w.world.set_meta_notify_at(target, 68, side as u8) {
         return false;
     }
-    send_te(w, tx, ty, tz);
+    send_te(w, target);
     true
+}
+
+/// Block placement input bundled to keep the arity clippy-clean.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockPlace {
+    pub block_id: u8,
+    pub stack_count: i32,
+    pub side: i32,
+    pub yaw: f32,
 }
 
 /// Block placement (mirrors `ItemBlock::onItemUse`). True means the caller should
 /// decrement the stack.
-#[allow(clippy::too_many_arguments)]
-pub fn item_block_use(
-    w: &mut ItemUseWorld,
-    block_id: u8,
-    stack_count: i32,
-    x: i32,
-    y: i32,
-    z: i32,
-    side: i32,
-    yaw: f32,
-) -> bool {
-    let (mut tx, mut ty, mut tz) = (x, y, z);
+pub fn item_block_use(w: &mut ItemUseWorld, place: BlockPlace, pos: BlockPos) -> bool {
+    let mut target = pos;
     // Snow layers are replaced instead of offset.
-    if q_id(w, x, y, z) != 78 {
-        let Some((dx, dy, dz)) = place_offset(side) else {
+    if q_id(w, pos) != 78 {
+        let Some((dx, dy, dz)) = place_offset(place.side) else {
             return false;
         };
-        tx += dx;
-        ty += dy;
-        tz += dz;
+        target = target.offset(dx, dy, dz);
     }
-    if stack_count == 0 || !(0..128).contains(&ty) {
+    if place.stack_count == 0 || !(0..128).contains(&target.y) {
         return false;
     }
-    let target = q_id(w, tx, ty, tz);
-    if target != 0 && !matches!(target, 8 | 9 | 10 | 11 | 51 | 78) {
+    let occupying = q_id(w, target);
+    if occupying != 0 && !matches!(occupying, 8 | 9 | 10 | 11 | 51 | 78) {
         return false;
     }
-    if !World::native_registered(block_id) {
+    if !World::native_registered(place.block_id) {
         return false;
     }
-    if !can_stay(w, block_id, tx, ty, tz) {
+    if !can_stay(w, place.block_id, target) {
         return false;
     }
-    if !placement_clear(w, block_id, tx, ty, tz) {
+    if !placement_clear(w, place.block_id, target) {
         return false;
     }
-    if !w.world.apply_set_notify(tx, ty, tz, block_id) {
+    if !w.world.set_notify_at(target, place.block_id) {
         return false;
     }
-    if block_id == 61 || block_id == 62 {
-        let meta = item_furnace_facing(yaw);
-        w.world.set_block_meta(tx, ty, tz, meta);
+    if place.block_id == 61 || place.block_id == 62 {
+        let meta = item_furnace_facing(place.yaw);
+        w.world.set_meta_at(target, meta);
     }
-    torch_placed(w, block_id, tx, ty, tz, side);
+    torch_placed(w, place.block_id, target, place.side);
     true
 }
 
@@ -350,27 +329,27 @@ pub struct BoatThrow {
     pub ez: f64,
 }
 
-pub fn item_boat_aim(
-    prev_yaw: f32,
-    yaw: f32,
-    prev_pitch: f32,
-    pitch: f32,
-    prev_x: f64,
-    x: f64,
-    prev_y: f64,
-    y: f64,
-    prev_z: f64,
-    z: f64,
-    y_offset: f64,
-) -> BoatThrow {
+/// Boat aim input: interpolated yaw/pitch plus prev/cur eye positions.
+#[derive(Clone, Copy, Debug)]
+pub struct BoatAimIn {
+    pub prev_yaw: f32,
+    pub yaw: f32,
+    pub prev_pitch: f32,
+    pub pitch: f32,
+    pub prev: [f64; 3],
+    pub cur: [f64; 3],
+    pub y_offset: f64,
+}
+
+pub fn item_boat_aim(v: BoatAimIn) -> BoatThrow {
     // partialTick is constant 1.0: prev + (cur - prev) * 1.0, in f32/f64
     // exactly like C++.
-    let iyaw = prev_yaw + (yaw - prev_yaw) * 1.0f32;
-    let ipitch = prev_pitch + (pitch - prev_pitch) * 1.0f32;
-    let sx = prev_x + (x - prev_x) * 1.0;
-    let mut sy = prev_y + (y - prev_y) * 1.0;
-    let sz = prev_z + (z - prev_z) * 1.0;
-    sy += 1.62 - y_offset;
+    let iyaw = v.prev_yaw + (v.yaw - v.prev_yaw) * 1.0f32;
+    let ipitch = v.prev_pitch + (v.pitch - v.prev_pitch) * 1.0f32;
+    let sx = v.prev[0] + (v.cur[0] - v.prev[0]) * 1.0;
+    let mut sy = v.prev[1] + (v.cur[1] - v.prev[1]) * 1.0;
+    let sz = v.prev[2] + (v.cur[2] - v.prev[2]) * 1.0;
+    sy += 1.62 - v.y_offset;
     let half_pi = std::f32::consts::PI / 180.0f32;
     let cos_yaw = cos(-iyaw * half_pi - std::f32::consts::PI);
     let sin_yaw = sin(-iyaw * half_pi - std::f32::consts::PI);
@@ -393,16 +372,8 @@ pub fn item_boat_aim(
 
 /// Boat raycast resolution (mirrors the tail of `ItemBoat::onItemRightClick`).
 /// Returns the hit cell when the boat should spawn and the stack decrement.
-pub fn item_boat_throw(
-    w: &mut ItemUseWorld,
-    sx: f64,
-    sy: f64,
-    sz: f64,
-    ex: f64,
-    ey: f64,
-    ez: f64,
-) -> Option<[i32; 3]> {
-    ray_hit(w, sx, sy, sz, ex, ey, ez)
+pub fn item_boat_throw(w: &mut ItemUseWorld, start: [f64; 3], end: [f64; 3]) -> Option<[i32; 3]> {
+    ray_hit(w, start, end)
 }
 
 #[cfg(test)]
@@ -452,10 +423,17 @@ mod tests {
 
     #[test]
     fn test_verb_scenarios() {
+        fn bp(x: i32, y: i32, z: i32) -> BlockPos {
+            BlockPos::new(x, y, z)
+        }
         // 1. Hoe tills grass to soil, drops a seed on a 1/8 roll.
         let (mut w, mut s) = harness(HOE_SEED);
         stage(&mut w, &[(0, 64, 0, 2)]);
-        assert!(item_hoe_use(&mut use_ctx(&mut w, &mut s), 295, 0, 64, 0));
+        assert!(item_hoe_use(
+            &mut use_ctx(&mut w, &mut s),
+            295,
+            bp(0, 64, 0)
+        ));
         assert_eq!(w.get_block_id(0, 64, 0), 60);
         let drops = items_at(&w, 295);
         assert_eq!(drops.len(), 1, "{drops:?}");
@@ -467,37 +445,53 @@ mod tests {
         // 2. Hoe refuses covered grass and stone.
         let (mut w, mut s) = harness(HOE_SEED);
         stage(&mut w, &[(0, 64, 0, 2), (0, 65, 0, 1)]);
-        assert!(!item_hoe_use(&mut use_ctx(&mut w, &mut s), 295, 0, 64, 0));
+        assert!(!item_hoe_use(
+            &mut use_ctx(&mut w, &mut s),
+            295,
+            bp(0, 64, 0)
+        ));
         assert_eq!(w.get_block_id(0, 64, 0), 2);
         assert!(items_at(&w, 295).is_empty());
         let (mut w, mut s) = harness(HOE_SEED);
         stage(&mut w, &[(0, 64, 0, 1)]);
-        assert!(!item_hoe_use(&mut use_ctx(&mut w, &mut s), 295, 0, 64, 0));
+        assert!(!item_hoe_use(
+            &mut use_ctx(&mut w, &mut s),
+            295,
+            bp(0, 64, 0)
+        ));
 
         // 3. Seeds plant on soil with air above, only from the top face.
         let (mut w, mut s) = harness(7);
         stage(&mut w, &[(0, 64, 0, 60)]);
-        assert!(item_seeds_use(&mut use_ctx(&mut w, &mut s), 0, 64, 0, 1));
+        assert!(item_seeds_use(
+            &mut use_ctx(&mut w, &mut s),
+            bp(0, 64, 0),
+            1
+        ));
         assert_eq!(w.get_block_id(0, 65, 0), 59);
-        assert!(!item_seeds_use(&mut use_ctx(&mut w, &mut s), 0, 64, 0, 2));
+        assert!(!item_seeds_use(
+            &mut use_ctx(&mut w, &mut s),
+            bp(0, 64, 0),
+            2
+        ));
 
         // 4. Flint: vanilla side map (3 => +z), always damages, always consumes.
         // The target needs solid ground: floating fire with no fuel is
         // extinguished on placement, like vanilla.
         let (mut w, mut s) = harness(7);
         stage(&mut w, &[(0, 64, 0, 1), (0, 63, 1, 1)]);
-        let out = item_flint_use(&mut use_ctx(&mut w, &mut s), 3, 64, 0, 64, 0, 3);
+        let out = item_flint_use(&mut use_ctx(&mut w, &mut s), 3, 64, bp(0, 64, 0), 3);
         assert!(out.placed && out.new_damage == 4 && !out.broke);
         assert_eq!(w.get_block_id(0, 64, 1), 51);
         // Breaks strictly above max (65 uses at max 64).
         let (mut w, mut s) = harness(7);
         stage(&mut w, &[(0, 64, 0, 1), (0, 63, 1, 1)]);
-        let out = item_flint_use(&mut use_ctx(&mut w, &mut s), 64, 64, 0, 64, 0, 3);
+        let out = item_flint_use(&mut use_ctx(&mut w, &mut s), 64, 64, bp(0, 64, 0), 3);
         assert!(out.broke && out.new_damage == 65);
         // Occupied target: no placement but still damages + consumes.
         let (mut w, mut s) = harness(7);
         stage(&mut w, &[(0, 64, 0, 1), (0, 64, 1, 1)]);
-        let out = item_flint_use(&mut use_ctx(&mut w, &mut s), 0, 64, 0, 64, 0, 3);
+        let out = item_flint_use(&mut use_ctx(&mut w, &mut s), 0, 64, bp(0, 64, 0), 3);
         assert!(!out.placed && out.new_damage == 1);
         assert_eq!(w.get_block_id(0, 64, 1), 1);
 
@@ -505,32 +499,74 @@ mod tests {
         // Each placement pushes one tile packet (id 59) to the session outbox.
         let (mut w, mut s) = harness(7);
         stage(&mut w, &[(1, 64, 0, 1)]);
-        assert!(item_sign_use(&mut use_ctx(&mut w, &mut s), 1, 64, 0, 1, 0.0));
+        assert!(item_sign_use(
+            &mut use_ctx(&mut w, &mut s),
+            bp(1, 64, 0),
+            1,
+            0.0
+        ));
         assert_eq!(w.get_block_id(1, 65, 0), 63);
         assert_eq!(w.get_block_meta(1, 65, 0), 8);
         assert_eq!(s.outbox.len(), 1);
         assert_eq!(s.outbox[0][0], 59);
         let (mut w, mut s) = harness(7);
         stage(&mut w, &[(1, 64, 0, 1)]);
-        assert!(item_sign_use(&mut use_ctx(&mut w, &mut s), 1, 64, 0, 4, 0.0));
+        assert!(item_sign_use(
+            &mut use_ctx(&mut w, &mut s),
+            bp(1, 64, 0),
+            4,
+            0.0
+        ));
         assert_eq!(w.get_block_id(0, 64, 0), 68);
         assert_eq!(w.get_block_meta(0, 64, 0), 4);
-        assert!(!item_sign_use(&mut use_ctx(&mut w, &mut s), 1, 64, 0, 0, 0.0));
+        assert!(!item_sign_use(
+            &mut use_ctx(&mut w, &mut s),
+            bp(1, 64, 0),
+            0,
+            0.0
+        ));
 
         // 6. Block placement offsets by face, replaces snow, sets furnace facing.
         let (mut w, mut s) = harness(7);
         stage(&mut w, &[(0, 64, 0, 1)]);
-        assert!(item_block_use(&mut use_ctx(&mut w, &mut s), 5, 1, 0, 64, 0, 1, 0.0));
+        assert!(item_block_use(
+            &mut use_ctx(&mut w, &mut s),
+            BlockPlace {
+                block_id: 5,
+                stack_count: 1,
+                side: 1,
+                yaw: 0.0
+            },
+            bp(0, 64, 0),
+        ));
         assert_eq!(w.get_block_id(0, 65, 0), 5);
         // Occupied by stone: refused.
         let (mut w, mut s) = harness(7);
         stage(&mut w, &[(0, 64, 0, 1), (0, 65, 0, 1)]);
-        assert!(!item_block_use(&mut use_ctx(&mut w, &mut s), 5, 1, 0, 64, 0, 1, 0.0));
+        assert!(!item_block_use(
+            &mut use_ctx(&mut w, &mut s),
+            BlockPlace {
+                block_id: 5,
+                stack_count: 1,
+                side: 1,
+                yaw: 0.0
+            },
+            bp(0, 64, 0),
+        ));
         assert_eq!(w.get_block_id(0, 65, 0), 1);
         // Furnace gets yaw facing metadata.
         let (mut w, mut s) = harness(7);
         stage(&mut w, &[(0, 64, 0, 1)]);
-        assert!(item_block_use(&mut use_ctx(&mut w, &mut s), 61, 1, 0, 64, 0, 1, 90.0));
+        assert!(item_block_use(
+            &mut use_ctx(&mut w, &mut s),
+            BlockPlace {
+                block_id: 61,
+                stack_count: 1,
+                side: 1,
+                yaw: 90.0
+            },
+            bp(0, 64, 0),
+        ));
         assert_eq!(w.get_block_id(0, 65, 0), 61);
         assert_eq!(w.get_block_meta(0, 65, 0), 5);
 
@@ -539,11 +575,19 @@ mod tests {
         let (mut w, mut s) = harness(7);
         stage(&mut w, &[(0, 64, 0, 9)]);
         assert_eq!(
-            item_boat_throw(&mut use_ctx(&mut w, &mut s), 0.5, 66.0, 0.5, 0.5, 60.0, 0.5),
+            item_boat_throw(
+                &mut use_ctx(&mut w, &mut s),
+                [0.5, 66.0, 0.5],
+                [0.5, 60.0, 0.5]
+            ),
             Some([0, 64, 0])
         );
         assert_eq!(
-            item_boat_throw(&mut use_ctx(&mut w, &mut s), 0.5, 100.0, 0.5, 200.5, 100.0, 0.5),
+            item_boat_throw(
+                &mut use_ctx(&mut w, &mut s),
+                [0.5, 100.0, 0.5],
+                [200.5, 100.0, 0.5],
+            ),
             None
         );
     }
@@ -551,7 +595,15 @@ mod tests {
     #[test]
     fn test_boat_aim_interpolation() {
         // partialTick is constant 1.0.
-        let aim = item_boat_aim(0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 64.0, 64.0, 0.5, 0.5, 0.0);
+        let aim = item_boat_aim(BoatAimIn {
+            prev_yaw: 0.0,
+            yaw: 0.0,
+            prev_pitch: 0.0,
+            pitch: 0.0,
+            prev: [0.5, 64.0, 0.5],
+            cur: [0.5, 64.0, 0.5],
+            y_offset: 0.0,
+        });
         assert!((aim.sy - 65.62).abs() < 1e-9);
     }
 }

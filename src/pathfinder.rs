@@ -50,19 +50,22 @@ impl Ord for HeapEntry {
     }
 }
 
-fn get_vertical_offset(
-    is_liquid: &dyn Fn(i32, i32, i32) -> bool,
-    blocks_movement: &dyn Fn(i32, i32, i32) -> bool,
-    x: i32, y: i32, z: i32,
-    size_x: i32, size_y: i32, size_z: i32,
-) -> i32 {
+/// Block query bundle for the A* core: two closures sharing one flow.
+pub struct BlockQueries<'a> {
+    pub is_liquid: &'a dyn Fn(i32, i32, i32) -> bool,
+    pub blocks_movement: &'a dyn Fn(i32, i32, i32) -> bool,
+}
+
+fn get_vertical_offset(q: &BlockQueries, pos: [i32; 3], size: [i32; 3]) -> i32 {
+    let [x, y, z] = pos;
+    let [size_x, size_y, size_z] = size;
     for ix in x..(x + size_x) {
         for iy in y..(y + size_y) {
             for iz in z..(z + size_z) {
-                if is_liquid(ix, iy, iz) {
+                if (q.is_liquid)(ix, iy, iz) {
                     return -1;
                 }
-                if blocks_movement(ix, iy, iz) {
+                if (q.blocks_movement)(ix, iy, iz) {
                     return 0;
                 }
             }
@@ -72,23 +75,22 @@ fn get_vertical_offset(
 }
 
 fn get_safe_point(
-    is_liquid: &dyn Fn(i32, i32, i32) -> bool,
-    blocks_movement: &dyn Fn(i32, i32, i32) -> bool,
-    x: i32,
-    mut y: i32,
-    z: i32,
-    size_x: i32,
-    size_y: i32,
-    size_z: i32,
+    q: &BlockQueries,
+    pos: [i32; 3],
+    size: [i32; 3],
     vertical_step: i32,
     nodes: &mut HashMap<(i32, i32, i32), PathPointNode>,
 ) -> Option<(i32, i32, i32)> {
+    let [x, mut y, z] = pos;
     let mut safe_found = false;
-    if get_vertical_offset(is_liquid, blocks_movement, x, y, z, size_x, size_y, size_z) > 0 {
+    if get_vertical_offset(q, [x, y, z], size) > 0 {
         safe_found = true;
     }
 
-    if !safe_found && vertical_step > 0 && get_vertical_offset(is_liquid, blocks_movement, x, y + vertical_step, z, size_x, size_y, size_z) > 0 {
+    if !safe_found
+        && vertical_step > 0
+        && get_vertical_offset(q, [x, y + vertical_step, z], size) > 0
+    {
         safe_found = true;
         y += vertical_step;
     }
@@ -96,7 +98,7 @@ fn get_safe_point(
     if safe_found {
         let mut fall_distance = 0;
         while y > 0 {
-            let vertical_offset = get_vertical_offset(is_liquid, blocks_movement, x, y - 1, z, size_x, size_y, size_z);
+            let vertical_offset = get_vertical_offset(q, [x, y - 1, z], size);
             if vertical_offset <= 0 {
                 break;
             }
@@ -132,14 +134,15 @@ fn get_safe_point(
 /// so all callers share this exact flow. Empty means
 /// "no path" (start == end included, like the C++ `nullptr`).
 pub fn find_path_native(
-    is_liquid: &dyn Fn(i32, i32, i32) -> bool,
-    blocks_movement: &dyn Fn(i32, i32, i32) -> bool,
-    start_x: f64, start_y: f64, start_z: f64,
-    target_x: f64, target_y: f64, target_z: f64,
-    entity_width: f32,
-    entity_height: f32,
+    q: &BlockQueries,
+    start: [f64; 3],
+    target: [f64; 3],
+    entity_size: [f32; 2],
     max_distance: f32,
 ) -> Vec<(i32, i32, i32)> {
+    let [start_x, start_y, start_z] = start;
+    let [target_x, target_y, target_z] = target;
+    let [entity_width, entity_height] = entity_size;
     let start_x_floor = start_x.floor() as i32;
     let start_y_floor = start_y.floor() as i32;
     let start_z_floor = start_z.floor() as i32;
@@ -151,6 +154,7 @@ pub fn find_path_native(
     let size_x = (entity_width + 1.0).floor() as i32;
     let size_y = (entity_height + 1.0).floor() as i32;
     let size_z = (entity_width + 1.0).floor() as i32;
+    let size = [size_x, size_y, size_z];
 
     let start_key = (start_x_floor, start_y_floor, start_z_floor);
     let target_key = (target_x_floor, target_y_floor, target_z_floor);
@@ -206,7 +210,12 @@ pub fn find_path_native(
         }
 
         let mut vertical_step = 0;
-        if get_vertical_offset(is_liquid, blocks_movement, current_node.x, current_node.y + 1, current_node.z, size_x, size_y, size_z) > 0 {
+        if get_vertical_offset(
+            q,
+            [current_node.x, current_node.y + 1, current_node.z],
+            size,
+        ) > 0
+        {
             vertical_step = 1;
         }
 
@@ -218,7 +227,9 @@ pub fn find_path_native(
         ];
 
         for &(nx, ny, nz) in &neighbors {
-            if let Some(safe_coord) = get_safe_point(is_liquid, blocks_movement, nx, ny, nz, size_x, size_y, size_z, vertical_step, &mut nodes) {
+            if let Some(safe_coord) =
+                get_safe_point(q, [nx, ny, nz], size, vertical_step, &mut nodes)
+            {
                 let cand_node = match nodes.get(&safe_coord) {
                     Some(n) => n.clone(),
                     None => continue,

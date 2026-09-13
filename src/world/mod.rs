@@ -25,6 +25,7 @@ pub mod combat;
 pub mod gen;
 pub mod living;
 pub mod physics;
+pub mod pos;
 pub mod spawning;
 pub mod tiles;
 

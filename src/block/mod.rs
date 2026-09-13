@@ -9,5 +9,8 @@
 
 pub mod container;
 pub mod fire;
+pub mod pos;
 pub mod table;
 pub mod ticks;
+
+pub use pos::{BlockPos, DropSpec};
