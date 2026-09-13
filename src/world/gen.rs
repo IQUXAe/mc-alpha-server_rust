@@ -68,8 +68,7 @@ impl World {
                 &mut stage_blocks,
                 &mut stage_meta,
                 &mut fallback,
-                cx,
-                cz,
+                [cx, cz],
                 center_biome.biome_type,
                 &center_temps,
             );

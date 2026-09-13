@@ -163,10 +163,7 @@ impl World {
         }
         let (px, py, pz) = self.spawn_anchors();
         let count = self.entities.count_mobs() as i32;
-        let (sx, sy, sz) = (self.spawn[0], self.spawn[1], self.spawn[2]);
-        crate::mob_spawning::spawn_hostile(
-            self, &px, &py, &pz, count, sx, sy, sz, WORLD_HEIGHT,
-        )
+        crate::mob_spawning::spawn_hostile(self, &px, &py, &pz, count, self.spawn, WORLD_HEIGHT)
     }
 
     /// Passive spawn pass (mirrors `World::spawnPassiveMobs`).
@@ -176,10 +173,7 @@ impl World {
         }
         let (px, py, pz) = self.spawn_anchors();
         let count = self.entities.count_animals() as i32;
-        let (sx, sy, sz) = (self.spawn[0], self.spawn[1], self.spawn[2]);
-        crate::mob_spawning::spawn_passive(
-            self, &px, &py, &pz, count, sx, sy, sz, WORLD_HEIGHT,
-        )
+        crate::mob_spawning::spawn_passive(self, &px, &py, &pz, count, self.spawn, WORLD_HEIGHT)
     }
 
     /// Item pickup sweep (mirrors the in-loop pickup: ready items within

@@ -257,7 +257,7 @@ pub fn chat_command(
             Some(e) => (e.body().yaw, e.body().pitch),
             None => (0.0, 0.0),
         };
-        sess.teleport_to(world, sess.player, tx, ty, tz, yaw, pitch);
+        sess.teleport_to(world, sess.player, [tx, ty, tz], yaw, pitch);
         // C++ std::to_string(double) prints 6 decimals; match it exactly.
         say(sess, &format!("Teleported to {tx:.6}, {ty:.6}, {tz:.6}"));
     } else {

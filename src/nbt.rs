@@ -134,9 +134,9 @@ impl From<std::io::Error> for NbtError {
 impl From<ByteBufferError> for NbtError {
     fn from(e: ByteBufferError) -> Self {
         match e {
-            ByteBufferError::Underflow { needed, remaining } => {
-                Self::Buffer(format!("Buffer underflow: needed {needed}, remaining {remaining}"))
-            }
+            ByteBufferError::Underflow { needed, remaining } => Self::Buffer(format!(
+                "Buffer underflow: needed {needed}, remaining {remaining}"
+            )),
             ByteBufferError::StringTooLong(n) => Self::StringTooLong(n),
             ByteBufferError::NegativeLength(n) => {
                 if n < 0 {
@@ -780,16 +780,14 @@ pub fn write_payload_to_buffer(buf: &mut ByteBuffer, tag: &NbtTag) -> Result<(),
             buf.write_double(*v);
             Ok(())
         }
-        NbtTag::ByteArray(bytes) => {
-            match i32::try_from(bytes.len()) {
-                Ok(n) => {
-                    buf.write_int(n);
-                    buf.write_bytes(bytes);
-                    Ok(())
-                }
-                Err(_) => Err(NbtError::ArrayTooLong(bytes.len())),
+        NbtTag::ByteArray(bytes) => match i32::try_from(bytes.len()) {
+            Ok(n) => {
+                buf.write_int(n);
+                buf.write_bytes(bytes);
+                Ok(())
             }
-        }
+            Err(_) => Err(NbtError::ArrayTooLong(bytes.len())),
+        },
         NbtTag::String(s) => write_nbt_string_to_buffer(buf, s),
         NbtTag::List(list) => {
             let actual = if list.elements.is_empty() {
@@ -904,6 +902,7 @@ pub fn read_nbt_file_with_fallback(path: &Path) -> Result<(String, NbtCompound),
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 
@@ -977,7 +976,7 @@ mod tests {
         let back = payload_roundtrip(NbtTag::Float(3.14159), 5);
         match back {
             NbtTag::Float(v) => assert!((v - 3.14159).abs() < 1e-6),
-            _ => assert!(false, "wrong tag"),
+            _ => panic!("wrong tag"),
         }
     }
 
@@ -986,7 +985,7 @@ mod tests {
         let back = payload_roundtrip(NbtTag::Double(2.718281828459045), 6);
         match back {
             NbtTag::Double(v) => assert!((v - 2.718281828459045).abs() < 1e-12),
-            _ => assert!(false, "wrong tag"),
+            _ => panic!("wrong tag"),
         }
     }
 
@@ -1038,7 +1037,7 @@ mod tests {
                 assert_eq!(l.elements[0], NbtTag::Int(10));
                 assert_eq!(l.elements[2], NbtTag::Int(30));
             }
-            _ => assert!(false, "wrong tag"),
+            _ => panic!("wrong tag"),
         }
     }
 
@@ -1048,7 +1047,7 @@ mod tests {
         let back = payload_roundtrip(NbtTag::List(list), 9);
         match back {
             NbtTag::List(l) => assert!(l.is_empty()),
-            _ => assert!(false, "wrong tag"),
+            _ => panic!("wrong tag"),
         }
         let mut buf = ByteBuffer::new();
         write_payload_to_buffer(&mut buf, &NbtTag::List(NbtList::new())).unwrap();
@@ -1056,7 +1055,7 @@ mod tests {
         let back2 = read_payload_from_buffer(&mut buf, 9).unwrap();
         match back2 {
             NbtTag::List(l) => assert!(l.is_empty()),
-            _ => assert!(false, "wrong tag"),
+            _ => panic!("wrong tag"),
         }
     }
 
@@ -1114,11 +1113,11 @@ mod tests {
                 for (i, elem) in l.elements.iter().enumerate() {
                     match elem {
                         NbtTag::Compound(c) => assert_eq!(c.get_int("index"), i as i32),
-                        _ => assert!(false, "wrong elem"),
+                        _ => panic!("wrong elem"),
                     }
                 }
             }
-            _ => assert!(false, "wrong tag"),
+            _ => panic!("wrong tag"),
         }
     }
 
@@ -1266,17 +1265,17 @@ mod tests {
                         assert_eq!(c.get_byte("Count"), 32);
                         assert_eq!(c.get_short("Damage"), 5);
                     }
-                    _ => assert!(false, "wrong elem"),
+                    _ => panic!("wrong elem"),
                 }
                 match &l.elements[1] {
                     NbtTag::Compound(c) => {
                         assert_eq!(c.get_short("id"), 263);
                         assert_eq!(c.get_byte("Count"), 64);
                     }
-                    _ => assert!(false, "wrong elem"),
+                    _ => panic!("wrong elem"),
                 }
             }
-            _ => assert!(false, "wrong tag"),
+            _ => panic!("wrong tag"),
         }
     }
 

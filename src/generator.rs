@@ -61,14 +61,14 @@ impl ChunkProvider {
 /// below evaluate bit-identical values at identical points.
 pub fn climate_into(
     gen: &ChunkProvider,
-    x0: i32,
-    z0: i32,
-    w: usize,
-    h: usize,
+    origin: [i32; 2],
+    size: [usize; 2],
     biomes: &mut [MobSpawnerBase],
     temperatures: &mut [f64],
     humidities: &mut [f64],
 ) {
+    let [x0, z0] = origin;
+    let [w, h] = size;
     let n = w * h;
     debug_assert_eq!(biomes.len(), n);
     debug_assert_eq!(temperatures.len(), n);
@@ -131,7 +131,7 @@ pub fn point_biome(gen: &ChunkProvider, x: i32, z: i32) -> MobSpawnerBase {
     let mut biomes = [MobSpawnerBase::DEFAULT; 1];
     let mut temps = [0.0f64; 1];
     let mut humids = [0.0f64; 1];
-    climate_into(gen, x, z, 1, 1, &mut biomes, &mut temps, &mut humids);
+    climate_into(gen, [x, z], [1, 1], &mut biomes, &mut temps, &mut humids);
     biomes[0]
 }
 
@@ -144,7 +144,6 @@ pub fn generate_chunk(
     temperatures: &mut [f64; 256],
     humidities: &mut [f64; 256],
 ) {
-
     let mut rand = JavaRandom::new(
         (chunk_x as i64)
             .wrapping_mul(341873128712)
@@ -152,7 +151,14 @@ pub fn generate_chunk(
     );
 
     // 1. Load block generator data (biomes & temperatures)
-    climate_into(gen, chunk_x * 16, chunk_z * 16, 16, 16, biomes, temperatures, humidities);
+    climate_into(
+        gen,
+        [chunk_x * 16, chunk_z * 16],
+        [16, 16],
+        biomes,
+        temperatures,
+        humidities,
+    );
 
     // 2. Generate terrain
     let var6 = 4;
@@ -314,11 +320,11 @@ pub fn populate_batch(
     stage_blocks: &mut [[[u8; 32768]; 2]; 2],
     stage_meta: &mut [[[u8; 32768]; 2]; 2],
     fallback: &mut dyn BlockAccess,
-    chunk_x: i32,
-    chunk_z: i32,
+    chunk: [i32; 2],
     biome: BiomeType,
     temperatures: &[f64],
 ) -> Vec<(i32, i32, i32, i32, i32, i32)> {
+    let [chunk_x, chunk_z] = chunk;
     let mut canvas = CanvasAccess::new(stage_blocks, stage_meta, chunk_x, chunk_z, fallback);
 
     // Call the existing decorator logic, then hand the queued
@@ -364,7 +370,17 @@ mod tests {
         let mut nb = [MobSpawnerBase::DEFAULT; 256];
         let mut nt = [0.0f64; 256];
         let mut nh = [0.0f64; 256];
-        climate_into(&gen, (cx + 1) * 16, (cz + 1) * 16, 16, 16, &mut nb, &mut nt, &mut nh);
-        assert_eq!(nb[0].biome_type, point_biome(&gen, cx * 16 + 16, cz * 16 + 16).biome_type);
+        climate_into(
+            &gen,
+            [(cx + 1) * 16, (cz + 1) * 16],
+            [16, 16],
+            &mut nb,
+            &mut nt,
+            &mut nh,
+        );
+        assert_eq!(
+            nb[0].biome_type,
+            point_biome(&gen, cx * 16 + 16, cz * 16 + 16).biome_type
+        );
     }
 }

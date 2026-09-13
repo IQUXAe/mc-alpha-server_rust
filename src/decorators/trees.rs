@@ -235,11 +235,17 @@ impl WorldGenBigTree {
         }
     }
 
-    fn gen_tree_layer(&self, accessor: &mut dyn BlockAccess, x: i32, y: i32, z: i32, radius: f32, axis: usize, block_id: u8) {
+    fn gen_tree_layer(
+        &self,
+        accessor: &mut dyn BlockAccess,
+        center: [i32; 3],
+        radius: f32,
+        axis: usize,
+        block_id: u8,
+    ) {
         let int_radius = (radius as f64 + 0.618) as i32;
         let ax1 = OTHER_COORD_PAIRS[axis] as usize;
         let ax2 = OTHER_COORD_PAIRS[axis + 3] as usize;
-        let center = [x, y, z];
         let mut pos = [0; 3];
         pos[axis] = center[axis];
 
@@ -263,7 +269,7 @@ impl WorldGenBigTree {
     fn generate_leaf_node(&self, accessor: &mut dyn BlockAccess, x: i32, y: i32, z: i32) {
         for i in y..(y + self.leaf_distance_limit) {
             let size = self.leaf_size(i - y);
-            self.gen_tree_layer(&mut *accessor, x, i, z, size, 1, 18); // leaves
+            self.gen_tree_layer(&mut *accessor, [x, i, z], size, 1, 18); // leaves
         }
     }
 
@@ -300,7 +306,12 @@ impl WorldGenBigTree {
             }
 
             for _ in 0..branch_count {
-                let branch_dist = self.scale_width * (layer_rad as f64) * ((self.tree_rand.next_float() as f64) + 0.328);
+                let branch_dist = self.scale_width
+                    * (layer_rad as f64)
+                    * ((self.tree_rand.next_float() as f64) + 0.328);
+                // Vanilla literal (`WorldGenBigTree.java:54` uses 3.14159D,
+                // not Math.PI): keep bit-for-bit for 1:1 big-tree shapes.
+                #[allow(clippy::approx_constant)]
                 let angle = (self.tree_rand.next_float() as f64) * 2.0 * 3.14159_f64;
                 let bx = (branch_dist * angle.sin() + (self.base_pos[0] as f64) + 0.5) as i32;
                 let bz = (branch_dist * angle.cos() + (self.base_pos[2] as f64) + 0.5) as i32;

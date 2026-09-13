@@ -118,6 +118,7 @@ pub fn abs_max(mut a: f64, mut b: f64) -> f64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

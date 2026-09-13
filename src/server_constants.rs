@@ -59,8 +59,8 @@ mod tests {
         assert_eq!(VIEW_DISTANCE_MIN, 3);
         assert_eq!(VIEW_DISTANCE_MAX, 15);
         assert_eq!(VIEW_DISTANCE_DEFAULT, 10);
-        assert!(VIEW_DISTANCE_MIN <= VIEW_DISTANCE_DEFAULT);
-        assert!(VIEW_DISTANCE_DEFAULT <= VIEW_DISTANCE_MAX);
+        const { assert!(VIEW_DISTANCE_MIN <= VIEW_DISTANCE_DEFAULT) };
+        const { assert!(VIEW_DISTANCE_DEFAULT <= VIEW_DISTANCE_MAX) };
     }
 
     #[test]
@@ -88,7 +88,7 @@ mod tests {
         assert_eq!(PLAYER_EYE_HEIGHT, 1.62_f32);
         assert_eq!(PLAYER_WIDTH, 0.6_f32);
         assert_eq!(PLAYER_HEIGHT, 1.8_f32);
-        assert!(PLAYER_EYE_HEIGHT < PLAYER_HEIGHT);
+        const { assert!(PLAYER_EYE_HEIGHT < PLAYER_HEIGHT) };
     }
 
     #[test]

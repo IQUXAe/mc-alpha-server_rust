@@ -5,7 +5,6 @@ use crate::player::movement::{MovementInput, movement_validate};
 use crate::session::play::PlaySession;
 use crate::session::{SessionCtx, SessionOutcome};
 
-
 impl PlaySession {
     // ---- movement (mirrors processMovement) ----
 
@@ -140,7 +139,7 @@ impl PlaySession {
             // the player back): teleport home and wait for the client echo
             // instead of disconnecting legitimate teleports and respawns.
             3 | 4 => {
-                self.teleport_to(ctx.world, me, bx, by, bz, final_yaw, final_pitch);
+                self.teleport_to(ctx.world, me, [bx, by, bz], final_yaw, final_pitch);
                 return None;
             }
             _ => {}
@@ -210,7 +209,7 @@ impl PlaySession {
             ctx.world.colliding_boxes(&shrunk).is_empty()
         };
         if moved_wrongly || (was_free && !dest_free) {
-            self.teleport_to(ctx.world, me, bx, by, bz, final_yaw, final_pitch);
+            self.teleport_to(ctx.world, me, [bx, by, bz], final_yaw, final_pitch);
             return None;
         }
         let fall_input = MovementInput {

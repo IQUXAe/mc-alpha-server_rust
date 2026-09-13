@@ -1321,7 +1321,7 @@
         // Chest block and tile row are gone, dirt scattered as items
         // (mirrors the C++ removal hook on the blast path).
         assert_eq!(w.get_block_id(4, 64, 4), 0);
-        assert!(w.tiles.get(&(4, 64, 4)).is_none());
+        assert!(!w.tiles.contains_key(&(4, 64, 4)));
         assert!(w.entities.alive_ids().iter().any(|oid| matches!(
             w.entities.get(*oid),
             Some(crate::entity::table::Entity::Item(e)) if e.item_id == 3

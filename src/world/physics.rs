@@ -260,15 +260,15 @@ impl World {
             return;
         }
         let side = crate::entity::misc::item_push_side(
-            !self.is_solid(ix - 1, iy, iz),
-            !self.is_solid(ix + 1, iy, iz),
-            !self.is_solid(ix, iy - 1, iz),
-            !self.is_solid(ix, iy + 1, iz),
-            !self.is_solid(ix, iy, iz - 1),
-            !self.is_solid(ix, iy, iz + 1),
-            lx,
-            ly,
-            lz,
+            [
+                !self.is_solid(ix - 1, iy, iz),
+                !self.is_solid(ix + 1, iy, iz),
+                !self.is_solid(ix, iy - 1, iz),
+                !self.is_solid(ix, iy + 1, iz),
+                !self.is_solid(ix, iy, iz - 1),
+                !self.is_solid(ix, iy, iz + 1),
+            ],
+            [lx, ly, lz],
         );
         if side < 0 {
             return;
@@ -334,9 +334,13 @@ impl World {
             e.body.motion[2] *= 0.98;
         }
         let (on_ground, by, px, py, pz) = match self.entities.get(id) {
-            Some(Entity::Falling(e)) => {
-                (e.body.on_ground, e.body.pos[1].floor() as i32, e.body.pos[0], e.body.pos[1], e.body.pos[2])
-            }
+            Some(Entity::Falling(e)) => (
+                e.body.on_ground,
+                e.body.pos[1].floor() as i32,
+                e.body.pos[0],
+                e.body.pos[1],
+                e.body.pos[2],
+            ),
             _ => return,
         };
         let bx = px.floor() as i32;
@@ -448,9 +452,15 @@ impl World {
             }
             None => return,
         };
-        let fraction = crate::entity::misc::water_fraction_scan(min_x, min_y, min_z, max_x, max_y, max_z, |x, y, z| {
-            self.is_water(x, y, z)
-        });
+        let fraction = crate::entity::misc::water_fraction_scan(
+            min_x,
+            min_y,
+            min_z,
+            max_x,
+            max_y,
+            max_z,
+            |x, y, z| self.is_water(x, y, z),
+        );
         // Rider drive.
         let rider_motion = match self.entities.get(id) {
             Some(e) => {
@@ -539,9 +549,7 @@ impl World {
             .entities
             .alive_ids()
             .into_iter()
-            .filter(|oid| {
-                *oid != id && matches!(self.entities.get(*oid), Some(Entity::Boat(_)))
-            })
+            .filter(|oid| *oid != id && matches!(self.entities.get(*oid), Some(Entity::Boat(_))))
             .collect();
         for oid in boats {
             let (ax, az, bx, bz) = match (self.entities.get(id), self.entities.get(oid)) {

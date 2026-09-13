@@ -79,12 +79,11 @@ impl PlaySession {
         &mut self,
         world: &mut World,
         id: EntityId,
-        x: f64,
-        y: f64,
-        z: f64,
+        pos: [f64; 3],
         yaw: f32,
         pitch: f32,
     ) {
+        let [x, y, z] = pos;
         if let Some(e) = world.entities.get_mut(id) {
             e.body_mut().set_position(x, y, z);
             e.body_mut().yaw = yaw;
@@ -238,24 +237,46 @@ impl PlaySession {
             PacketData::Flying { on_ground } => {
                 self.movement(ctx, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, false, on_ground)
             }
-            PacketData::PlayerPosition { x, y, stance, z, on_ground } => {
-                self.movement(ctx, x, y, stance, z, 0.0, 0.0, true, false, on_ground)
-            }
-            PacketData::PlayerLook { yaw, pitch, on_ground } => {
-                self.movement(ctx, 0.0, 0.0, 0.0, 0.0, yaw, pitch, false, true, on_ground)
-            }
-            PacketData::PlayerLookMove { x, y, stance, z, yaw, pitch, on_ground } => {
-                self.movement(ctx, x, y, stance, z, yaw, pitch, true, true, on_ground)
-            }
-            PacketData::BlockDig { status, x, y, z, face } => {
-                self.dig(ctx, status, x, y as i32, z, face)
-            }
-            PacketData::Place { item_id, x, y, z, direction } => {
-                self.place(ctx, item_id, x, y as i32, z, direction)
-            }
-            PacketData::UseEntity { player_entity_id, target_entity_id, is_left_click } => {
-                self.use_entity(ctx, player_entity_id, target_entity_id, is_left_click)
-            }
+            PacketData::PlayerPosition {
+                x,
+                y,
+                stance,
+                z,
+                on_ground,
+            } => self.movement(ctx, x, y, stance, z, 0.0, 0.0, true, false, on_ground),
+            PacketData::PlayerLook {
+                yaw,
+                pitch,
+                on_ground,
+            } => self.movement(ctx, 0.0, 0.0, 0.0, 0.0, yaw, pitch, false, true, on_ground),
+            PacketData::PlayerLookMove {
+                x,
+                y,
+                stance,
+                z,
+                yaw,
+                pitch,
+                on_ground,
+            } => self.movement(ctx, x, y, stance, z, yaw, pitch, true, true, on_ground),
+            PacketData::BlockDig {
+                status,
+                x,
+                y,
+                z,
+                face,
+            } => self.dig(ctx, status, x, y as i32, z, face),
+            PacketData::Place {
+                item_id,
+                x,
+                y,
+                z,
+                direction,
+            } => self.place(ctx, item_id, x, y as i32, z, direction),
+            PacketData::UseEntity {
+                player_entity_id,
+                target_entity_id,
+                is_left_click,
+            } => self.use_entity(ctx, player_entity_id, target_entity_id, is_left_click),
             PacketData::Chat { message } => self.chat(ctx, &message),
             PacketData::Respawn => self.respawn(ctx),
             PacketData::BlockItemSwitch { item_id, .. } => {

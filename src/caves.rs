@@ -1,5 +1,10 @@
-use crate::random::JavaRandom;
+//! NOTE: long scalar arg lists here mirror the Java originals 1:1
+//! (var-for-var parameter order); grouping them would obscure the
+//! decompiled mapping. Allowed deliberately.
+#![allow(clippy::too_many_arguments)]
+
 use crate::math_helper::{cos as mcos, sin as msin};
+use crate::random::JavaRandom;
 
 pub struct MapGenCaves {
     range: i32,
@@ -263,4 +268,3 @@ impl MapGenCaves {
         }
     }
 }
-

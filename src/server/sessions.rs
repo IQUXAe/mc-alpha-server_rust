@@ -12,9 +12,8 @@ use crate::server_admin::admin_normalize;
 use crate::server_config::ServerConfig;
 use crate::server_log as log;
 use crate::session::{
-    Conn, ConnEvent, LoginEvent, LoginSession, PlaySession, SessionBroadcast, SessionCtx,
-    SessionOutcome, pkt_arm, pkt_chat, pkt_health, pkt_kick, pkt_login_response, pkt_spawn_pos,
-    pkt_time,
+    pkt_arm, pkt_chat, pkt_health, pkt_kick, pkt_login_response, pkt_spawn_pos, pkt_time, Conn,
+    ConnEvent, LoginEvent, LoginSession, PlaySession, SessionBroadcast, SessionCtx, SessionOutcome,
 };
 use crate::tracker::{Outbox, TrackedEntity};
 use crate::world::World;
@@ -548,7 +547,7 @@ impl Server {
                 Some(e) => (e.body().pos, e.body().yaw, e.body().pitch),
                 None => (pos, 0.0, 0.0),
             };
-            play.teleport_to(&mut self.world, eid, ppos[0], ppos[1], ppos[2], yaw, pitch);
+            play.teleport_to(&mut self.world, eid, ppos, yaw, pitch);
             let hp = match self.world.entities.get(eid) {
                 Some(Entity::Player(p)) => p.living.health as i8,
                 _ => 20,

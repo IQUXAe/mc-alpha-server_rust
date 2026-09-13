@@ -433,6 +433,9 @@ impl PlayerEnt {
 }
 
 #[derive(Clone, Debug)]
+// Player carries the full inventory; entity counts are small and the table
+// is an arena, so inline storage beats pointer chasing. Revisit with data.
+#[allow(clippy::large_enum_variant)]
 pub enum Entity {
     Item(ItemEnt),
     Arrow(ArrowEnt),

@@ -1,3 +1,8 @@
+//! NOTE: long scalar arg lists here mirror the Java originals 1:1
+//! (var-for-var parameter order); grouping them would obscure the
+//! decompiled mapping. Allowed deliberately.
+#![allow(clippy::too_many_arguments)]
+
 use crate::random::JavaRandom;
 
 fn lerp(t: f64, a: f64, b: f64) -> f64 {

@@ -9,17 +9,9 @@
 /// `EntityItem::pushOutOfBlocks` scoring). Free-face flags come in
 /// W,E,D,U,N,S order with the fractional position; returns the side
 /// (0..5) or -1 when fully buried.
-pub fn item_push_side(
-    free_w: bool,
-    free_e: bool,
-    free_d: bool,
-    free_u: bool,
-    free_n: bool,
-    free_s: bool,
-    lx: f64,
-    ly: f64,
-    lz: f64,
-) -> i8 {
+pub fn item_push_side(free: [bool; 6], frac: [f64; 3]) -> i8 {
+    let [free_w, free_e, free_d, free_u, free_n, free_s] = free;
+    let [lx, ly, lz] = frac;
     let mut best_side: i8 = -1;
     let mut best = 9999.0f64;
     if free_w && lx < best {
@@ -225,13 +217,25 @@ mod tests {
     #[test]
     fn test_push_side_picks_nearest_free_face() {
         // Free west face, close to it.
-        assert_eq!(item_push_side(true, false, false, false, false, false, 0.1, 0.5, 0.5), 0);
+        assert_eq!(
+            item_push_side([true, false, false, false, false, false], [0.1, 0.5, 0.5]),
+            0
+        );
         // Buried: nothing free.
-        assert_eq!(item_push_side(false, false, false, false, false, false, 0.1, 0.5, 0.5), -1);
+        assert_eq!(
+            item_push_side([false, false, false, false, false, false], [0.1, 0.5, 0.5]),
+            -1
+        );
         // East closer than west.
-        assert_eq!(item_push_side(true, true, false, false, false, false, 0.9, 0.5, 0.5), 1);
+        assert_eq!(
+            item_push_side([true, true, false, false, false, false], [0.9, 0.5, 0.5]),
+            1
+        );
         // Down wins over far west.
-        assert_eq!(item_push_side(true, false, true, false, false, false, 0.4, 0.1, 0.5), 2);
+        assert_eq!(
+            item_push_side([true, false, true, false, false, false], [0.4, 0.1, 0.5]),
+            2
+        );
     }
 
     #[test]

@@ -1,3 +1,8 @@
+//! NOTE: long scalar arg lists here mirror the Java originals 1:1
+//! (var-for-var parameter order); grouping them would obscure the
+//! decompiled mapping. Allowed deliberately.
+#![allow(clippy::too_many_arguments)]
+
 use crate::noise::NoiseGeneratorOctaves;
 
 pub fn density_generate_field(
@@ -16,7 +21,6 @@ pub fn density_generate_field(
     min_gen: &NoiseGeneratorOctaves,
     max_gen: &NoiseGeneratorOctaves,
 ) {
-
     let var8 = 684.412;
     let var10 = 684.412;
 

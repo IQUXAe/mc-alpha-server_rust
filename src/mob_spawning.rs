@@ -244,12 +244,21 @@ pub fn spawn_hostile(
     players_y: &[f64],
     players_z: &[f64],
     current_count: i32,
-    spawn_x: i32,
-    spawn_y: i32,
-    spawn_z: i32,
+    spawn: [i32; 3],
     world_height: i32,
 ) -> i32 {
-    spawn_pass(world, players_x, players_y, players_z, true, current_count, spawn_x, spawn_y, spawn_z, world_height)
+    spawn_pass(
+        world,
+        players_x,
+        players_y,
+        players_z,
+        true,
+        current_count,
+        spawn[0],
+        spawn[1],
+        spawn[2],
+        world_height,
+    )
 }
 
 /// Batch driver for `World::spawnPassiveMobs`. Same contract as hostile;
@@ -260,12 +269,21 @@ pub fn spawn_passive(
     players_y: &[f64],
     players_z: &[f64],
     current_count: i32,
-    spawn_x: i32,
-    spawn_y: i32,
-    spawn_z: i32,
+    spawn: [i32; 3],
     world_height: i32,
 ) -> i32 {
-    spawn_pass(world, players_x, players_y, players_z, false, current_count, spawn_x, spawn_y, spawn_z, world_height)
+    spawn_pass(
+        world,
+        players_x,
+        players_y,
+        players_z,
+        false,
+        current_count,
+        spawn[0],
+        spawn[1],
+        spawn[2],
+        world_height,
+    )
 }
 
 #[cfg(test)]
@@ -384,7 +402,7 @@ mod tests {
             // No players, no chunks, no spawns.
             let mut world = fake();
             assert_eq!(
-                spawn_hostile(&mut world, &[], &[], &[], 0, 1000, 64, 1000, 128),
+                spawn_hostile(&mut world, &[], &[], &[], 0, [1000, 64, 1000], 128),
                 0
             );
             assert_eq!(world.try_calls, 0);
@@ -392,7 +410,7 @@ mod tests {
             // Cap gate: 1 player -> 289 chunks -> max 112 hostile; 113 blocks everything.
             let mut world = fake();
             assert_eq!(
-                spawn_hostile(&mut world, &px, &py, &pz, 113, 1000, 64, 1000, 128),
+                spawn_hostile(&mut world, &px, &py, &pz, 113, [1000, 64, 1000], 128),
                 0
             );
             assert_eq!(world.try_calls, 0);
@@ -402,14 +420,14 @@ mod tests {
             // triggers the per-spawn jockey roll (always 0).
             // 17x17 = 289 chunks -> 289*4 primary + 289*4 jockeys.
             let mut world = fake();
-            let n = spawn_hostile(&mut world, &px, &py, &pz, 0, 1000, 64, 1000, 128);
+            let n = spawn_hostile(&mut world, &px, &py, &pz, 0, [1000, 64, 1000], 128);
             assert_eq!(n, 289 * 4);
             assert_eq!(world.try_calls, 289 * 4);
             assert_eq!(world.jockey_calls, 289 * 4);
 
             // Happy passive path: same totals, no jockeys.
             let mut world = fake();
-            let n = spawn_passive(&mut world, &px, &py, &pz, 0, 1000, 64, 1000, 128);
+            let n = spawn_passive(&mut world, &px, &py, &pz, 0, [1000, 64, 1000], 128);
             assert_eq!(n, 289 * 4);
             assert_eq!(world.try_calls, 289 * 4);
             assert_eq!(world.jockey_calls, 0);
@@ -417,7 +435,7 @@ mod tests {
             // World-spawn exclusion: spawn at y=0 inside the eligible area
             // removes candidates (strictly fewer spawns than the happy path).
             let mut world = fake();
-            let n_excl = spawn_hostile(&mut world, &px, &py, &pz, 0, 8, 0, 8, 128);
+            let n_excl = spawn_hostile(&mut world, &px, &py, &pz, 0, [8, 0, 8], 128);
             assert!(n_excl < 289 * 4);
             assert_eq!(world.try_calls, n_excl);
         }

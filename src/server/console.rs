@@ -16,14 +16,15 @@ impl Server {
     /// Kick a player by name (mirrors the console `kick`).
     fn kick_player(&mut self, name: &str, reason: &str) -> bool {
         let lower = admin_normalize(name);
-        let found = self.players.iter().find_map(|(eid, cid)| {
-            match self.world.entities.get(*eid) {
-                Some(Entity::Player(p)) if admin_normalize(&p.username) == lower => {
-                    Some((*eid, *cid))
-                }
-                _ => None,
-            }
-        });
+        let found =
+            self.players
+                .iter()
+                .find_map(|(eid, cid)| match self.world.entities.get(*eid) {
+                    Some(Entity::Player(p)) if admin_normalize(&p.username) == lower => {
+                        Some((*eid, *cid))
+                    }
+                    _ => None,
+                });
         match found {
             Some((eid, cid)) => {
                 if let Some(mut sess) = self.sessions.remove(&cid) {
@@ -136,15 +137,7 @@ impl Server {
                         if let Some(cid) = self.players.get(&e1).copied() {
                             if let Some(sess) = self.sessions.get_mut(&cid) {
                                 if let SessionState::Play(play, _) = &mut sess.state {
-                                    play.teleport_to(
-                                        &mut self.world,
-                                        e1,
-                                        pos[0],
-                                        pos[1],
-                                        pos[2],
-                                        yaw,
-                                        pitch,
-                                    );
+                                    play.teleport_to(&mut self.world, e1, pos, yaw, pitch);
                                 }
                             }
                         }

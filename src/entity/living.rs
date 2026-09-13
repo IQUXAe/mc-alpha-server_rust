@@ -259,10 +259,13 @@ pub struct MoveFeedback {
     pub pos_y: f64,
 }
 
+/// Move closure shared by the heading kernels.
+pub type DoMove = fn(dx: f64, dy: f64, dz: f64, out: &mut MoveFeedback) -> bool;
+
 pub struct HeadingWorld {
     pub touching_liquid: Option<fn() -> bool>,
     pub on_ladder: Option<fn() -> bool>,
-    pub do_move: Option<fn(dx: f64, dy: f64, dz: f64, out: &mut MoveFeedback) -> bool>,
+    pub do_move: Option<DoMove>,
 }
 
 /// Full heading integration (mirrors `EntityLiving::moveEntityWithHeading`).
@@ -278,12 +281,15 @@ pub struct HeadingIo {
 /// Shared heading core (mirrors `EntityLiving::moveEntityWithHeading`).
 /// World answers arrive as closures. Returns false when the move itself fails.
 ///
-/// Java reference (`EntityLiving.java:425-480`):
+/// Scalar args stay explicit: the two `FnMut` closures prevent clean
+/// struct grouping without generic churn, and the order mirrors Java
+/// (`EntityLiving.java:425-480`):
 /// - water branch: accel 0.02, damping 0.8, gravity -0.02;
 /// - lava branch: accel 0.02, damping 0.5, gravity -0.02;
 /// - swim-up: horizontal collision => motionY = 0.3 (no jump needed);
 /// - ground friction = block slipperiness * 0.91 (0.6 default, 0.98 ice);
 /// - ladder clamp + climb use horizontal collision, not vertical.
+#[allow(clippy::too_many_arguments)]
 pub fn living_heading_run(
     strafe: f32,
     forward: f32,
@@ -400,6 +406,7 @@ fn fly_apply(strafe: f32, forward: f32, acceleration: f32, yaw: f32) -> Option<F
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     fn attack(
         health: i16,
         resist: i32,

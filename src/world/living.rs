@@ -47,8 +47,12 @@ impl World {
             Some(Entity::Mob(_)) | Some(Entity::Animal(_)) | Some(Entity::Player(_)) => {
                 let (l, px, pz) = match self.entities.get(id) {
                     Some(Entity::Mob(m)) => (&m.living, m.living.body.pos[0], m.living.body.pos[2]),
-                    Some(Entity::Animal(a)) => (&a.living, a.living.body.pos[0], a.living.body.pos[2]),
-                    Some(Entity::Player(p)) => (&p.living, p.living.body.pos[0], p.living.body.pos[2]),
+                    Some(Entity::Animal(a)) => {
+                        (&a.living, a.living.body.pos[0], a.living.body.pos[2])
+                    }
+                    Some(Entity::Player(p)) => {
+                        (&p.living, p.living.body.pos[0], p.living.body.pos[2])
+                    }
                     _ => unreachable!(),
                 };
                 let (ax, az, has) = match attacker.and_then(|a| self.entities.get(a)) {
@@ -129,11 +133,12 @@ impl World {
     /// (spawn height, per-axis jitter, default pickup delay).
     fn sheep_shear(&mut self, id: EntityId, attacker: Option<EntityId>) {
         let (px, py, pz, h) = match self.entities.get(id) {
-            Some(Entity::Animal(a))
-                if a.kind == AnimalKind::Sheep && !a.sheared =>
-            {
-                (a.living.body.pos[0], a.living.body.pos[1], a.living.body.pos[2], a.living.body.height)
-            }
+            Some(Entity::Animal(a)) if a.kind == AnimalKind::Sheep && !a.sheared => (
+                a.living.body.pos[0],
+                a.living.body.pos[1],
+                a.living.body.pos[2],
+                a.living.body.height,
+            ),
             _ => return,
         };
         let living_attacker = attacker
@@ -277,10 +282,11 @@ impl World {
     }
 
     /// Death scatter (mirrors `EntityPlayerMP::onDeath` drops): every
-    /// non-empty main/armor/crafting stack becomes an item entity at feet
-    /// + 0.5 with drop velocity (3 world-RNG draws per stack) and a 40-tick
-    /// pickup delay; all banks clear. The inventory-resend packet is the
-    /// network slice's.
+    /// non-empty main/armor/crafting stack becomes an item entity at the
+    /// player's feet (offset by 0.5) with drop velocity (3 world-RNG draws
+    /// per stack) and a 40-tick pickup delay; all banks clear.
+    ///
+    /// The inventory-resend packet is the network slice's.
     fn scatter_player_inventory(&mut self, id: EntityId, px: f64, py: f64, pz: f64) {
         use crate::entity::player::player_drop_velocity;
         let stacks: Vec<crate::inventory::ItemStack> = match self.entities.get(id) {

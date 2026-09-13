@@ -6,6 +6,9 @@ use crate::entity::table::{AnimalKind, LivingBody, MobKind};
 /// Block-entity data by cell (mirrors the C++ per-chunk `TileEntity`
 /// objects, stored flat until the tile tick slice needs behavior).
 #[derive(Clone, Copy, Debug)]
+// Chest/Furnace states are large but Copy and cells are few; boxing would
+// kill Copy for a lint without measured gain. Revisit with profiling.
+#[allow(clippy::large_enum_variant)]
 pub enum TileData {
     Furnace(crate::tile_entity::furnace::FurnaceState),
     Chest(crate::tile_entity::chest::ChestState),
