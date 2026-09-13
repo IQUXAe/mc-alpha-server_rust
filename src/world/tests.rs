@@ -41,15 +41,30 @@
     fn test_set_block_regenerates_skylight() {
         let mut w = world_with_floor();
         // Lone pillar: the stone goes dark and the cell below gets
-        // sideways leak (mirrors the C++ setBlock skylight regen; the
-        // fresh world starts fully dark, so any light proves the pass).
+        // sideways leak (the fresh world starts fully dark, so any light
+        // proves the pass). Regen is coalesced to refresh_light.
         w.set_block_id(3, 70, 4, 1);
+        w.refresh_light();
         assert_eq!(w.saved_light_value(0, 3, 70, 4), 0);
         assert_eq!(w.saved_light_value(0, 3, 69, 4), 14);
         // Pull the pillar: full sky again.
         w.set_block_id(3, 70, 4, 0);
+        w.refresh_light();
         assert_eq!(w.saved_light_value(0, 3, 69, 4), 15);
         assert_eq!(w.saved_light_value(0, 3, 127, 4), 15);
+    }
+
+    #[test]
+    fn test_light_coalesces_per_chunk() {
+        let mut w = world_with_floor();
+        // Three writes, one chunk: a single regen covers them all.
+        w.set_block_id(3, 70, 4, 1);
+        w.set_block_id(4, 70, 4, 1);
+        w.set_block_id(3, 71, 5, 1);
+        assert_eq!(w.light_dirty.len(), 1);
+        w.refresh_light();
+        assert!(w.light_dirty.is_empty());
+        assert_eq!(w.saved_light_value(0, 3, 69, 4), 14);
     }
 
     fn ceiling_world() -> World {
@@ -84,6 +99,7 @@
         // C++ spreads across, a future pass may teach it).
         let mut a = ceiling_world();
         a.set_block_id(15, 100, 8, 0);
+        a.refresh_light();
         let mut b = ceiling_world();
         b.chunks.get_mut(&(0, 0)).unwrap().set_block_id(15, 100, 8, 0);
         assert_eq!(a.saved_light_value(0, 15, 99, 8), 15);

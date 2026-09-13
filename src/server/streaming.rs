@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use crate::server::sessions::{Session, SessionState};
 use crate::server::{ConnId, Server, chunk_key, chunk_of_key};
-use crate::server_constants::CHUNKS_PER_TICK;
+use crate::server_constants::{CHUNKS_PER_TICK, CHUNK_GEN_PER_TICK};
 use crate::session::{pkt_map_chunk, pkt_pre_chunk, tile_packet};
 
 pub struct PlayStream {
@@ -96,19 +96,35 @@ impl Server {
             stream.queue = merged;
         }
         // Send within budget (mirrors the 15-chunk pass; the native
-        // ensure path loads the store first, then generates).
+        // ensure path loads the store first, then generates). Fresh
+        // generation is separately budgeted: a cold generate costs ~12 ms,
+        // so unbounded ensures while exploring blow the 50 ms tick.
+        // Skipped chunks stay queued for the next ticks.
         let mut sent_now = 0;
+        let mut generated = 0;
         let mut i = 0;
         while i < stream.queue.len() && sent_now < CHUNKS_PER_TICK as usize {
             let (qx, qz) = stream.queue[i];
-            for dx in -1..=1 {
+            let mut deferred = false;
+            'nb: for dx in -1..=1 {
                 for dz in -1..=1 {
                     let (nx, nz) = (qx + dx, qz + dz);
                     if !self.world.has_chunk(nx, nz) && !self.world.recall_chunk(nx, nz) {
                         let _ = self.world.load_chunk_from(&mut self.store, nx, nz);
+                        if !self.world.has_chunk(nx, nz) {
+                            generated += 1;
+                            if generated > CHUNK_GEN_PER_TICK {
+                                deferred = true;
+                                break 'nb;
+                            }
+                        }
                     }
                     self.world.ensure_chunk(nx, nz);
                 }
+            }
+            if deferred {
+                i += 1;
+                continue;
             }
             let populated = self
                 .world

@@ -752,7 +752,8 @@
         join(&mut srv, &mut a, "Steve");
         srv.queue_console("kick Steve".to_string());
         srv.tick();
-        let (id, text) = pump_until(&mut a, &mut srv);
+        // Background block changes can arrive first; wait for the kick.
+        let (id, text) = pump_match(&mut a, &mut srv, &|(id, _)| *id == 255);
         assert_eq!(id, 255);
         assert!(text.contains("Kicked by admin"));
         assert!(srv.players.is_empty());

@@ -28,7 +28,7 @@ pub mod physics;
 pub mod spawning;
 pub mod tiles;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::aabb::AxisAlignedBB;
 use crate::block::table::{BlockMaterial, BlockType, block_properties_get};
 use crate::chunk::Chunk;
@@ -162,9 +162,14 @@ pub struct World {
     /// (rebuilt once per tick; per-mob scans allocated a Vec each and made
     /// the mob pass quadratic).
     pub(crate) player_pos_cache: (i64, Vec<[f64; 3]>),
+    /// Chunks with stale skylight after id writes through
+    /// [`World::set_block_id`]; the end of the world tick regenerates each
+    /// once instead of once per write (lava/water storms write thousands
+    /// of cells per tick).
+    pub(crate) light_dirty: HashSet<(i32, i32)>,
     /// Population guard (mirrors `World::isPopulating`): decoration
-    /// sets bypass skylight regen exactly like the C++ populate path
-    /// (the write-back regenerates explicitly instead).
+    /// sets bypass skylight regen (the write-back regenerates explicitly
+    /// instead).
     pub(crate) populating: bool,
     /// Terrain generator, built lazily (eleven octave tables; tests that
     /// never generate pay nothing; skipped in `Debug` dumps).
@@ -217,6 +222,7 @@ impl World {
             status_events: Vec::new(),
             pending_tnt: Vec::new(),
             player_pos_cache: (-1, Vec::new()),
+            light_dirty: HashSet::new(),
             populating: false,
             generator: None,
             chunks: HashMap::new(),
@@ -335,10 +341,10 @@ impl World {
 
     /// Chunk-map half of [`World::set_block_id`]: the `populating` flag
     /// travels explicitly so the decorator tree accessor shares one flow.
-    /// Skylight follows the C++ `setBlock` path (full regen while a world
-    /// holds the chunk); the native BFS pass stays single-chunk, so a
-    /// one-cell fringe seam at borders is a known approximation until
-    /// the pass learns cross-chunk spread like the C++ one does.
+    /// Skylight regen is the caller's job (`regen = true` for immediate
+    /// single writes like tree growth; the world tick coalesces bulk
+    /// writes and regenerates each dirty chunk once via
+    /// [`World::refresh_light`]).
     pub(crate) fn set_block_id_in(
         chunks: &mut HashMap<(i32, i32), Chunk>,
         populating: bool,
@@ -346,6 +352,7 @@ impl World {
         y: i32,
         z: i32,
         id: u8,
+        regen: bool,
     ) -> bool {
         if !(0..WORLD_HEIGHT).contains(&y) {
             return false;
@@ -353,7 +360,7 @@ impl World {
         let (cx, cz, lx, lz) = Self::chunk_of(x, z);
         let changed =
             chunks.get_mut(&(cx, cz)).map(|c| c.set_block_id(lx, y, lz, id)).unwrap_or(false);
-        if changed && !populating {
+        if changed && !populating && regen {
             if let Some(c) = chunks.get_mut(&(cx, cz)) {
                 c.generate_skylight_map();
             }
@@ -384,17 +391,30 @@ impl World {
     }
 
     /// Missing chunk or out-of-range Y: no-op returning false (mirrors the
-    /// NoChunkLoad setters swallowing silently). On change the skylight
-    /// follows the C++ `setBlock` path (full regen while a world holds
-    /// the chunk); population sets bypass it via [`World::populating`].
-    /// Every real change is queued in [`World::block_updates`] for the
-    /// server tick to broadcast.
+    /// NoChunkLoad setters swallowing silently). Every real change lands
+    /// in [`World::block_updates`] for broadcast and marks its chunk in
+    /// `light_dirty`; skylight itself regenerates once per chunk in
+    /// [`World::refresh_light`] at the end of the world tick.
     pub fn set_block_id(&mut self, x: i32, y: i32, z: i32, id: u8) -> bool {
-        if Self::set_block_id_in(&mut self.chunks, self.populating, x, y, z, id) {
+        if Self::set_block_id_in(&mut self.chunks, self.populating, x, y, z, id, false) {
             self.block_updates.push([x, y, z]);
+            if !self.populating {
+                let (cx, cz, _, _) = Self::chunk_of(x, z);
+                self.light_dirty.insert((cx, cz));
+            }
             true
         } else {
             false
+        }
+    }
+
+    /// Regenerate skylight once per dirty chunk. Runs at the end of the
+    /// world tick so chunk packets go out with fresh light.
+    pub(crate) fn refresh_light(&mut self) {
+        for (cx, cz) in std::mem::take(&mut self.light_dirty) {
+            if let Some(c) = self.chunks.get_mut(&(cx, cz)) {
+                c.generate_skylight_map();
+            }
         }
     }
 

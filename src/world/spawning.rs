@@ -187,7 +187,7 @@ impl World {
     /// the network slice's). Two-phase instead of interleaved, which is
     /// equivalent here: fresh drops always carry a pickup delay, and
     /// native players hold still between network ticks.
-    fn pickup_items(&mut self) {
+    pub(crate) fn pickup_items(&mut self) {
         let mut items: Vec<EntityId> = Vec::new();
         for oid in self.entities.alive_ids() {
             if let Some(Entity::Item(e)) = self.entities.get(oid) {
@@ -289,6 +289,7 @@ impl World {
         self.pickup_items();
         self.entities.purge_dead();
         self.unload_chunks();
+        self.refresh_light();
     }
 
     /// Native furnace ticking (mirrors the `World::tick` tile-entity pass

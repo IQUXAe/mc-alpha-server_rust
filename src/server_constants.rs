@@ -11,6 +11,9 @@ pub const VIEW_DISTANCE_MAX: i32 = 15;
 pub const VIEW_DISTANCE_DEFAULT: i32 = 10;
 
 pub const CHUNKS_PER_TICK: i32 = 15;
+/// Fresh chunk generations per tick per player (a cold generate costs
+/// ~12 ms; without a budget exploring new terrain blows the 50 ms tick).
+pub const CHUNK_GEN_PER_TICK: i32 = 2;
 pub const CHUNK_GENERATION_EXTRA_RADIUS: i32 = 2;
 
 pub const MAX_PACKET_SIZE: i32 = 65536;
@@ -63,6 +66,7 @@ mod tests {
     #[test]
     fn chunk_loading() {
         assert_eq!(CHUNKS_PER_TICK, 15);
+        assert_eq!(CHUNK_GEN_PER_TICK, 2);
         assert_eq!(CHUNK_GENERATION_EXTRA_RADIUS, 2);
     }
 

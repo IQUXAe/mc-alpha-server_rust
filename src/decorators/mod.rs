@@ -48,7 +48,7 @@ impl<'a> BlockAccess for WorldAccess<'a> {
         World::block_id_in(self.chunks, x, y, z)
     }
     fn set_block_id(&mut self, x: i32, y: i32, z: i32, id: u8) {
-        if World::set_block_id_in(self.chunks, self.populating, x, y, z, id) {
+        if World::set_block_id_in(self.chunks, self.populating, x, y, z, id, true) {
             if let Some(q) = self.queue.as_deref_mut() {
                 q.push([x, y, z]);
             }

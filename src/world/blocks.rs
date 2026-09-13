@@ -513,7 +513,10 @@ impl World {
 
     /// Due scheduled updates, oldest first, capped at 1000 per tick like
     /// C++ (stale entries die on the id check; missing chunks skip).
+    /// A 10 ms time budget also applies so a maturing wave (e.g. a big
+    /// lava lake) can't blow the 50 ms tick; leftovers run next tick.
     pub(crate) fn process_scheduled_ticks(&mut self) {
+        let start = std::time::Instant::now();
         let mut ran = 0;
         while ran < 1000 {
             let next = self.scheduled.iter().next().map(|(k, _)| *k);
@@ -536,6 +539,9 @@ impl World {
                 continue;
             }
             self.update_block_tick(x, y, z);
+            if ran % 64 == 0 && start.elapsed().as_millis() > 10 {
+                break;
+            }
         }
     }
 
