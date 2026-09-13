@@ -24,6 +24,13 @@
         id
     }
 
+    /// Tick-start id snapshot (what `tick_world` hands to `tick_mob`/`tick_animal`).
+    fn snap(w: &World) -> Vec<EntityId> {
+        let mut v = w.entities.alive_ids();
+        v.sort_unstable();
+        v
+    }
+
     #[test]
     fn test_block_access_and_missing_chunks() {
         let mut w = world_with_floor();
@@ -443,7 +450,7 @@
         let mut w = world_with_floor();
         let player = add_player(&mut w, "steve", 10.5, 64.0, 4.5);
         let zombie = add_mob(&mut w, MobKind::Zombie, 3.5, 64.0, 4.5);
-        w.tick_mob(zombie);
+        { let __ids = snap(&w); w.tick_mob(zombie, &__ids); }
         assert_eq!(
             match w.entities.get(zombie).unwrap() {
                 crate::entity::table::Entity::Mob(m) => m.target,
@@ -452,7 +459,7 @@
             Some(player)
         );
         for _ in 0..40 {
-            w.tick_mob(zombie);
+            { let __ids = snap(&w); w.tick_mob(zombie, &__ids); }
         }
         let x = w.entities.get(zombie).unwrap().body().pos[0];
         assert!(x > 3.5, "zombie should walk east toward the player, x={x}");
@@ -463,7 +470,7 @@
         let mut w = world_with_floor();
         let zombie = add_mob(&mut w, MobKind::Zombie, 8.5, 64.0, 8.5);
         for _ in 0..300 {
-            w.tick_mob(zombie);
+            { let __ids = snap(&w); w.tick_mob(zombie, &__ids); }
         }
         let p = w.entities.get(zombie).unwrap().body().pos;
         let moved = (p[0] - 8.5).abs() + (p[2] - 8.5).abs();
@@ -478,21 +485,21 @@
         if let Some(crate::entity::table::Entity::Mob(m)) = w.entities.get_mut(zombie) {
             m.burn_ticks = 21;
         }
-        w.tick_mob(zombie);
+        { let __ids = snap(&w); w.tick_mob(zombie, &__ids); }
         let (burn, fire) = match w.entities.get(zombie).unwrap() {
             crate::entity::table::Entity::Mob(m) => (m.burn_ticks, m.living.body.fire),
             _ => unreachable!(),
         };
         assert_eq!((burn, fire), (20, 20));
         assert_eq!(mob_health(&w, zombie), 20); // 21 % 20 != 0: no hit yet
-        w.tick_mob(zombie);
+        { let __ids = snap(&w); w.tick_mob(zombie, &__ids); }
         assert_eq!(mob_health(&w, zombie), 19); // 20 % 20 == 0: one burn damage
         // Small fires go out once the burn ends.
         if let Some(crate::entity::table::Entity::Mob(m)) = w.entities.get_mut(zombie) {
             m.burn_ticks = 0;
             m.living.body.fire = 10;
         }
-        w.tick_mob(zombie);
+        { let __ids = snap(&w); w.tick_mob(zombie, &__ids); }
         assert_eq!(
             match w.entities.get(zombie).unwrap() {
                 crate::entity::table::Entity::Mob(m) => m.living.body.fire,
@@ -514,7 +521,7 @@
             if let Some(crate::entity::table::Entity::Mob(m)) = w.entities.get_mut(zombie) {
                 m.living.body.set_position(3.5, 64.0, 4.5);
             }
-            w.tick_mob(zombie);
+            { let __ids = snap(&w); w.tick_mob(zombie, &__ids); }
             let burn = match w.entities.get(zombie).unwrap() {
                 crate::entity::table::Entity::Mob(m) => m.burn_ticks,
                 _ => unreachable!(),
@@ -532,7 +539,7 @@
         let _player = add_player(&mut w, "steve", 6.5, 64.0, 4.5);
         let spider = add_mob(&mut w, MobKind::Spider, 3.5, 64.0, 4.5);
         set_sky(&mut w, 3, 64, 4, 15);
-        w.tick_mob(spider);
+        { let __ids = snap(&w); w.tick_mob(spider, &__ids); }
         assert_eq!(
             match w.entities.get(spider).unwrap() {
                 crate::entity::table::Entity::Mob(m) => m.target,
@@ -543,7 +550,7 @@
         // Night falls: the next acquire (5-tick refresh) locks on.
         set_sky(&mut w, 3, 64, 4, 0);
         for _ in 0..6 {
-            w.tick_mob(spider);
+            { let __ids = snap(&w); w.tick_mob(spider, &__ids); }
         }
         assert!(
             match w.entities.get(spider).unwrap() {
@@ -559,7 +566,7 @@
         let mut w = world_with_floor();
         let zombie = add_mob(&mut w, MobKind::Zombie, 8.5, 75.0, 8.5);
         for _ in 0..200 {
-            w.tick_mob(zombie);
+            { let __ids = snap(&w); w.tick_mob(zombie, &__ids); }
             if w.entities.get(zombie).unwrap().body().on_ground {
                 break;
             }
@@ -576,7 +583,7 @@
             a.egg_timer = 2;
         }
         for _ in 0..200 {
-            w.tick_animal(chicken);
+            { let __ids = snap(&w); w.tick_animal(chicken, &__ids); }
             if w.entities.get(chicken).unwrap().body().on_ground {
                 break;
             }
@@ -617,7 +624,7 @@
         let mut w = world_with_floor();
         let z1 = add_mob(&mut w, MobKind::Zombie, 3.5, 64.0, 4.5);
         let z2 = add_mob(&mut w, MobKind::Zombie, 3.7, 64.0, 4.5);
-        w.tick_mob(z1);
+        { let __ids = snap(&w); w.tick_mob(z1, &__ids); }
         let m2 = w.entities.get(z2).unwrap().body().motion;
         assert!(
             m2[0] != 0.0 || m2[2] != 0.0,
@@ -1219,7 +1226,7 @@
         let mut w = world_with_floor();
         let player = add_player(&mut w, "steve", 4.5, 64.0, 4.5);
         let zombie = add_mob(&mut w, MobKind::Zombie, 3.5, 64.0, 4.5);
-        w.tick_mob(zombie);
+        { let __ids = snap(&w); w.tick_mob(zombie, &__ids); }
         assert_eq!(player_health(&w, player), 15);
         assert_eq!(
             match w.entities.get(zombie).unwrap() {
@@ -1229,7 +1236,7 @@
             20
         );
         // Cooldown gates the next punch.
-        w.tick_mob(zombie);
+        { let __ids = snap(&w); w.tick_mob(zombie, &__ids); }
         assert_eq!(player_health(&w, player), 15);
     }
 
@@ -1238,7 +1245,7 @@
         let mut w = world_with_floor();
         let _player = add_player(&mut w, "steve", 10.5, 64.0, 4.5);
         let skel = add_mob(&mut w, MobKind::Skeleton, 3.5, 64.0, 4.5);
-        w.tick_mob(skel);
+        { let __ids = snap(&w); w.tick_mob(skel, &__ids); }
         let arrows: Vec<EntityId> = w
             .entities
             .alive_ids()
@@ -1299,7 +1306,7 @@
                 }
                 e.body_mut().set_position(3.5, 64.0, 4.5);
             }
-            w2.tick_mob(c2);
+            { let __ids = snap(&w2); w2.tick_mob(c2, &__ids); }
             if w2.entities.get(c2).unwrap().body().dead {
                 break;
             }

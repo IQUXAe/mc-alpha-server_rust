@@ -5,7 +5,7 @@ use crate::entity::ai::{
     ai_animal_path_weight, ai_mob_path_weight, chase_speed, face_run, steer_run, wander_pick,
     SteerIn,
 };
-use crate::entity::living::{HeadingIo, MoveFeedback, living_fall_damage, living_heading_run};
+use crate::entity::living::{living_fall_damage, living_heading_run, HeadingIo, MoveFeedback};
 use crate::entity::physics::entity_push;
 use crate::entity::table::{
     mob_attack_reach, mob_burns_in_daylight, AnimalKind, Entity, EntityId, MobKind,
@@ -13,7 +13,7 @@ use crate::entity::table::{
 use crate::material::Material;
 use crate::math_helper::{floor_double, sqrt_float};
 use crate::pathfinder::find_path_native;
-use crate::world::{GRASS_BLOCK_ID, WORLD_HEIGHT, World};
+use crate::world::{World, GRASS_BLOCK_ID, WORLD_HEIGHT};
 
 /// Creature AI tuning constants (mirror the C++ `EntityCreature` /
 /// `EntityMob` literals).
@@ -614,26 +614,32 @@ impl World {
 
     /// Shove live neighbors apart (mirrors the tail of the mob/animal
     /// ticks: `getEntitiesWithinAABBExcludingEntity` skips the dead, then
-    /// `applyEntityCollision` pushes both sides). Id-sorted for
-    /// determinism.
-    fn push_neighbors(&mut self, id: EntityId) {
-        let (mask, self_pos) = match self.entities.get(id) {
-            Some(e) => (e.body().bounding_box.expand(0.2, 0.0, 0.2), e.body().pos),
+    /// `applyEntityCollision` pushes both sides). `ids` is the tick's
+    /// id-sorted snapshot from [`World::tick_world`]: no per-entity
+    /// allocate-and-sort, and mid-tick spawns wait a tick like C++
+    /// (they are not dispatched this tick either).
+    fn push_neighbors(&mut self, id: EntityId, ids: &[EntityId]) {
+        let (mask, self_pos, self_pushable) = match self.entities.get(id) {
+            Some(e) => (
+                e.body().bounding_box.expand(0.2, 0.0, 0.2),
+                e.body().pos,
+                !e.body().dead,
+            ),
             None => return,
         };
-        let self_pushable = !self.entities.get(id).map(|e| e.body().dead).unwrap_or(true);
         let mut others: Vec<(EntityId, f64, f64)> = Vec::new();
-        for oid in self.entities.alive_ids() {
+        for oid in ids {
+            let oid = *oid;
             if oid == id {
                 continue;
             }
             if let Some(o) = self.entities.get(oid) {
-                if mask.intersects_with(&o.body().bounding_box) {
+                if !o.body().dead && mask.intersects_with(&o.body().bounding_box) {
                     others.push((oid, o.body().pos[0], o.body().pos[2]));
                 }
             }
         }
-        others.sort_by_key(|(oid, _, _)| *oid);
+        // `ids` arrives sorted, so `others` is already sorted.
         for (oid, ox, oz) in others {
             let (sx, sz) = match self.entities.get(id) {
                 Some(e) => (e.body().pos[0], e.body().pos[2]),
@@ -744,7 +750,7 @@ impl World {
             self.player_pos_cache = (self.time, pp);
         }
         let mut best: Option<f64> = None;
-        for q in self.player_pos_cache.1.clone() {
+        for q in &self.player_pos_cache.1 {
             let (dx, dy, dz) = (q[0] - px, q[1] - py, q[2] - pz);
             let d2 = dx * dx + dy * dy + dz * dz;
             best = Some(best.map_or(d2, |b: f64| b.min(d2)));
@@ -810,7 +816,7 @@ impl World {
     /// and burn schedule, daylight ignition, AI, heading move with fall
     /// damage, and neighbor shoves. Like C++, the AI and move still run
     /// when burn damage kills mid-tick.
-    pub fn tick_mob(&mut self, id: EntityId) {
+    pub fn tick_mob(&mut self, id: EntityId, ids: &[EntityId]) {
         // Peaceful (difficulty 0): mobs die instead of ticking
         // (Java EntityMobs.onUpdate: monstersEnabled == 0 -> dead).
         if self.difficulty == 0 {
@@ -855,13 +861,13 @@ impl World {
                 self.attack_living(id, damage, None);
             }
         }
-        self.push_neighbors(id);
+        self.push_neighbors(id, ids);
     }
 
     /// Animal tick (mirrors `EntityAnimals::tick`): living maintenance, the
     /// shared creature AI, heading move with fall damage (chickens override
     /// `onFall` to a no-op), chicken extras, and neighbor shoves.
-    pub fn tick_animal(&mut self, id: EntityId) {
+    pub fn tick_animal(&mut self, id: EntityId, ids: &[EntityId]) {
         if self.despawn_check(id) {
             return;
         }
@@ -883,7 +889,7 @@ impl World {
         if kind == AnimalKind::Chicken {
             self.chicken_extra(id);
         }
-        self.push_neighbors(id);
+        self.push_neighbors(id, ids);
     }
 
     /// Chicken extras (mirrors `tickExtra`): slow sinking plus the egg

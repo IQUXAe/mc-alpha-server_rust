@@ -356,7 +356,6 @@ impl PlaySession {
             else {
                 return false;
             };
-            drop(u);
             let bid = ctx.world.entities.alloc_id();
             let mut b = crate::entity::table::Body::new(bid, 1.5, 0.6, 0.3);
             b.set_position(hx as f64 + 0.5, hy as f64 + 1.5, hz as f64 + 0.5);

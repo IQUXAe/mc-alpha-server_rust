@@ -29,16 +29,30 @@ pub mod pos;
 pub mod spawning;
 pub mod tiles;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::aabb::AxisAlignedBB;
-use crate::block::table::{BlockMaterial, BlockType, block_properties_get};
+use crate::block::table::{block_properties_get, BlockMaterial, BlockType};
 use crate::chunk::Chunk;
 use crate::entity::table::{EntityId, EntityTable};
 use crate::material::Material;
 use crate::random::JavaRandom;
 use crate::tracker::Tracker;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const WORLD_HEIGHT: i32 = 128;
+
+/// Per-phase wall-clock breakdown of the last [`World::tick_world`], in
+/// microseconds. Read-only diagnostics (perf harness, lag warnings).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TickStats {
+    pub spawners_us: u64,
+    pub furnaces_us: u64,
+    pub scheduled_us: u64,
+    pub random_us: u64,
+    pub entities_us: u64,
+    pub pickup_us: u64,
+    pub light_us: u64,
+    pub total_us: u64,
+}
 
 /// Alpha grass block id (C++ `Block::grass->blockID`); shared by AI
 /// path-weights and the animal spawn fitness check.
@@ -179,6 +193,8 @@ pub struct World {
     pub entities: EntityTable,
     pub tracker: Tracker,
     pub(crate) rng: JavaRandom,
+    /// Breakdown of the last [`World::tick_world`] by phase.
+    pub last_tick_stats: TickStats,
 }
 
 impl std::fmt::Debug for World {
@@ -230,6 +246,7 @@ impl World {
             entities: EntityTable::new(),
             tracker: Tracker::new(),
             rng: JavaRandom::new(seed),
+            last_tick_stats: TickStats::default(),
         }
     }
 

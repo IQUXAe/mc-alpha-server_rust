@@ -5,8 +5,8 @@
 
 use crate::entity::table::{AnimalKind, Entity, EntityId, MobKind};
 use crate::math_helper::floor_double;
-use crate::world::{GRASS_BLOCK_ID, WORLD_HEIGHT, World, is_air_material};
 use crate::world::tiles::TileData;
+use crate::world::{is_air_material, World, GRASS_BLOCK_ID, WORLD_HEIGHT};
 
 impl crate::mob_spawning::SpawnerWorld for World {
     fn spawn_next_int(&mut self, bound: i32) -> i32 {
@@ -251,21 +251,35 @@ impl World {
     /// tiles, scheduled and random block ticks, entity dispatch on a
     /// snapshot (mid-tick spawns wait a tick like C++), item pickup,
     /// dead-row purge, and periodic unload.
+    ///
+    /// Fills [`World::last_tick_stats`] with per-phase wall-clock times
+    /// (10 `Instant` reads per tick, ~100ns total — noise against ms ticks).
     pub fn tick_world(&mut self) {
+        use std::time::Instant;
+        let total = Instant::now();
         self.time += 1;
+        let t = Instant::now();
         if self.spawn_monsters {
             self.spawn_hostile_mobs();
         }
         if self.spawn_animals {
             self.spawn_passive_mobs();
         }
+        let spawners = t.elapsed();
+        let t = Instant::now();
         self.tick_furnaces();
         self.tick_primed_tnt();
+        let furnaces = t.elapsed();
+        let t = Instant::now();
         self.process_scheduled_ticks();
+        let scheduled = t.elapsed();
+        let t = Instant::now();
         self.random_block_ticks();
+        let random = t.elapsed();
+        let t = Instant::now();
         let mut ids = self.entities.alive_ids();
         ids.sort_unstable();
-        for id in ids {
+        for &id in &ids {
             if self.entities.get(id).map(|e| e.body().dead).unwrap_or(true) {
                 continue;
             }
@@ -274,16 +288,31 @@ impl World {
                 Some(Entity::Falling(_)) => self.tick_falling(id),
                 Some(Entity::Boat(_)) => self.tick_boat(id),
                 Some(Entity::Arrow(_)) => self.tick_arrow(id),
-                Some(Entity::Mob(_)) => self.tick_mob(id),
-                Some(Entity::Animal(_)) => self.tick_animal(id),
+                Some(Entity::Mob(_)) => self.tick_mob(id, &ids),
+                Some(Entity::Animal(_)) => self.tick_animal(id, &ids),
                 Some(Entity::Player(_)) => self.tick_player(id),
                 None => {}
             }
         }
+        let entities = t.elapsed();
+        let t = Instant::now();
         self.pickup_items();
         self.entities.purge_dead();
         self.unload_chunks();
+        let pickup = t.elapsed();
+        let t = Instant::now();
         self.refresh_light();
+        let light = t.elapsed();
+        self.last_tick_stats = crate::world::TickStats {
+            spawners_us: spawners.as_micros() as u64,
+            furnaces_us: furnaces.as_micros() as u64,
+            scheduled_us: scheduled.as_micros() as u64,
+            random_us: random.as_micros() as u64,
+            entities_us: entities.as_micros() as u64,
+            pickup_us: pickup.as_micros() as u64,
+            light_us: light.as_micros() as u64,
+            total_us: total.elapsed().as_micros() as u64,
+        };
     }
 
     /// Native furnace ticking (mirrors the `World::tick` tile-entity pass
