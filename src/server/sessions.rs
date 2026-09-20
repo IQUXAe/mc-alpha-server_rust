@@ -68,6 +68,7 @@ impl Server {
         world.spawn_monsters = settings.spawn_monsters;
         world.spawn_animals = settings.spawn_animals;
         world.level_name = settings.level_name.clone();
+        world.unload_radius = settings.view_distance + 2;
         let store =
             ChunkStore::open(&format!("{level_dir}/db")).map_err(|e| format!("cannot open chunk store: {e}"))?;
         if !world.load_level_from(level_dir) {

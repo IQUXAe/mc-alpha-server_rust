@@ -227,6 +227,7 @@ impl Server {
             }
         }
         self.world.tick_world();
+        self.flush_unloaded_chunks();
         self.drain_pickup_events();
         self.drain_death_events();
         self.push_health_changes();
@@ -234,6 +235,7 @@ impl Server {
             && self.tick_count.is_multiple_of(self.settings.auto_save_interval as u64)
         {
             self.save_players();
+            self.save_world();
         }
         self.tracker_tick();
         let cids: Vec<ConnId> = self.sessions.keys().copied().collect();

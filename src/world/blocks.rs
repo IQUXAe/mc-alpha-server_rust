@@ -690,6 +690,7 @@ impl World {
     /// save: native unloads stage to memory without hitting the disk,
     /// while C++ unloads save through, so staged edits must be pulled
     /// back before the flush or they die in memory).
+    #[allow(dead_code)]
     pub(crate) fn recall_all_staged(&mut self) {
         let keys: Vec<(i32, i32)> = self.unloaded.keys().copied().collect();
         for (cx, cz) in keys {

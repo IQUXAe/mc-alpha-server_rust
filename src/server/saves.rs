@@ -84,13 +84,26 @@ impl Server {
         }
     }
 
+    /// Flush staged unloaded chunks to LevelDB and free their memory.
+    pub(crate) fn flush_unloaded_chunks(&mut self) {
+        if self.world.unloaded.is_empty() {
+            return;
+        }
+        let keys: Vec<(i32, i32)> = self.world.unloaded.keys().copied().collect();
+        for (cx, cz) in keys {
+            if let Some(blob) = crate::persist::encode_chunk_blob(&self.world, cx, cz, true) {
+                let _ = self.store.put_chunk(cx, cz, &blob);
+            }
+            self.world.unloaded.remove(&(cx, cz));
+        }
+    }
+
     /// Flush level.dat plus every loaded chunk (mirrors the C++ flushing
     /// `saveWorld`; live boats pin their chunks like the C++ touch-up,
-    /// staged unloads are recalled first since native staging is
-    /// memory-only while C++ unloads save through).
+    /// staged unloads are flushed to LevelDB and freed from memory).
     pub(crate) fn save_world(&mut self) {
         self.world.save_level_to(&self.level_dir);
-        self.world.recall_all_staged();
+        self.flush_unloaded_chunks();
         for eid in self.world.entities.alive_ids() {
             if let Some(Entity::Boat(b)) = self.world.entities.get(eid) {
                 let (cx, cz) = (

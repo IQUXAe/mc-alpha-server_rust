@@ -260,13 +260,17 @@ impl World {
 
     /// Crate-visible chunk lookup for persistence.
     pub(crate) fn chunk_ref(&self, cx: i32, cz: i32) -> Option<&Chunk> {
-        self.chunks.get(&(cx, cz))
+        self.chunks.get(&(cx, cz)).or_else(|| self.unloaded.get(&(cx, cz)))
     }
 
     /// Crate-visible mutable chunk lookup (the server clears the
     /// save-dirty flag after flushing a chunk to the store).
     pub(crate) fn chunk_ref_mut(&mut self, cx: i32, cz: i32) -> Option<&mut Chunk> {
-        self.chunks.get_mut(&(cx, cz))
+        if self.chunks.contains_key(&(cx, cz)) {
+            self.chunks.get_mut(&(cx, cz))
+        } else {
+            self.unloaded.get_mut(&(cx, cz))
+        }
     }
 
     /// Loaded chunk coordinates (mirrors the `chunks_` snapshot at the
