@@ -166,6 +166,8 @@ struct Entry {
     last_mounted: EntityId,
     last_motion: [f64; 3],
     last_health: i16,
+    is_player: bool,
+    status2_sent: bool,
     tick: u64,
     tracking: HashSet<EntityId>,
 }
@@ -190,6 +192,8 @@ impl Entry {
             last_mounted: NO_ENTITY,
             last_motion: [0.0; 3],
             last_health: -1,
+            is_player: e.is_player,
+            status2_sent: false,
             tick: 0,
             tracking: HashSet::new(),
         }
@@ -382,10 +386,24 @@ impl Tracker {
         self.send_to_watchers(id, bytes, out);
     }
 
-    /// Generic status broadcast (creeper 4/5, etc.).
-    pub fn status_fx(&self, id: EntityId, status: i8, out: &mut Vec<Outbox>) {
+    /// Generic status broadcast (creeper 4/5, hurt 2, etc.).
+    pub fn status_fx(&mut self, id: EntityId, status: i8, out: &mut Vec<Outbox>) {
         let bytes = encode(Packet::EntityStatus { entity_id: id, status });
         self.send_to_watchers(id, bytes, out);
+        if status == 2 {
+            if let Some(entry) = self.entries.get_mut(&id) {
+                entry.status2_sent = true;
+            }
+        }
+    }
+
+    /// Immediate velocity impulse broadcast (mirrors Packet28 on knockback/damage).
+    pub fn velocity_fx(&self, id: EntityId, motion: [f64; 3], out: &mut Vec<Outbox>) {
+        let bytes = encode_velocity(id, motion);
+        self.send_to_watchers(id, bytes.clone(), out);
+        if self.entries.get(&id).map(|e| e.is_player).unwrap_or(false) {
+            out.push(Outbox { to: id, bytes });
+        }
     }
 
     /// Per-entity per-tick update (mirrors `updateTracking` + `sendUpdates`).
@@ -522,11 +540,11 @@ impl Tracker {
         // Health / sneak / fire (living).
         if let Some(health) = e.health {
             let last = self.entries.get(&e.id).map(|en| en.last_health).unwrap_or(-1);
+            let already_sent = self.entries.get(&e.id).map(|en| en.status2_sent).unwrap_or(false);
             if last >= 0 && health != last {
                 // Java EntityLiving:313 sends hurt (2) BEFORE the death check,
-                // so the killing blow flashes too. The old `health > 0` guard
-                // swallowed it (only 3 arrived).
-                if health < last {
+                // so the killing blow flashes too. Suppressed if status_fx already emitted it.
+                if health < last && !already_sent {
                     self.send_to_watchers(
                         e.id,
                         encode(Packet::EntityStatus { entity_id: e.id, status: 2 }),
@@ -535,6 +553,12 @@ impl Tracker {
                 }
                 if let Some(entry) = self.entries.get_mut(&e.id) {
                     entry.last_health = health;
+                    entry.status2_sent = false;
+                }
+            } else if already_sent {
+                if let Some(entry) = self.entries.get_mut(&e.id) {
+                    entry.last_health = health;
+                    entry.status2_sent = false;
                 }
             }
             let was_sneaking = self.entries.get(&e.id).map(|en| en.last_sneaking).unwrap_or(false);

@@ -153,7 +153,8 @@ impl Server {
     fn drain_death_events(&mut self) {
         let deaths = std::mem::take(&mut self.world.death_events);
         let statuses = std::mem::take(&mut self.world.status_events);
-        if deaths.is_empty() && statuses.is_empty() {
+        let velocities = std::mem::take(&mut self.world.velocity_events);
+        if deaths.is_empty() && statuses.is_empty() && velocities.is_empty() {
             return;
         }
         let mut out = Vec::new();
@@ -162,6 +163,9 @@ impl Server {
         }
         for (id, status) in statuses {
             self.world.tracker.status_fx(id, status, &mut out);
+        }
+        for (id, motion) in velocities {
+            self.world.tracker.velocity_fx(id, motion, &mut out);
         }
         self.route_outbox(out);
     }
@@ -216,6 +220,13 @@ impl Server {
         }
         self.poll_network(std::time::Duration::ZERO);
         self.tick_count += 1;
+
+        // Process incoming client packets and session events first (mirrors MinecraftServer func_715_a).
+        let cids: Vec<ConnId> = self.sessions.keys().copied().collect();
+        for cid in cids {
+            self.pump_one(cid);
+        }
+
         if self.tick_count.is_multiple_of(TICKS_PER_SECOND as u64) {
             let bytes = pkt_time(self.world.time);
             let cids: Vec<ConnId> = self.sessions.keys().copied().collect();
@@ -239,10 +250,6 @@ impl Server {
             self.save_world();
         }
         self.tracker_tick();
-        let cids: Vec<ConnId> = self.sessions.keys().copied().collect();
-        for cid in cids {
-            self.pump_one(cid);
-        }
         self.drain_block_updates();
         self.poll_network(std::time::Duration::ZERO);
         let lines = std::mem::take(&mut self.console);

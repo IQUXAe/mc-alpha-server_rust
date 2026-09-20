@@ -55,8 +55,8 @@ impl PlaySession {
         let cx = eye[0].clamp(tb.bounding_box.min_x, tb.bounding_box.max_x);
         let cy = eye[1].clamp(tb.bounding_box.min_y, tb.bounding_box.max_y);
         let cz = eye[2].clamp(tb.bounding_box.min_z, tb.bounding_box.max_z);
-        if (eye[0] - cx).powi(2) + (eye[1] - cy).powi(2) + (eye[2] - cz).powi(2) > ATTACK_REACH_SQ
-        {
+        let d2 = (eye[0] - cx).powi(2) + (eye[1] - cy).powi(2) + (eye[2] - cz).powi(2);
+        if d2 > ATTACK_REACH_SQ {
             return None;
         }
         if !ctx.world.attack_los(me, target) {

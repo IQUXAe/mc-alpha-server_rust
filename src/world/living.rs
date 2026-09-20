@@ -122,6 +122,12 @@ impl World {
             }
             _ => return,
         }
+        if r.send_status {
+            self.status_events.push((id, 2));
+        }
+        if r.knocked {
+            self.velocity_events.push((id, [r.kmx, r.kmy, r.kmz]));
+        }
         if died {
             self.kill_living_by(id, attacker);
         }

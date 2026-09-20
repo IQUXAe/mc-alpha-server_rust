@@ -169,6 +169,9 @@ pub struct World {
     /// (mirrors `WorldServer.func_9206_a`): creeper fuse 4/5, etc.
     /// Drained like `death_events` before the tracker tick.
     pub status_events: Vec<(EntityId, i8)>,
+    /// Entity velocity impulses since the last tick as `(id, motion)`
+    /// (mirrors `EntityTrackerEntry` `field_9078_E` -> `Packet28` broadcast).
+    pub velocity_events: Vec<(EntityId, [f64; 3])>,
     /// Primed TNT pending blasts as `(x, y, z, ticks_left)` (our stand-in
     /// for `EntityTNTPrimed`: the block is already air, the blast lands at
     /// radius 4 when the fuse runs out — 80 ticks hand-lit, 10..30 chained).
@@ -237,6 +240,7 @@ impl World {
             item_pickups: Vec::new(),
             death_events: Vec::new(),
             status_events: Vec::new(),
+            velocity_events: Vec::new(),
             pending_tnt: Vec::new(),
             player_pos_cache: (-1, Vec::new()),
             light_dirty: HashSet::new(),

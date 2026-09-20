@@ -861,3 +861,63 @@
         assert_eq!(ids, vec![1, 6, 13, 8, 5, 5, 5, 4]);
         assert_eq!(srv.players.len(), 1);
     }
+
+    #[test]
+    fn animal_hit_delivers_immediate_status_and_velocity() {
+        let mut srv = mk_server("");
+        // Build a solid platform under spawn so Steve and pig stand on ground without void/fall damage.
+        for x in -5..=5 {
+            for z in -5..=5 {
+                srv.world.set_block_id(x, 63, z, 1);
+                srv.world.set_block_id(x, 64, z, 1);
+                srv.world.set_block_id(x, 65, z, 0);
+                srv.world.set_block_id(x, 66, z, 0);
+            }
+        }
+
+        let (mut a, _cid) = pair(&mut srv);
+        join(&mut srv, &mut a, "Steve");
+        let player_id = srv.entity_named("Steve").unwrap();
+
+        // Summon a pig at Steve's location.
+        srv.queue_console("summon pig 1 Steve".to_string());
+        srv.tick();
+        srv.tick(); // tracker introduces pig to Steve (Packet24)
+
+        let pig_id = srv
+            .world
+            .entities
+            .alive_ids()
+            .iter()
+            .copied()
+            .find(|eid| matches!(srv.world.entities.get(*eid), Some(Entity::Animal(_))))
+            .expect("pig must exist");
+
+        // Place Steve and pig directly on the floor at y=65.0 with clear line-of-sight.
+        srv.world.entities.get_mut(player_id).unwrap().body_mut().set_position(0.5, 65.0, 0.5);
+        srv.world.entities.get_mut(pig_id).unwrap().body_mut().set_position(0.5, 65.0, 1.5);
+
+        // Drain any pending chatter (including mob spawn packet).
+        drain_all(&mut a);
+
+        // Player attacks pig (left click).
+        let mut pkt7 = Vec::new();
+        pkt7.push(7);
+        pkt7.extend_from_slice(&player_id.to_be_bytes());
+        pkt7.extend_from_slice(&pig_id.to_be_bytes());
+        pkt7.push(1); // left click
+        a.write_all(&pkt7).unwrap();
+
+        // Process hit and produce responses on the exact same tick.
+        srv.poll_network(Duration::from_millis(50));
+        srv.tick();
+
+        // Read all packets sent back to player on this tick.
+        let mut pids = Vec::new();
+        while let Some((pid, _)) = next_pkt_opt(&mut a, Duration::from_millis(50)) {
+            pids.push(pid);
+        }
+
+        assert!(pids.contains(&38), "Packet38 (EntityStatus hurt) must arrive on the same tick, got: {pids:?}");
+        assert!(pids.contains(&28), "Packet28 (EntityVelocity knockback) must arrive on the same tick, got: {pids:?}");
+    }
