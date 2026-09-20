@@ -18,6 +18,7 @@ flate2 = "1"
 zstd = "0.13"
 ureq = "2"
 rusty-leveldb = "4"
+mio = { version = "1.0", features = ["os-poll", "net"] }
 
 [lints.clippy]
 all = "warn"

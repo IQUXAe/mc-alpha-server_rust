@@ -1,4 +1,3 @@
-use std::net::TcpStream;
 use std::io::Read;
 
 #[derive(Clone, Copy)]
@@ -163,35 +162,35 @@ pub enum Packet {
     AttachEntity { entity_id: i32, vehicle_id: i32 },
 }
 
-fn read_exact(stream: &mut TcpStream, buf: &mut [u8]) -> std::io::Result<()> {
+fn read_exact<R: Read>(stream: &mut R, buf: &mut [u8]) -> std::io::Result<()> {
     stream.read_exact(buf)
 }
 
-fn read_u8(stream: &mut TcpStream) -> std::io::Result<u8> {
+fn read_u8<R: Read>(stream: &mut R) -> std::io::Result<u8> {
     let mut buf = [0; 1];
     stream.read_exact(&mut buf)?;
     Ok(buf[0])
 }
 
-fn read_u16(stream: &mut TcpStream) -> std::io::Result<u16> {
+fn read_u16<R: Read>(stream: &mut R) -> std::io::Result<u16> {
     let mut buf = [0; 2];
     stream.read_exact(&mut buf)?;
     Ok(u16::from_be_bytes(buf))
 }
 
-fn read_i32(stream: &mut TcpStream) -> std::io::Result<i32> {
+fn read_i32<R: Read>(stream: &mut R) -> std::io::Result<i32> {
     let mut buf = [0; 4];
     stream.read_exact(&mut buf)?;
     Ok(i32::from_be_bytes(buf))
 }
 
-fn read_i64(stream: &mut TcpStream) -> std::io::Result<i64> {
+fn read_i64<R: Read>(stream: &mut R) -> std::io::Result<i64> {
     let mut buf = [0; 8];
     stream.read_exact(&mut buf)?;
     Ok(i64::from_be_bytes(buf))
 }
 
-fn read_utf(stream: &mut TcpStream) -> std::io::Result<String> {
+fn read_utf<R: Read>(stream: &mut R) -> std::io::Result<String> {
     let len = read_u16(stream)? as usize;
     if len == 0 {
         return Ok(String::new());
@@ -201,22 +200,22 @@ fn read_utf(stream: &mut TcpStream) -> std::io::Result<String> {
     String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-fn read_f64(stream: &mut TcpStream) -> std::io::Result<f64> {
+fn read_f64<R: Read>(stream: &mut R) -> std::io::Result<f64> {
     let val = read_i64(stream)?;
     Ok(f64::from_bits(val as u64))
 }
 
-fn read_f32(stream: &mut TcpStream) -> std::io::Result<f32> {
+fn read_f32<R: Read>(stream: &mut R) -> std::io::Result<f32> {
     let val = read_i32(stream)?;
     Ok(f32::from_bits(val as u32))
 }
 
-fn read_bool(stream: &mut TcpStream) -> std::io::Result<bool> {
+fn read_bool<R: Read>(stream: &mut R) -> std::io::Result<bool> {
     let val = read_u8(stream)?;
     Ok(val != 0)
 }
 
-pub(crate) fn read_packet_payload(stream: &mut TcpStream, packet_id: u8) -> std::io::Result<PacketData> {
+pub(crate) fn read_packet_payload<R: Read>(stream: &mut R, packet_id: u8) -> std::io::Result<PacketData> {
     match packet_id {
         0 => Ok(PacketData::KeepAlive),
         1 => {
@@ -406,6 +405,28 @@ pub(crate) fn read_packet_payload(stream: &mut TcpStream, packet_id: u8) -> std:
                 format!("Unsupported incoming packet ID: {}", packet_id),
             ))
         }
+    }
+}
+
+/// Try to decode one packet from the front of `buf`.
+///
+/// If a full packet is present, it is drained from `buf` and `Ok(Some(pkt))`
+/// is returned. If more data is needed, `buf` is left untouched and `Ok(None)`
+/// is returned. If the data is corrupt or violates protocol, `Err` is returned.
+pub(crate) fn try_decode_packet(buf: &mut Vec<u8>) -> std::io::Result<Option<PacketData>> {
+    if buf.is_empty() {
+        return Ok(None);
+    }
+    let packet_id = buf[0];
+    let mut cursor = std::io::Cursor::new(&buf[1..]);
+    match read_packet_payload(&mut cursor, packet_id) {
+        Ok(pkt) => {
+            let consumed = 1 + cursor.position() as usize;
+            buf.drain(..consumed);
+            Ok(Some(pkt))
+        }
+        Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e),
     }
 }
 

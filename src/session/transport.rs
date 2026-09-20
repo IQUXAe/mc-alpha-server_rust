@@ -1,17 +1,11 @@
-//! Socket transport: `Conn` read/write threads and packet framing.
-//! Split out of `session.rs`; behavior unchanged.
+//! Socket transport: non-blocking `mio` TCP connection and packet framing.
 
+use std::cell::RefCell;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-use crate::network::{PacketData, read_packet_payload};
+use std::net::TcpListener;
+use mio::net::TcpStream;
+use crate::network::{PacketData, try_decode_packet};
 use crate::server_constants::SEND_QUEUE_MAX_BYTES;
-
-// ---- connection pump (one read + one write thread per socket) ----
 
 /// Connection event: a decoded packet or a dead socket.
 pub enum ConnEvent {
@@ -19,125 +13,217 @@ pub enum ConnEvent {
     Dropped,
 }
 
-/// Owned TCP connection: a read thread decodes packets into `inbound`, a
-/// write thread ships `outbound` byte blobs. Either thread exiting means
-/// the socket is gone (mirrors the C++ read/write thread pair).
+struct ConnInner {
+    stream: TcpStream,
+    recv_buf: Vec<u8>,
+    outbound: Vec<u8>,
+    inbound: Vec<ConnEvent>,
+    closed: bool,
+    closing: bool,
+    dropped_reported: bool,
+}
+
+impl ConnInner {
+    fn poll_read(&mut self) {
+        if self.closed {
+            return;
+        }
+        let mut buf = [0u8; 8192];
+        loop {
+            match self.stream.read(&mut buf) {
+                Ok(0) => {
+                    self.closed = true;
+                    if !self.dropped_reported {
+                        self.dropped_reported = true;
+                        self.inbound.push(ConnEvent::Dropped);
+                    }
+                    return;
+                }
+                Ok(n) => {
+                    self.recv_buf.extend_from_slice(&buf[..n]);
+                    if self.recv_buf.len() > SEND_QUEUE_MAX_BYTES as usize {
+                        self.closed = true;
+                        if !self.dropped_reported {
+                            self.dropped_reported = true;
+                            self.inbound.push(ConnEvent::Dropped);
+                        }
+                        return;
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    break;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(_) => {
+                    self.closed = true;
+                    if !self.dropped_reported {
+                        self.dropped_reported = true;
+                        self.inbound.push(ConnEvent::Dropped);
+                    }
+                    return;
+                }
+            }
+        }
+
+        while !self.recv_buf.is_empty() {
+            match try_decode_packet(&mut self.recv_buf) {
+                Ok(Some(PacketData::KickDisconnect { .. })) => {
+                    self.closed = true;
+                    if !self.dropped_reported {
+                        self.dropped_reported = true;
+                        self.inbound.push(ConnEvent::Dropped);
+                    }
+                    break;
+                }
+                Ok(Some(pkt)) => {
+                    self.inbound.push(ConnEvent::Packet(pkt));
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    self.closed = true;
+                    if !self.dropped_reported {
+                        self.dropped_reported = true;
+                        self.inbound.push(ConnEvent::Dropped);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn flush_outbound(&mut self) {
+        if self.closed {
+            return;
+        }
+        while !self.outbound.is_empty() {
+            match self.stream.write(&self.outbound) {
+                Ok(0) => {
+                    self.closed = true;
+                    return;
+                }
+                Ok(n) => {
+                    self.outbound.drain(..n);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    break;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(_) => {
+                    self.closed = true;
+                    return;
+                }
+            }
+        }
+        if self.outbound.is_empty() && self.closing {
+            let _ = self.stream.shutdown(std::net::Shutdown::Write);
+            self.closed = true;
+        }
+    }
+}
+
+/// Owned TCP connection: event-driven non-blocking I/O via `mio`.
 pub struct Conn {
-    inbound: Receiver<ConnEvent>,
-    outbound: Sender<Vec<u8>>,
-    closer: Sender<()>,
-    release: Option<TcpStream>,
-    queued_bytes: Arc<AtomicUsize>,
+    inner: RefCell<ConnInner>,
     pub remote: String,
 }
 
 impl Conn {
-    pub fn new(stream: TcpStream) -> std::io::Result<Self> {
+    pub fn new(stream: std::net::TcpStream) -> std::io::Result<Self> {
         let remote = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-        // Blocking reads like the C++ network manager: idle policy lives
-        // one level up (login 600 / play 1200 ticks with dead bypass), so
-        // the socket layer must not pre-empt it (death screens go quiet).
-        stream.set_read_timeout(None)?;
-        let release = stream.try_clone().ok();
-        let mut reader = stream.try_clone()?;
-        let mut writer = stream;
-        let (tx_in, inbound) = mpsc::channel();
-        let (outbound, rx_out): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
-        let (closer, close_rx): (Sender<()>, Receiver<()>) = mpsc::channel();
-        let queued_bytes = Arc::new(AtomicUsize::new(0));
-        let qb_writer = Arc::clone(&queued_bytes);
+        stream.set_nonblocking(true)?;
+        let stream = TcpStream::from_std(stream);
+        Ok(Self::from_mio(stream, remote))
+    }
 
-        thread::Builder::new()
-            .name(format!("conn-read-{remote}"))
-            .spawn(move || {
-                loop {
-                    let mut id = [0u8; 1];
-                    if reader.read_exact(&mut id).is_err() {
-                        break;
-                    }
-                    match read_packet_payload(&mut reader, id[0]) {
-                        Ok(PacketData::KickDisconnect { .. }) => break,
-                        Ok(pkt) => {
-                            if tx_in.send(ConnEvent::Packet(pkt)).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                let _ = tx_in.send(ConnEvent::Dropped);
-            })
-            .map_err(std::io::Error::other)?;
+    pub fn from_mio(stream: TcpStream, remote: String) -> Self {
+        Self {
+            inner: RefCell::new(ConnInner {
+                stream,
+                recv_buf: Vec::with_capacity(1024),
+                outbound: Vec::with_capacity(1024),
+                inbound: Vec::new(),
+                closed: false,
+                closing: false,
+                dropped_reported: false,
+            }),
+            remote,
+        }
+    }
 
-        thread::Builder::new()
-            .name(format!("conn-write-{remote}"))
-            .spawn(move || {
-                // Drain-then-FIN: queued kick bytes must reach the client,
-                // so close only stops the writer after the queue empties
-                // (a Both-shutdown here would RST pending data away).
-                loop {
-                    while let Ok(msg) = rx_out.try_recv() {
-                        qb_writer.fetch_sub(msg.len(), Ordering::Relaxed);
-                        if writer.write_all(&msg).is_err() || writer.flush().is_err() {
-                            return;
-                        }
-                    }
-                    if close_rx.try_recv().is_ok() {
-                        let _ = writer.flush();
-                        let _ = writer.shutdown(std::net::Shutdown::Write);
-                        return;
-                    }
-                    match rx_out.recv_timeout(Duration::from_millis(20)) {
-                        Ok(msg) => {
-                            qb_writer.fetch_sub(msg.len(), Ordering::Relaxed);
-                            if writer.write_all(&msg).is_err() || writer.flush().is_err() {
-                                return;
-                            }
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                    }
-                }
-            })
-            .map_err(std::io::Error::other)?;
+    /// Read available bytes and decode packets.
+    pub fn poll_read(&self) {
+        self.inner.borrow_mut().poll_read();
+    }
 
-        Ok(Self { inbound, outbound, closer, release, queued_bytes, remote })
+    /// Flush queued outbound bytes to the socket.
+    pub fn flush_outbound(&self) {
+        self.inner.borrow_mut().flush_outbound();
     }
 
     /// Non-blocking drain of queued events.
     pub fn drain(&self) -> Vec<ConnEvent> {
-        let mut out = Vec::new();
-        while let Ok(ev) = self.inbound.try_recv() {
-            out.push(ev);
+        let mut inner = self.inner.borrow_mut();
+        inner.poll_read();
+        let mut out = std::mem::take(&mut inner.inbound);
+        if inner.closed && !inner.dropped_reported {
+            inner.dropped_reported = true;
+            out.push(ConnEvent::Dropped);
         }
         out
     }
 
-    /// Queue bytes for the socket (drops silently once dead, bounds queue size).
+    /// Queue bytes for the socket (bounds queue size and flushes).
     pub fn send(&self, bytes: Vec<u8>) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.closed {
+            return;
+        }
         let len = bytes.len();
-        let prev = self.queued_bytes.fetch_add(len, Ordering::Relaxed);
-        if prev + len > SEND_QUEUE_MAX_BYTES as usize {
-            self.queued_bytes.fetch_sub(len, Ordering::Relaxed);
+        if inner.outbound.len() + len > SEND_QUEUE_MAX_BYTES as usize {
             crate::server_log::warning(&format!(
                 "Send queue limit exceeded ({} bytes) for {}, dropping connection",
-                prev + len,
+                inner.outbound.len() + len,
                 self.remote
             ));
+            drop(inner);
             self.close();
             return;
         }
-        let _ = self.outbound.send(bytes);
+        inner.outbound.extend_from_slice(&bytes);
+        inner.flush_outbound();
     }
 
-    /// Graceful close: the writer drains queued bytes and FINs (the
-    /// server calls this on kick/timeout/shutdown); the blocked reader
-    /// is released separately so ghost threads cannot linger.
+    /// Graceful close: flush outbound bytes, FIN the socket, and report Dropped.
     pub fn close(&self) {
-        let _ = self.closer.send(());
-        if let Some(s) = &self.release {
-            let _ = s.shutdown(std::net::Shutdown::Read);
+        let mut inner = self.inner.borrow_mut();
+        inner.closing = true;
+        inner.flush_outbound();
+        if inner.outbound.is_empty() {
+            let _ = inner.stream.shutdown(std::net::Shutdown::Both);
+            inner.closed = true;
+            if !inner.dropped_reported {
+                inner.dropped_reported = true;
+                inner.inbound.push(ConnEvent::Dropped);
+            }
         }
+    }
+
+    /// Crate-internal mutable access to underlying mio TcpStream for poll registration.
+    pub(crate) fn with_stream_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut TcpStream) -> R,
+    {
+        let mut inner = self.inner.borrow_mut();
+        f(&mut inner.stream)
+    }
+
+    /// Has any outbound bytes pending to be flushed?
+    pub(crate) fn has_pending_outbound(&self) -> bool {
+        !self.inner.borrow().outbound.is_empty()
     }
 }
 
