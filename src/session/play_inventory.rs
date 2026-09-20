@@ -15,6 +15,82 @@ impl PlaySession {
         ItemStack::new(held_id, 1, 0)
     }
 
+    /// Handle client dropping items into the world (mirrors NetServerHandler.handlePickupSpawn).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn pickup_spawn(
+        &mut self,
+        ctx: &mut SessionCtx,
+        item_id: i16,
+        count: i8,
+        x: i32,
+        y: i32,
+        z: i32,
+        rotation: i8,
+        pitch: i8,
+        roll: i8,
+    ) {
+        if count <= 0 || item_id <= 0 {
+            return;
+        }
+        let (px, py, pz) = match ctx.world.entities.get(self.player) {
+            Some(e) if !e.body().dead => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+            _ => return,
+        };
+        let rx = x as f64 / 32.0;
+        let ry = y as f64 / 32.0;
+        let rz = z as f64 / 32.0;
+        let dist_sq = (px - rx).powi(2) + (py - ry).powi(2) + (pz - rz).powi(2);
+        if dist_sq > 64.0 {
+            return;
+        }
+
+        let mut damage = 0;
+        let mut has_item = false;
+        if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(self.player) {
+            let cur = p.inventory.current;
+            if cur >= 0 && (cur as usize) < p.inventory.main.len() {
+                if let Some(s) = &mut p.inventory.main[cur as usize] {
+                    if s.item_id == item_id as i32 {
+                        damage = s.damage;
+                        has_item = true;
+                        s.count -= count as i32;
+                        if s.count <= 0 {
+                            p.inventory.main[cur as usize] = None;
+                        }
+                    }
+                }
+            }
+            if !has_item {
+                for slot in &mut p.inventory.main {
+                    if let Some(s) = slot {
+                        if s.item_id == item_id as i32 {
+                            damage = s.damage;
+                            has_item = true;
+                            s.count -= count as i32;
+                            if s.count <= 0 {
+                                *slot = None;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !has_item && self.held_id != item_id as i32 {
+            return;
+        }
+        self.sync_held(ctx.world);
+
+        let eid = ctx.world.spawn_item_entity(item_id as i32, count as i32, damage, rx, ry, rz);
+        if let Some(Entity::Item(it)) = ctx.world.entities.get_mut(eid) {
+            it.body.motion[0] = rotation as f64 / 128.0;
+            it.body.motion[1] = pitch as f64 / 128.0;
+            it.body.motion[2] = roll as f64 / 128.0;
+            it.pickup_delay = 10;
+        }
+    }
+
     pub(crate) fn apply_inventory(
         &mut self,
         ctx: &mut SessionCtx,

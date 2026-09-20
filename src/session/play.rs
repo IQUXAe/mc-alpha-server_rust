@@ -295,7 +295,20 @@ impl PlaySession {
                 self.complex_entity(ctx, x, y as i32, z, &nbt_data);
                 None
             }
-            PacketData::PickupSpawn { .. } => None,
+            PacketData::PickupSpawn {
+                item_id,
+                count,
+                x,
+                y,
+                z,
+                rotation,
+                pitch,
+                roll,
+                ..
+            } => {
+                self.pickup_spawn(ctx, item_id, count, x, y, z, rotation, pitch, roll);
+                None
+            }
             PacketData::KickDisconnect { .. } => {
                 self.gone = true;
                 Some(SessionOutcome::Gone)

@@ -740,3 +740,55 @@
         decoder.read_to_end(&mut back).unwrap();
         assert_eq!(back, c.map_raw());
     }
+
+    #[test]
+    fn test_pickup_spawn_drops_item_entity_and_updates_inventory() {
+        use crate::entity::table::Entity;
+        use crate::inventory::ItemStack;
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 3;
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(3, 5, 0));
+            p.inventory.current = 0;
+        }
+        let mut bc = Vec::new();
+        let pkt = PacketData::PickupSpawn {
+            entity_id: -1,
+            item_id: 3,
+            count: 1,
+            x: (3.5 * 32.0) as i32,
+            y: (64.0 * 32.0) as i32,
+            z: (4.5 * 32.0) as i32,
+            rotation: 10,
+            pitch: 20,
+            roll: 5,
+        };
+        sess.pump(&mut ctx(&mut w, &ops, &mut bc), pkt);
+
+        // Player inventory slot 0 should be decremented from 5 to 4
+        if let Some(Entity::Player(p)) = w.entities.get(player) {
+            assert_eq!(p.inventory.main[0].as_ref().map(|s| s.count), Some(4));
+        }
+
+        // An item entity should have been spawned in the world
+        let items: Vec<_> = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .filter_map(|id| match w.entities.get(id) {
+                Some(Entity::Item(it)) => Some((id, it.item_id, it.count, it.pickup_delay, it.body.motion)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items.len(), 1);
+        let (_, item_id, count, pickup_delay, motion) = items[0];
+        assert_eq!(item_id, 3);
+        assert_eq!(count, 1);
+        assert_eq!(pickup_delay, 10);
+        assert!((motion[0] - 10.0 / 128.0).abs() < 1e-5);
+        assert!((motion[1] - 20.0 / 128.0).abs() < 1e-5);
+        assert!((motion[2] - 5.0 / 128.0).abs() < 1e-5);
+    }
