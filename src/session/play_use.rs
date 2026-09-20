@@ -61,6 +61,17 @@ impl PlaySession {
         if !(0..crate::world::WORLD_HEIGHT).contains(&y) {
             return None;
         }
+        let (px, py, pz) = match ctx.world.entities.get(me) {
+            Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+            None => return None,
+        };
+        let dist_sq = (px - (x as f64 + 0.5)).powi(2)
+            + (py - (y as f64 + 0.5)).powi(2)
+            + (pz - (z as f64 + 0.5)).powi(2);
+        if dist_sq > 64.0 {
+            self.send_block_change(ctx.world, x, y, z);
+            return None;
+        }
         let dir = (direction as u8) as i32;
         let prot = {
             let sp = ctx.world.spawn;

@@ -120,6 +120,23 @@ impl PlaySession {
         if nx != x || ny != y || nz != z {
             return;
         }
+        let (px, py, pz) = match ctx.world.entities.get(self.player) {
+            Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+            None => return,
+        };
+        let dist_sq = (px - (x as f64 + 0.5)).powi(2)
+            + (py - (y as f64 + 0.5)).powi(2)
+            + (pz - (z as f64 + 0.5)).powi(2);
+        if dist_sq > 64.0 {
+            return;
+        }
+        if ctx.spawn_protection > 0 {
+            let sp = ctx.world.spawn;
+            let protected = (x - sp[0]).abs().max((z - sp[2]).abs()) <= ctx.spawn_protection;
+            if protected && !self.is_op(ctx) {
+                return;
+            }
+        }
         let tile = match ctx.world.tiles.get(&(x, y, z)) {
             Some(t) => *t,
             None => return,
@@ -157,7 +174,11 @@ impl PlaySession {
                                 _ => continue,
                             };
                             if slot < s.slots.len() {
-                                s.slots[slot] = crate::persist::read_stack(&im.map);
+                                let mut stack = crate::persist::read_stack(&im.map);
+                                stack.count = stack.count.clamp(0, 64);
+                                if stack.count > 0 && (0..32000).contains(&stack.item_id) {
+                                    s.slots[slot] = stack;
+                                }
                             }
                         }
                     }
@@ -176,7 +197,11 @@ impl PlaySession {
                                 _ => continue,
                             };
                             if slot < s.slots.len() {
-                                s.slots[slot] = crate::persist::read_stack(&im.map);
+                                let mut stack = crate::persist::read_stack(&im.map);
+                                stack.count = stack.count.clamp(0, 64);
+                                if stack.count > 0 && (0..32000).contains(&stack.item_id) {
+                                    s.slots[slot] = stack;
+                                }
                             }
                         }
                     }
