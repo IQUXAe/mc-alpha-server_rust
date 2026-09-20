@@ -21,7 +21,7 @@
         let props = format!("{base}/server.properties");
         std::fs::write(
             &props,
-            format!("online-mode=false\nlevel-seed=7\nspawn-monsters=false\nspawn-animals=false\n{props_extra}"),
+            format!("online-mode=false\nlevel-seed=7\nspawn-monsters=false\nspawn-animals=false\nview-distance=3\n{props_extra}"),
         )
         .unwrap();
         let mut s = Server::open(
