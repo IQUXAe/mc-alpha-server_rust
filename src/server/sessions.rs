@@ -79,6 +79,12 @@ impl Server {
         if let Err(e) = std::fs::create_dir_all(player_dir) {
             crate::server_log::warning(&format!("cannot create {player_dir}: {e}"));
         }
+        let poll = mio::Poll::new().map_err(|e| format!("cannot create mio poll: {e}"))?;
+        let events = mio::Events::with_capacity(1024);
+        let waker = std::sync::Arc::new(
+            mio::Waker::new(poll.registry(), crate::server::WAKER_TOKEN)
+                .map_err(|e| format!("cannot create mio waker: {e}"))?,
+        );
         Ok(Self {
             settings,
             world,
@@ -99,6 +105,10 @@ impl Server {
             tick_count: 0,
             console: Vec::new(),
             running: true,
+            poll,
+            events,
+            waker,
+            listener: None,
         })
     }
 
@@ -143,20 +153,100 @@ impl Server {
     /// Accept one socket (mirrors the accept loop gate: per-IP cap,
     /// silently dropped past it). Returns the new connection id.
     pub fn accept(&mut self, stream: std::net::TcpStream) -> Option<ConnId> {
+        let conn = Conn::new(stream).ok()?;
+        self.register_conn(conn)
+    }
+
+    /// Accept an already-constructed mio socket.
+    pub fn accept_mio(&mut self, stream: mio::net::TcpStream) -> Option<ConnId> {
         let remote = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-        let ip = ip_of(&remote).to_string();
+        let conn = Conn::from_mio(stream, remote);
+        self.register_conn(conn)
+    }
+
+    fn register_conn(&mut self, conn: Conn) -> Option<ConnId> {
+        let ip = ip_of(&conn.remote).to_string();
         let count = self.ip_count.get(&ip).copied().unwrap_or(0);
         if count >= MAX_CONNECTIONS_PER_IP {
             log::info(&format!("Connection limit reached for IP {ip}"));
             return None;
         }
-        let conn = Conn::new(stream).ok()?;
         let id = self.next_conn;
         self.next_conn += 1;
         *self.ip_count.entry(ip).or_insert(0) += 1;
+        let _ = conn.with_stream_mut(|s| {
+            self.poll.registry().register(
+                s,
+                mio::Token(id as usize),
+                mio::Interest::READABLE | mio::Interest::WRITABLE,
+            )
+        });
         let login = LoginSession::new(self.settings.online_mode);
         self.sessions.insert(id, Session { conn, state: SessionState::Login(login), idle: 0 });
         Some(id)
+    }
+
+    /// Bind a mio TcpListener to addr and register with the poll loop.
+    pub fn bind_listener(&mut self, addr: &str) -> Result<(), String> {
+        let std_listener = std::net::TcpListener::bind(addr).map_err(|e| format!("cannot bind listener: {e}"))?;
+        std_listener.set_nonblocking(true).map_err(|e| format!("cannot set nonblocking: {e}"))?;
+        let mut listener = mio::net::TcpListener::from_std(std_listener);
+        self.poll
+            .registry()
+            .register(&mut listener, crate::server::LISTENER_TOKEN, mio::Interest::READABLE)
+            .map_err(|e| format!("cannot register listener with mio: {e}"))?;
+        self.listener = Some(listener);
+        Ok(())
+    }
+
+    /// Wake up any thread waiting in `poll_network`.
+    pub fn wake(&self) {
+        let _ = self.waker.wake();
+    }
+
+    /// Poll network events with a given timeout.
+    pub fn poll_network(&mut self, timeout: std::time::Duration) {
+        match self.poll.poll(&mut self.events, Some(timeout)) {
+            Ok(()) => {}
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => return,
+            Err(e) => {
+                log::severe(&format!("mio poll error: {e}"));
+                return;
+            }
+        }
+
+        let mut accepted = Vec::new();
+        for event in self.events.iter() {
+            let token = event.token();
+            if token == crate::server::LISTENER_TOKEN {
+                if let Some(listener) = &self.listener {
+                    loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => {
+                                accepted.push(stream);
+                            }
+                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(_) => break,
+                        }
+                    }
+                }
+            } else if token == crate::server::WAKER_TOKEN {
+                // Woken up by waker
+            } else {
+                let cid = token.0 as ConnId;
+                if let Some(sess) = self.sessions.get(&cid) {
+                    if event.is_readable() {
+                        sess.conn.poll_read();
+                    }
+                    if event.is_writable() && sess.conn.has_pending_outbound() {
+                        sess.conn.flush_outbound();
+                    }
+                }
+            }
+        }
+        for s in accepted {
+            self.accept_mio(s);
+        }
     }
 
     /// Is this connection authenticated play?
@@ -182,6 +272,9 @@ impl Server {
     /// Drop a removed session: close the socket, release its IP slot.
     pub(crate) fn remove_session(&mut self, _cid: ConnId, sess: Session) {
         let ip = ip_of(&sess.conn.remote).to_string();
+        let _ = sess.conn.with_stream_mut(|s| {
+            self.poll.registry().deregister(s)
+        });
         sess.conn.close();
         if let Some(n) = self.ip_count.get_mut(&ip) {
             *n -= 1;

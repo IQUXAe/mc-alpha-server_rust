@@ -71,17 +71,10 @@ fn main() {
     let bind_ip = server.settings.server_ip.clone();
     let port = server.settings.port;
     let addr = format!("{}:{port}", if bind_ip.is_empty() { "0.0.0.0" } else { &bind_ip });
-    let listener = match std::net::TcpListener::bind(&addr) {
-        Ok(l) => l,
-        Err(e) => {
-            log::warning("**** FAILED TO BIND TO PORT!");
-            log::warning(&format!("The exception was: {e}"));
-            log::warning("Perhaps a server is already running on that port?");
-            std::process::exit(1);
-        }
-    };
-    if listener.set_nonblocking(true).is_err() {
-        log::severe("Failed to set the listener non-blocking");
+    if let Err(e) = server.bind_listener(&addr) {
+        log::warning("**** FAILED TO BIND TO PORT!");
+        log::warning(&format!("The exception was: {e}"));
+        log::warning("Perhaps a server is already running on that port?");
         std::process::exit(1);
     }
     let display = if bind_ip.is_empty() { "*" } else { bind_ip.as_str() };
@@ -97,6 +90,7 @@ fn main() {
     }
 
     let (console_tx, console_rx) = std::sync::mpsc::channel::<String>();
+    let waker = std::sync::Arc::clone(&server.waker);
     std::thread::Builder::new()
         .name("console".to_string())
         .spawn(move || {
@@ -107,6 +101,7 @@ fn main() {
                         if console_tx.send(l).is_err() {
                             break;
                         }
+                        let _ = waker.wake();
                     }
                     Err(_) => break,
                 }
@@ -114,8 +109,7 @@ fn main() {
         })
         .ok();
 
-    // Microsecond accounting (millis truncate the 1 ms sleeps to zero
-    // on coarse timers and the tick loop would starve forever).
+    // Microsecond accounting (50ms ticks).
     const TICK_MICROS: i64 = 50_000;
     let mut last = Instant::now();
     let mut lag: i64 = 0;
@@ -139,22 +133,20 @@ fn main() {
         lag += elapsed;
         while lag >= TICK_MICROS {
             lag -= TICK_MICROS;
-            loop {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        server.accept(stream);
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(_) => break,
-                }
-            }
             server.tick();
         }
         if !server.running {
             server.shutdown();
             break;
         }
-        std::thread::sleep(Duration::from_millis(1));
+
+        // Event-driven wait: poll network for remaining time until next tick.
+        let poll_timeout = if lag >= TICK_MICROS {
+            Duration::ZERO
+        } else {
+            Duration::from_micros((TICK_MICROS - lag) as u64)
+        };
+        server.poll_network(poll_timeout);
     }
     log::info("Waiting for background threads to finish saving...");
 }

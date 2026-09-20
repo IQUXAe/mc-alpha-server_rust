@@ -73,6 +73,9 @@ pub fn chunk_of_key(key: i64) -> (i32, i32) {
     ((key & 0xFFFF_FFFF) as u32 as i32, ((key >> 32) & 0xFFFF_FFFF) as u32 as i32)
 }
 
+pub const LISTENER_TOKEN: mio::Token = mio::Token(usize::MAX - 1);
+pub const WAKER_TOKEN: mio::Token = mio::Token(usize::MAX);
+
 pub struct Server {
     pub settings: Settings,
     pub world: World,
@@ -93,4 +96,8 @@ pub struct Server {
     pub tick_count: u64,
     pub console: Vec<String>,
     pub running: bool,
+    pub poll: mio::Poll,
+    pub events: mio::Events,
+    pub waker: std::sync::Arc<mio::Waker>,
+    pub listener: Option<mio::net::TcpListener>,
 }

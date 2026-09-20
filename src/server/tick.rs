@@ -214,6 +214,7 @@ impl Server {
         if !self.running {
             return;
         }
+        self.poll_network(std::time::Duration::ZERO);
         self.tick_count += 1;
         if self.tick_count.is_multiple_of(TICKS_PER_SECOND as u64) {
             let bytes = pkt_time(self.world.time);
@@ -243,6 +244,7 @@ impl Server {
             self.pump_one(cid);
         }
         self.drain_block_updates();
+        self.poll_network(std::time::Duration::ZERO);
         let lines = std::mem::take(&mut self.console);
         for line in lines {
             self.handle_console(&line);
