@@ -3,10 +3,13 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use crate::network::{PacketData, read_packet_payload};
+use crate::server_constants::SEND_QUEUE_MAX_BYTES;
 
 // ---- connection pump (one read + one write thread per socket) ----
 
@@ -24,6 +27,7 @@ pub struct Conn {
     outbound: Sender<Vec<u8>>,
     closer: Sender<()>,
     release: Option<TcpStream>,
+    queued_bytes: Arc<AtomicUsize>,
     pub remote: String,
 }
 
@@ -40,6 +44,8 @@ impl Conn {
         let (tx_in, inbound) = mpsc::channel();
         let (outbound, rx_out): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
         let (closer, close_rx): (Sender<()>, Receiver<()>) = mpsc::channel();
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let qb_writer = Arc::clone(&queued_bytes);
 
         thread::Builder::new()
             .name(format!("conn-read-{remote}"))
@@ -71,6 +77,7 @@ impl Conn {
                 // (a Both-shutdown here would RST pending data away).
                 loop {
                     while let Ok(msg) = rx_out.try_recv() {
+                        qb_writer.fetch_sub(msg.len(), Ordering::Relaxed);
                         if writer.write_all(&msg).is_err() || writer.flush().is_err() {
                             return;
                         }
@@ -82,6 +89,7 @@ impl Conn {
                     }
                     match rx_out.recv_timeout(Duration::from_millis(20)) {
                         Ok(msg) => {
+                            qb_writer.fetch_sub(msg.len(), Ordering::Relaxed);
                             if writer.write_all(&msg).is_err() || writer.flush().is_err() {
                                 return;
                             }
@@ -93,7 +101,7 @@ impl Conn {
             })
             .map_err(std::io::Error::other)?;
 
-        Ok(Self { inbound, outbound, closer, release, remote })
+        Ok(Self { inbound, outbound, closer, release, queued_bytes, remote })
     }
 
     /// Non-blocking drain of queued events.
@@ -105,8 +113,20 @@ impl Conn {
         out
     }
 
-    /// Queue bytes for the socket (drops silently once dead).
+    /// Queue bytes for the socket (drops silently once dead, bounds queue size).
     pub fn send(&self, bytes: Vec<u8>) {
+        let len = bytes.len();
+        let prev = self.queued_bytes.fetch_add(len, Ordering::Relaxed);
+        if prev + len > SEND_QUEUE_MAX_BYTES as usize {
+            self.queued_bytes.fetch_sub(len, Ordering::Relaxed);
+            crate::server_log::warning(&format!(
+                "Send queue limit exceeded ({} bytes) for {}, dropping connection",
+                prev + len,
+                self.remote
+            ));
+            self.close();
+            return;
+        }
         let _ = self.outbound.send(bytes);
     }
 
