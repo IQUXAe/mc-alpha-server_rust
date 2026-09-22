@@ -181,7 +181,8 @@ impl Server {
                 mio::Interest::READABLE | mio::Interest::WRITABLE,
             )
         });
-        let login = LoginSession::new(self.settings.online_mode);
+        let login = LoginSession::new(self.settings.online_mode)
+            .with_auth_url(self.settings.auth_server_url.clone());
         self.sessions.insert(id, Session { conn, state: SessionState::Login(login), idle: 0 });
         Some(id)
     }

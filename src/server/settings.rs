@@ -23,6 +23,7 @@ pub struct Settings {
     pub level_name: String,
     pub seed: i64,
     pub dimension: i8,
+    pub auth_server_url: String,
 }
 
 /// Leading-integer seed parse (mirrors `std::stoll`: optional `-`,
@@ -88,6 +89,10 @@ pub fn load_settings(cfg: &mut ServerConfig) -> Settings {
         level_name: cfg.get_string("level-name", "world"),
         seed,
         dimension: if cfg.get_bool("hellworld", false) { -1 } else { 0 },
+        auth_server_url: cfg.get_string(
+            "auth-server-url",
+            crate::session::login::DEFAULT_AUTH_URL,
+        ),
     }
 }
 

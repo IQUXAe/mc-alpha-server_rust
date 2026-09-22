@@ -8,35 +8,42 @@ use crate::session_packets::{pkt_handshake, pkt_kick};
 
 // ---- login state machine (mirrors NetLoginHandler) ----
 
-/// Session verification: the default hits the Mojang check endpoint
-/// (blocking HTTP, run on a worker thread); tests inject a stub.
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub const DEFAULT_AUTH_URL: &str =
+    "http://session.betacraft.uk/game/checkserver.jsp?user={user}&serverId={serverId}";
+
+static ACTIVE_VERIFICATIONS: AtomicUsize = AtomicUsize::new(0);
+const MAX_CONCURRENT_VERIFICATIONS: usize = 8;
+
+/// Session verification: the default hits the BetaCraft / custom check endpoint
+/// (blocking HTTP, run on a bounded worker thread); tests inject a stub.
 pub type VerifyFn = Box<dyn Fn(&str, &str) -> Result<String, String> + Send>;
 
-/// Default verifier (mirrors `performSessionCheck`).
-///
-/// NOTE: Mojang's legacy session.minecraft.net endpoint has been shut down
-/// since 2020, so online-mode authentication is non-functional by default.
-/// Operators in 2026+ should either run `online-mode=false` (recommended
-/// for offline LAN setups) or point the URL below at a custom backend
-/// (e.g. a Yggdrasil-compatible proxy).
+/// Creates a verifier for a specific URL template (e.g. BetaCraft proxy).
+pub fn make_default_verify(url_template: String) -> VerifyFn {
+    Box::new(move |username: &str, server_id: &str| {
+        let url = url_template
+            .replace("{user}", &urlencoding(username))
+            .replace("{serverId}", &urlencoding(server_id));
+        let body = ureq::get(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .call()
+            .map_err(|e| e.to_string())?
+            .into_string()
+            .map_err(|e| e.to_string())?;
+        let reply = body.trim().to_string();
+        if reply == "YES" {
+            Ok(reply)
+        } else {
+            Err("Session verification failed".to_string())
+        }
+    })
+}
+
+/// Default verifier using BetaCraft legacy authentication proxy.
 pub fn default_verify(username: &str, server_id: &str) -> Result<String, String> {
-    let url = format!(
-        "https://session.minecraft.net/game/checkserver.jsp?user={}&serverId={}",
-        urlencoding(username),
-        urlencoding(server_id)
-    );
-    let body = ureq::get(&url)
-        .timeout(std::time::Duration::from_secs(5))
-        .call()
-        .map_err(|e| e.to_string())?
-        .into_string()
-        .map_err(|e| e.to_string())?;
-    let reply = body.trim().to_string();
-    if reply == "YES" {
-        Ok(reply)
-    } else {
-        Err("Session verification failed".to_string())
-    }
+    make_default_verify(DEFAULT_AUTH_URL.to_string())(username, server_id)
 }
 
 fn urlencoding(s: &str) -> String {
@@ -105,8 +112,15 @@ impl LoginSession {
     }
 
     /// Test hook: replace the HTTP verifier.
+    /// Test hook: replace the HTTP verifier.
     pub fn with_verify(mut self, f: VerifyFn) -> Self {
         self.verify = Some(f);
+        self
+    }
+
+    /// Set the authentication URL template.
+    pub fn with_auth_url(mut self, url: String) -> Self {
+        self.verify = Some(make_default_verify(url));
         self
     }
 
@@ -143,6 +157,14 @@ impl LoginSession {
                 while username.ends_with(['\0', '\r', '\n', ' ']) {
                     username.pop();
                 }
+                if username.is_empty() || username.len() > 16 {
+                    self.kick("Invalid username length");
+                    return;
+                }
+                if !username.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+                    self.kick("Invalid username characters");
+                    return;
+                }
                 self.username = username.clone();
                 if protocol_version != 6 {
                     if protocol_version > 6 {
@@ -160,17 +182,30 @@ impl LoginSession {
                     self.kick("Duplicate login packet");
                     return;
                 }
+                if ACTIVE_VERIFICATIONS.load(Ordering::Relaxed) >= MAX_CONCURRENT_VERIFICATIONS {
+                    self.kick("Too many login attempts, please try again shortly");
+                    return;
+                }
+                ACTIVE_VERIFICATIONS.fetch_add(1, Ordering::SeqCst);
                 self.verifying = true;
                 self.state = LoginState::Verifying;
                 let (tx, rx) = mpsc::channel();
                 self.verify_rx = Some(rx);
                 let verify = self.verify.take();
                 let sid = self.server_id.clone();
+                let uname = username.clone();
                 thread::Builder::new()
-                    .name(format!("login-verify-{username}"))
+                    .name(format!("login-verify-{uname}"))
                     .spawn(move || {
+                        struct VerifyGuard;
+                        impl Drop for VerifyGuard {
+                            fn drop(&mut self) {
+                                ACTIVE_VERIFICATIONS.fetch_sub(1, Ordering::SeqCst);
+                            }
+                        }
+                        let _guard = VerifyGuard;
                         let res = match verify {
-                            Some(f) => f(&username, &sid),
+                            Some(f) => f(&uname, &sid),
                             None => Err("no verifier".to_string()),
                         };
                         let _ = tx.send(res);

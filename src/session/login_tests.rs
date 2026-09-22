@@ -236,3 +236,26 @@
             _ => panic!("expected accept over socket"),
         }
     }
+
+    #[test]
+    fn test_login_rejects_malformed_usernames_before_verify() {
+        let mut s = LoginSession::new(true);
+        // Invalid length (> 16)
+        s.on_packet(login_packet(6, "VeryLongUsernameExceedingLimit"));
+        assert!(s.poll().is_some());
+        assert_eq!(s.outbox.last().unwrap()[0], 255);
+
+        let mut s2 = LoginSession::new(true);
+        // Invalid characters (slashes / spaces)
+        s2.on_packet(login_packet(6, "../badname"));
+        assert!(s2.poll().is_some());
+        assert_eq!(s2.outbox.last().unwrap()[0], 255);
+    }
+
+    #[test]
+    fn test_custom_auth_url_verifier() {
+        let url_template = "http://127.0.0.1:9999/check?user={user}&serverId={serverId}".to_string();
+        let s = LoginSession::new(true).with_auth_url(url_template);
+        assert!(s.verify.is_some());
+    }
+
