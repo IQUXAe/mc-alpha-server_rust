@@ -865,3 +865,30 @@
         assert_eq!(items_count, 0);
     }
 
+    #[test]
+    fn test_sign_update_rejects_oversized_gzip_payload() {
+        use std::io::Write;
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        w.set_block_id(3, 64, 4, 63);
+        w.tiles.insert((3, 64, 4), TileData::Sign(crate::tile_entity::sign::sign_create()));
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        // 600 KB of zeroes compresses down to a few hundred bytes, but exceeds 524288 limit
+        enc.write_all(&vec![0u8; 600_000]).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::ComplexEntity { x: 3, y: 64, z: 4, nbt_data: gz },
+        );
+        // Sign should not be updated or corrupted
+        assert!(matches!(
+            w.tiles.get(&(3, 64, 4)),
+            Some(TileData::Sign(s)) if s.lines[0][0] == 0
+        ));
+    }
+
+

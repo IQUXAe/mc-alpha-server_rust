@@ -170,9 +170,9 @@ impl PlaySession {
         if nbt_gz.is_empty() || nbt_gz.len() > 65536 {
             return;
         }
-        let mut dec = flate2::read::GzDecoder::new(nbt_gz);
+        let dec = flate2::read::GzDecoder::new(nbt_gz);
         let mut raw = Vec::new();
-        if dec.read_to_end(&mut raw).is_err() || raw.len() > 524288 || raw.is_empty() {
+        if dec.take(524289).read_to_end(&mut raw).is_err() || raw.len() > 524288 || raw.is_empty() {
             return;
         }
         let mut cursor = std::io::Cursor::new(raw);
