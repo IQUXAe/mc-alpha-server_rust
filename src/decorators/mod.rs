@@ -80,8 +80,9 @@ impl<'a> BlockAccess for WorldAccess<'a> {
 }
 
 /// Canvas backend for chunk population: the 2x2 decorate arrays with a
-/// live fallback for out-of-canvas reads (and chest/spawner writes, which
-/// need live TileEntities).
+/// live fallback for out-of-canvas reads/writes. Chest/spawner blocks live
+/// in the canvas like vanilla; chest loot is buffered via `push_dungeon_loot`
+/// and spawner RNG is burned in order (tiles materialize on write-back).
 pub struct CanvasAccess<'a> {
     blocks: &'a mut [[[u8; 32768]; 2]; 2],
     metadata: &'a mut [[[u8; 32768]; 2]; 2],
@@ -135,11 +136,14 @@ impl<'a> BlockAccess for CanvasAccess<'a> {
         }
     }
     fn set_block_id(&mut self, x: i32, y: i32, z: i32, id: u8) {
-        // Chest (54) and spawner (52) need live TileEntities: always fallback.
-        if id == 54 || id == 52 {
-            self.fallback.set_block_id(x, y, z, id);
-            return;
-        }
+        // Vanilla writes chest (54) and spawner (52) into the world like
+        // any other block during populate; tiles are created afterwards
+        // from the block id. The canvas holds no tiles, so blocks always
+        // go to the canvas here — chest loot is buffered via
+        // `push_dungeon_loot` and materialized on write-back in
+        // `world::gen` (same 8-attempt / 8-roll / RNG order as vanilla
+        // `WorldGenDungeons`). Writing to the live fallback instead would
+        // be overwritten by the canvas write-back (empty dungeon rooms).
         match self.canvas_slot(x, z) {
             Some((dx, dz, lx, lz)) if (0..128).contains(&y) => {
                 self.blocks[dx][dz][(lx << 11) | (lz << 7) | (y as usize)] = id;
@@ -148,15 +152,12 @@ impl<'a> BlockAccess for CanvasAccess<'a> {
         }
     }
     fn get_block_meta(&mut self, x: i32, y: i32, z: i32) -> u8 {
+        // Canvas metadata is unpacked (one byte per cell), matching
+        // `Chunk::fill_arrays` / `load_arrays` — not packed nibbles.
         match self.canvas_slot(x, z) {
             Some((dx, dz, lx, lz)) if (0..128).contains(&y) => {
                 let idx = (lx << 11) | (lz << 7) | (y as usize);
-                let byte = self.metadata[dx][dz][idx >> 1];
-                if (idx & 1) != 0 {
-                    (byte >> 4) & 0xF
-                } else {
-                    byte & 0xF
-                }
+                self.metadata[dx][dz][idx] & 0xF
             }
             _ => self.fallback.get_block_meta(x, y, z),
         }
@@ -165,27 +166,45 @@ impl<'a> BlockAccess for CanvasAccess<'a> {
         match self.canvas_slot(x, z) {
             Some((dx, dz, lx, lz)) if (0..128).contains(&y) => {
                 let idx = (lx << 11) | (lz << 7) | (y as usize);
-                let cell = &mut self.metadata[dx][dz][idx >> 1];
-                if (idx & 1) != 0 {
-                    *cell = (*cell & 0x0F) | ((meta & 0xF) << 4);
-                } else {
-                    *cell = (*cell & 0xF0) | (meta & 0xF);
-                }
+                self.metadata[dx][dz][idx] = meta & 0xF;
             }
             _ => self.fallback.set_block_meta(x, y, z, meta),
         }
     }
     fn allows_attachment(&mut self, x: i32, y: i32, z: i32) -> bool {
+        // Read the canvas first: during populate the live fallback is
+        // stale (fresh terrain lives only in the canvas). Same rule as
+        // the live backend (`Block::allowsAttachmentArr` + flag).
+        let bid = self.get_block_id(x, y, z);
+        if self.canvas_slot(x, z).is_some() && (0..128).contains(&y) {
+            return bid != 0
+                && !is_air_material(bid)
+                && crate::block::table::block_properties_get(bid as u32).allows_attachment;
+        }
         self.fallback.allows_attachment(x, y, z)
     }
     fn is_block_solid(&mut self, x: i32, y: i32, z: i32) -> bool {
+        // Same canvas-first reason: chest placement in `WorldGenDungeons`
+        // must see freshly placed cobble, not the stale live chunk.
+        // ID list mirrors `World::is_solid_in` (vanilla
+        // `isBlockSolidNoChunkLoad`).
+        if self.canvas_slot(x, z).is_some() && (0..128).contains(&y) {
+            let bid = self.get_block_id(x, y, z);
+            return !matches!(
+                bid,
+                0 | 8 | 9 | 10 | 11 | 78 | 37 | 38 | 39 | 40 | 83 | 51 | 6
+            );
+        }
         self.fallback.is_block_solid(x, y, z)
     }
     fn get_height_value(&mut self, x: i32, z: i32) -> i32 {
         match self.canvas_slot(x, z) {
             Some((dx, dz, lx, lz)) => {
+                // Vanilla height uses `lightOpacity != 0` (glass/leaves/
+                // water count), not `blocks != 0`.
                 for y in (0..128).rev() {
-                    if self.blocks[dx][dz][(lx << 11) | (lz << 7) | y] != 0 {
+                    let bid = self.blocks[dx][dz][(lx << 11) | (lz << 7) | y];
+                    if block_properties_get(u32::from(bid)).light_opacity != 0 {
                         return (y + 1) as i32;
                     }
                 }
