@@ -74,7 +74,20 @@ impl Server {
         if !world.load_level_from(level_dir) {
             Self::find_safe_spawn(&mut world);
             let (scx, scz) = (world.spawn[0].div_euclid(16), world.spawn[2].div_euclid(16));
-            world.ensure_area(scx, scz, 1);
+            let radius = settings.view_distance;
+            crate::server_log::info(&format!(
+                "Preparing start region for level \"{}\"",
+                settings.level_name
+            ));
+            let mut last_pct = 0;
+            world.ensure_area_with_progress(scx, scz, radius, |done, total| {
+                let pct = (done * 100) / total;
+                if pct >= last_pct + 10 || done == total {
+                    crate::server_log::info(&format!("Preparing spawn area: {pct}%"));
+                    last_pct = pct;
+                }
+            });
+            world.save_level_to(level_dir);
         }
         if let Err(e) = std::fs::create_dir_all(player_dir) {
             crate::server_log::warning(&format!("cannot create {player_dir}: {e}"));

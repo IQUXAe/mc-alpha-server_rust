@@ -128,13 +128,26 @@ impl World {
         self.generator.as_mut().unwrap()
     }
 
-    /// Generate a square of chunks around a center (join/respawn path for
-    /// the network slice).
-    pub fn ensure_area(&mut self, cx: i32, cz: i32, radius: i32) {
+    /// Generate a square of chunks around a center with progress feedback.
+    pub fn ensure_area_with_progress<F>(&mut self, cx: i32, cz: i32, radius: i32, mut on_progress: F)
+    where
+        F: FnMut(usize, usize),
+    {
+        let side = (2 * radius + 1) as usize;
+        let total = side * side;
+        let mut count = 0;
         for dx in -radius..=radius {
             for dz in -radius..=radius {
                 self.ensure_chunk(cx + dx, cz + dz);
+                count += 1;
+                on_progress(count, total);
             }
         }
+    }
+
+    /// Generate a square of chunks around a center (join/respawn path for
+    /// the network slice).
+    pub fn ensure_area(&mut self, cx: i32, cz: i32, radius: i32) {
+        self.ensure_area_with_progress(cx, cz, radius, |_, _| {});
     }
 }

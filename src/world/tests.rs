@@ -1203,6 +1203,17 @@
         }
     }
 
+    #[test]
+    fn test_ensure_area_with_progress() {
+        let mut w = World::new(4242);
+        let mut calls = Vec::new();
+        w.ensure_area_with_progress(0, 0, 1, |done, total| {
+            calls.push((done, total));
+        });
+        assert_eq!(calls.len(), 9);
+        assert_eq!(calls.last(), Some(&(9, 9)));
+    }
+
     fn player_health(w: &World, id: EntityId) -> i16 {
         match w.entities.get(id).unwrap() {
             crate::entity::table::Entity::Player(p) => p.living.health,
