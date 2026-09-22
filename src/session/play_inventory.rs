@@ -209,7 +209,7 @@ impl PlaySession {
         }
         if ctx.spawn_protection > 0 {
             let sp = ctx.world.spawn;
-            let protected = (x - sp[0]).abs().max((z - sp[2]).abs()) <= ctx.spawn_protection;
+            let protected = crate::session::is_spawn_protected(x, z, sp, ctx.spawn_protection);
             if protected && !self.is_op(ctx) {
                 return;
             }

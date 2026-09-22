@@ -75,7 +75,7 @@ impl PlaySession {
         let dir = (direction as u8) as i32;
         let prot = {
             let sp = ctx.world.spawn;
-            (x - sp[0]).abs().max((z - sp[2]).abs()) <= ctx.spawn_protection
+            crate::session::is_spawn_protected(x, z, sp, ctx.spawn_protection)
         };
         if prot && !self.is_op(ctx) {
             self.send_block_change(ctx.world, x, y, z);

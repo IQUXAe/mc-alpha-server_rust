@@ -65,3 +65,14 @@ pub enum SessionOutcome {
     Kick(String),
     Gone,
 }
+
+/// Spawn-protection check (mirrors vanilla `handleBlockDig`/`handlePlace`).
+///
+/// Vanilla computes `(int)abs((float)(x - spawnX))`; the float cast clamps
+/// `i32::MIN` instead of panicking. We use `i64` for the same outcome on
+/// normal coords without any panic on extremes.
+pub fn is_spawn_protected(x: i32, z: i32, spawn: [i32; 3], radius: i32) -> bool {
+    let dx = (x as i64 - spawn[0] as i64).abs();
+    let dz = (z as i64 - spawn[2] as i64).abs();
+    dx.max(dz) <= radius as i64
+}
