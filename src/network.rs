@@ -439,8 +439,11 @@ pub(crate) fn put_f32(buf: &mut Vec<u8>, v: f32) { buf.extend_from_slice(&v.to_b
 pub(crate) fn put_f64(buf: &mut Vec<u8>, v: f64) { buf.extend_from_slice(&v.to_bits().to_be_bytes()); }
 pub(crate) fn put_str(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
-    put_i16(buf, bytes.len() as i16);
-    buf.extend_from_slice(bytes);
+    // All wire strings here are short (usernames <=16, chat <=100);
+    // clamp instead of wrapping on absurd input to keep the stream in sync.
+    let len = bytes.len().min(i16::MAX as usize) as i16;
+    put_i16(buf, len);
+    buf.extend_from_slice(&bytes[..len as usize]);
 }
 /// Encode one outbound tracker packet (field order mirrors the vanilla
 /// readers byte-for-byte; see the audit against the java/ sources).

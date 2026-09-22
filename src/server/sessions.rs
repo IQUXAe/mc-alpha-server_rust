@@ -32,10 +32,21 @@ pub enum SessionState {
 }
 
 /// The native server (mirrors `MinecraftServer` + friends; see module docs).
+/// `remote` is `SocketAddr` text (`1.2.3.4:25565` or `[::1]:25565`);
+/// brackets are stripped so IPv6 hosts match bans and per-IP limits.
 fn ip_of(remote: &str) -> &str {
+    if let Some(stripped) = remote.strip_prefix('[') {
+        if let Some(end) = stripped.find(']') {
+            return &stripped[..end];
+        }
+        return remote;
+    }
     match remote.rfind(':') {
-        Some(i) => &remote[..i],
-        None => remote,
+        // Guard against a bare IPv6 literal without port (`::1` has
+        // multiple colons and no brackets): only strip when there is
+        // exactly one colon left.
+        Some(i) if remote[i + 1..].find(':').is_none() => &remote[..i],
+        _ => remote,
     }
 }
 

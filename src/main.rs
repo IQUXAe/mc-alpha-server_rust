@@ -57,8 +57,12 @@ fn main() {
         }
     };
     if let Some(port_arg) = args.get(3) {
-        if let Ok(port) = port_arg.parse::<i32>() {
-            server.settings.port = port;
+        match port_arg.parse::<i32>() {
+            Ok(port) => server.settings.port = port,
+            Err(_) => log::warning(&format!(
+                "Invalid port argument '{port_arg}', using {}",
+                server.settings.port
+            )),
         }
     }
     if !server.settings.online_mode {

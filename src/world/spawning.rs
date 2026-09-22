@@ -326,6 +326,11 @@ impl World {
     pub fn tick_furnaces(&mut self) {
         let cells: Vec<(i32, i32, i32)> = self.tiles.keys().copied().collect();
         for (x, y, z) in cells {
+            // Vanilla only ticks loaded tile entities; unloaded staged
+            // chunks wait for recall (also saves CPU on big tile maps).
+            if !self.has_chunk(x.div_euclid(16), z.div_euclid(16)) {
+                continue;
+            }
             let ticked = match self.tiles.get_mut(&(x, y, z)) {
                 Some(TileData::Furnace(state)) => {
                     crate::tile_entity::furnace::furnace_tick_native(state)
