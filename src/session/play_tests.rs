@@ -792,3 +792,76 @@
         assert!((motion[1] - 20.0 / 128.0).abs() < 1e-5);
         assert!((motion[2] - 5.0 / 128.0).abs() < 1e-5);
     }
+
+    #[test]
+    fn test_pickup_spawn_rejects_dropping_more_than_inventory() {
+        use crate::entity::table::Entity;
+        use crate::inventory::ItemStack;
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 3;
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(3, 1, 0));
+            p.inventory.current = 0;
+        }
+        let mut bc = Vec::new();
+        let pkt = PacketData::PickupSpawn {
+            entity_id: -1,
+            item_id: 3,
+            count: 64, // Player only has 1!
+            x: (3.5 * 32.0) as i32,
+            y: (64.0 * 32.0) as i32,
+            z: (4.5 * 32.0) as i32,
+            rotation: 0,
+            pitch: 0,
+            roll: 0,
+        };
+        sess.pump(&mut ctx(&mut w, &ops, &mut bc), pkt);
+
+        // Inventory should remain 1
+        if let Some(Entity::Player(p)) = w.entities.get(player) {
+            assert_eq!(p.inventory.main[0].as_ref().map(|s| s.count), Some(1));
+        }
+        // No item entity should spawn
+        let items_count = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .filter(|id| matches!(w.entities.get(*id), Some(Entity::Item(_))))
+            .count();
+        assert_eq!(items_count, 0);
+    }
+
+    #[test]
+    fn test_pickup_spawn_rejects_missing_item_even_if_held() {
+        use crate::entity::table::Entity;
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 264; // Diamond, but not in inventory
+        let mut bc = Vec::new();
+        let pkt = PacketData::PickupSpawn {
+            entity_id: -1,
+            item_id: 264,
+            count: 1,
+            x: (3.5 * 32.0) as i32,
+            y: (64.0 * 32.0) as i32,
+            z: (4.5 * 32.0) as i32,
+            rotation: 0,
+            pitch: 0,
+            roll: 0,
+        };
+        sess.pump(&mut ctx(&mut w, &ops, &mut bc), pkt);
+
+        let items_count = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .filter(|id| matches!(w.entities.get(*id), Some(Entity::Item(_))))
+            .count();
+        assert_eq!(items_count, 0);
+    }
+

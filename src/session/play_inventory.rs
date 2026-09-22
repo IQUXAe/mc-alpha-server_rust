@@ -29,7 +29,7 @@ impl PlaySession {
         pitch: i8,
         roll: i8,
     ) {
-        if count <= 0 || item_id <= 0 {
+        if count <= 0 || item_id <= 0 || count > 64 {
             return;
         }
         let (px, py, pz) = match ctx.world.entities.get(self.player) {
@@ -50,11 +50,11 @@ impl PlaySession {
             let cur = p.inventory.current;
             if cur >= 0 && (cur as usize) < p.inventory.main.len() {
                 if let Some(s) = &mut p.inventory.main[cur as usize] {
-                    if s.item_id == item_id as i32 {
+                    if s.item_id == item_id as i32 && s.count >= count as i32 {
                         damage = s.damage;
                         has_item = true;
                         s.count -= count as i32;
-                        if s.count <= 0 {
+                        if s.count == 0 {
                             p.inventory.main[cur as usize] = None;
                         }
                     }
@@ -63,11 +63,11 @@ impl PlaySession {
             if !has_item {
                 for slot in &mut p.inventory.main {
                     if let Some(s) = slot {
-                        if s.item_id == item_id as i32 {
+                        if s.item_id == item_id as i32 && s.count >= count as i32 {
                             damage = s.damage;
                             has_item = true;
                             s.count -= count as i32;
-                            if s.count <= 0 {
+                            if s.count == 0 {
                                 *slot = None;
                             }
                             break;
@@ -77,7 +77,8 @@ impl PlaySession {
             }
         }
 
-        if !has_item && self.held_id != item_id as i32 {
+        if !has_item {
+            self.send_inventory(ctx.world);
             return;
         }
         self.sync_held(ctx.world);
