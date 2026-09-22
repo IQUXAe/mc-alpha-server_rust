@@ -481,6 +481,31 @@ pub fn write_string<W: Write>(writer: &mut W, s: &str) -> std::io::Result<()> {
 }
 
 pub fn read_payload<R: Read>(reader: &mut R, tag_type: u8) -> std::io::Result<NbtTag> {
+    read_payload_depth(reader, tag_type, 0)
+}
+
+/// Max byte-array / list lengths accepted from disk/network NBT (`Read`
+/// path). Valid chunk blobs are ~100KB (Blocks 32768, Data/Sky/BlockLight
+/// 16384); the cap only rejects corrupt/malicious inputs before a
+/// multi-GB allocation. The `ByteBuffer` path already bounds via
+/// `remaining()` + 1M `with_capacity` cap.
+pub const MAX_NBT_BYTES: i32 = 4_194_304;
+/// Max list elements (TileEntities/Items are dozens; 100k is generous).
+pub const MAX_NBT_LIST: i32 = 100_000;
+/// Max compound/list nesting (chunk NBT nests ~4 deep).
+const MAX_NBT_DEPTH: u32 = 16;
+
+fn read_payload_depth<R: Read>(
+    reader: &mut R,
+    tag_type: u8,
+    depth: u32,
+) -> std::io::Result<NbtTag> {
+    if depth > MAX_NBT_DEPTH {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "NBT: nesting too deep",
+        ));
+    }
     match tag_type {
         0 => Ok(NbtTag::End),
         1 => {
@@ -520,6 +545,12 @@ pub fn read_payload<R: Read>(reader: &mut R, tag_type: u8) -> std::io::Result<Nb
             if len < 0 {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("NBT readTag: negative byte array length {len}")));
             }
+            if len > MAX_NBT_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("NBT readTag: byte array length {len} exceeds limit {MAX_NBT_BYTES}"),
+                ));
+            }
             let mut bytes = vec![0u8; len as usize];
             reader.read_exact(&mut bytes)?;
             Ok(NbtTag::ByteArray(bytes))
@@ -538,9 +569,15 @@ pub fn read_payload<R: Read>(reader: &mut R, tag_type: u8) -> std::io::Result<Nb
             if len < 0 {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("NBT readTag: negative list count {len}")));
             }
-            let mut elements = Vec::with_capacity(len as usize);
+            if len > MAX_NBT_LIST {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("NBT readTag: list count {len} exceeds limit {MAX_NBT_LIST}"),
+                ));
+            }
+            let mut elements = Vec::with_capacity((len as usize).min(1024));
             for _ in 0..len {
-                elements.push(read_payload(reader, tag_type)?);
+                elements.push(read_payload_depth(reader, tag_type, depth + 1)?);
             }
             Ok(NbtTag::List(NbtList { tag_type, elements }))
         }
@@ -554,7 +591,7 @@ pub fn read_payload<R: Read>(reader: &mut R, tag_type: u8) -> std::io::Result<Nb
                     break;
                 }
                 let name = read_string(reader)?;
-                let val = read_payload(reader, tag_type)?;
+                let val = read_payload_depth(reader, tag_type, depth + 1)?;
                 map.insert(name, val);
             }
             Ok(NbtTag::Compound(NbtCompound { map }))

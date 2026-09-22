@@ -13,7 +13,7 @@
 //!   primitives.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Write;
 
 use crate::chunk::{
     Chunk, PendingBoat, PendingCreature, PendingItem, CHUNK_AREA, CHUNK_NIBBLE_BYTES, CHUNK_VOLUME,
@@ -73,14 +73,23 @@ fn gzip(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn gunzip(bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut decoder = flate2::read::GzDecoder::new(bytes);
+    use std::io::Read;
+    let decoder = flate2::read::GzDecoder::new(bytes);
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out).ok()?;
-    if out.is_empty() {
+    // Valid chunk blobs decompress to ~100KB; cap before OOM on zip bombs.
+    decoder
+        .take((MAX_DECOMPRESSED + 1) as u64)
+        .read_to_end(&mut out)
+        .ok()?;
+    if out.is_empty() || out.len() > MAX_DECOMPRESSED {
         return None;
     }
     Some(out)
 }
+
+/// Max decompressed bytes for one chunk/player blob (valid data is
+/// ~100KB; the cap only rejects zip bombs / corrupt values).
+pub const MAX_DECOMPRESSED: usize = 8 * 1024 * 1024;
 
 /// Blob decompression with magic dispatch (mirrors `decompressChunkData`:
 /// zstd frames for modern values, gzip otherwise).
@@ -89,8 +98,21 @@ fn decompress_blob(bytes: &[u8]) -> Option<Vec<u8>> {
         let mut magic = [0u8; 4];
         magic.copy_from_slice(&bytes[..4]);
         if u32::from_le_bytes(magic) == 0xFD2FB528 {
-            let out = zstd::stream::decode_all(bytes).ok()?;
-            return if out.is_empty() { None } else { Some(out) };
+            use std::io::Read;
+            match zstd::stream::Decoder::new(bytes) {
+                Ok(dec) => {
+                    let mut out = Vec::new();
+                    dec.take((MAX_DECOMPRESSED + 1) as u64)
+                        .read_to_end(&mut out)
+                        .ok()?;
+                    return if out.is_empty() || out.len() > MAX_DECOMPRESSED {
+                        None
+                    } else {
+                        Some(out)
+                    };
+                }
+                Err(_) => return None,
+            }
         }
     }
     gunzip(bytes)
