@@ -16,7 +16,7 @@ panic = "abort"
 libc = "0.2"
 flate2 = "1"
 zstd = "0.13"
-ureq = "2"
+ureq = "3"
 rusty-leveldb = "4"
 mio = { version = "1.0", features = ["os-poll", "net"] }
 

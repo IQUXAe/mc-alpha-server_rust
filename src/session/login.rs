@@ -26,11 +26,18 @@ pub fn make_default_verify(url_template: String) -> VerifyFn {
         let url = url_template
             .replace("{user}", &urlencoding(username))
             .replace("{serverId}", &urlencoding(server_id));
-        let body = ureq::get(&url)
-            .timeout(std::time::Duration::from_secs(5))
-            .call()
-            .map_err(|e| e.to_string())?
-            .into_string()
+        // ureq 3: timeouts live on the Agent config (no per-request
+        // `.timeout()` anymore); 5s global preserves the ureq 2 behavior.
+        // No built-in retry in v3 (v2 retried GET silently) — one attempt,
+        // fail-closed like before.
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(5)))
+            .build();
+        let agent: ureq::Agent = config.into();
+        let mut resp = agent.get(&url).call().map_err(|e| e.to_string())?;
+        let body = resp
+            .body_mut()
+            .read_to_string()
             .map_err(|e| e.to_string())?;
         let reply = body.trim().to_string();
         if reply == "YES" {
