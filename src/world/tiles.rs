@@ -15,12 +15,14 @@ pub enum TileData {
     Sign(crate::tile_entity::sign::SignState),
 }
 
+type ChunkTileMap = std::collections::HashMap<(i32, i32), Vec<(i32, i32, i32)>>;
+
 /// Container for world block-entity data, indexed both by global cell
 /// coordinate `(x, y, z)` and by chunk coordinate `(cx, cz)`.
 #[derive(Clone, Debug, Default)]
 pub struct WorldTiles {
     tiles: std::collections::HashMap<(i32, i32, i32), TileData>,
-    by_chunk: std::collections::HashMap<(i32, i32), Vec<(i32, i32, i32)>>,
+    by_chunk: ChunkTileMap,
 }
 
 pub struct TileEntry<'a> {
