@@ -532,12 +532,26 @@ impl World {
     /// `World::getCollidingBoundingBoxes` over loaded chunks only).
     pub fn colliding_boxes(&self, mask: &AxisAlignedBB) -> Vec<AxisAlignedBB> {
         let mut out = Vec::new();
-        let min_bx = mask.min_x.floor() as i32;
-        let max_bx = mask.max_x.floor() as i32;
-        let min_by = mask.min_y.floor() as i32;
-        let max_by = mask.max_y.floor() as i32;
-        let min_bz = mask.min_z.floor() as i32;
-        let max_bz = mask.max_z.floor() as i32;
+        if !mask.min_x.is_finite()
+            || !mask.max_x.is_finite()
+            || !mask.min_y.is_finite()
+            || !mask.max_y.is_finite()
+            || !mask.min_z.is_finite()
+            || !mask.max_z.is_finite()
+        {
+            return out;
+        }
+        let min_by = (mask.min_y.floor() as i32).max(0);
+        let max_by = (mask.max_y.floor() as i32).min(WORLD_HEIGHT - 1);
+        if min_by > max_by {
+            return out;
+        }
+        let cx = ((mask.min_x + mask.max_x) * 0.5).floor() as i32;
+        let cz = ((mask.min_z + mask.max_z) * 0.5).floor() as i32;
+        let min_bx = (mask.min_x.floor() as i32).max(cx.saturating_sub(16));
+        let max_bx = (mask.max_x.floor() as i32).min(cx.saturating_add(16));
+        let min_bz = (mask.min_z.floor() as i32).max(cz.saturating_sub(16));
+        let max_bz = (mask.max_z.floor() as i32).min(cz.saturating_add(16));
         for x in min_bx..=max_bx {
             for y in min_by..=max_by {
                 for z in min_bz..=max_bz {

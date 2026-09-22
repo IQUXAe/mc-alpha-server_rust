@@ -147,6 +147,15 @@
         // Air mask collects nothing.
         let air = AxisAlignedBB::get_bounding_box(3.2, 70.0, 4.2, 3.8, 71.0, 4.8);
         assert!(w.colliding_boxes(&air).is_empty());
+
+        // Oversized mask (10,000 blocks) should not hang and should return safely
+        let huge = AxisAlignedBB::get_bounding_box(-5000.0, -100.0, -5000.0, 5000.0, 200.0, 5000.0);
+        let huge_boxes = w.colliding_boxes(&huge);
+        assert!(!huge_boxes.is_empty());
+
+        // Non-finite mask returns empty immediately
+        let nan_box = AxisAlignedBB::get_bounding_box(f64::NAN, 0.0, 0.0, 1.0, 1.0, 1.0);
+        assert!(w.colliding_boxes(&nan_box).is_empty());
     }
 
     #[test]
