@@ -123,6 +123,9 @@ impl Server {
                 saved += 1;
             }
         }
+        if let Err(e) = self.store.flush() {
+            log::warning(&format!("Failed to flush chunk store to disk: {e}"));
+        }
         log::info(&format!("Saved level.dat and flushed {saved} loaded chunks to disk."));
     }
 
@@ -150,6 +153,9 @@ impl Server {
             }
         }
         self.save_world();
+        if let Err(e) = self.store.flush() {
+            log::warning(&format!("Failed to flush chunk store on shutdown: {e}"));
+        }
         log::info("Server stopped.");
     }
 }

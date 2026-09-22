@@ -57,6 +57,10 @@ impl ChunkStore {
     pub fn get_chunk(&mut self, cx: i32, cz: i32) -> Option<Vec<u8>> {
         self.db.get(&chunk_key_bytes(cx, cz)).map(|b| b.to_vec())
     }
+
+    pub fn flush(&mut self) -> Result<(), String> {
+        self.db.flush().map_err(|e| e.to_string())
+    }
 }
 
 // ---- gzip helpers (flate2 default level, like the existing codecs) ----
@@ -929,18 +933,34 @@ impl World {
 }
 
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> bool {
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
+    let parent = path.parent();
+    if let Some(p) = parent {
+        if std::fs::create_dir_all(p).is_err() {
             return false;
         }
     }
     let tmp = path.with_extension("dat_tmp");
-    if std::fs::write(&tmp, bytes).is_err() {
+    let write_ok = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })()
+    .is_ok();
+
+    if !write_ok {
+        let _ = std::fs::remove_file(&tmp);
         return false;
     }
     if std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return false;
+    }
+    if let Some(p) = parent {
+        if let Ok(dir) = std::fs::File::open(p) {
+            let _ = dir.sync_all();
+        }
     }
     true
 }
@@ -1150,5 +1170,20 @@ mod tests {
         assert!(w.apply_decoded_chunk(d));
         assert!(w.has_chunk(0, 0));
     }
+
+    #[test]
+    fn test_write_atomic_and_chunk_store_flush() {
+        let dir = tmp_dir("atomic_and_flush");
+        let target_file = dir.join("atomic_test.dat");
+        assert!(write_atomic(&target_file, b"durability_test"));
+        assert_eq!(std::fs::read(&target_file).unwrap(), b"durability_test");
+
+        let db_dir = dir.join("db");
+        let mut store = ChunkStore::open(db_dir.to_str().unwrap()).unwrap();
+        store.put_chunk(0, 0, b"chunk_payload").unwrap();
+        assert!(store.flush().is_ok());
+        assert_eq!(store.get_chunk(0, 0).unwrap(), b"chunk_payload");
+    }
 }
+
 
