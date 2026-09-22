@@ -149,16 +149,7 @@ impl Server {
             }
             // Tile entities ride the chunk like C++ (row order is map
             // order on both sides).
-            let cells: Vec<(i32, i32, i32)> = self
-                .world
-                .tiles
-                .keys()
-                .copied()
-                .filter(|(x, _, z)| {
-                    x.div_euclid(16) == qx && z.div_euclid(16) == qz
-                })
-                .collect();
-            for (x, y, z) in cells {
+            for &(x, y, z) in self.world.tiles.chunk_cells(qx, qz) {
                 if let Some(tile) = self.world.tiles.get(&(x, y, z)) {
                     play.outbox.push(tile_packet(x, y, z, tile));
                 }

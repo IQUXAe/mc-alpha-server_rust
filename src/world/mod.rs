@@ -149,7 +149,7 @@ pub struct World {
     pub(crate) unloaded: HashMap<(i32, i32), Chunk>,
     /// Block-entity storage by cell (mirrors the chunk `TileEntity` map;
     /// furnaces tick in [`World::tick_furnaces`], NBT here).
-    pub tiles: HashMap<(i32, i32, i32), TileData>,
+    pub tiles: WorldTiles,
     /// Cells changed since the last server tick (id or metadata writes
     /// through [`World::set_block_id`] / [`World::set_block_meta`], plus
     /// tree growth via the world accessor); the server tick drains these
@@ -235,7 +235,7 @@ impl World {
             leaves_guard: 0,
             unload_radius: 10,
             unloaded: HashMap::new(),
-            tiles: HashMap::new(),
+            tiles: WorldTiles::new(),
             block_updates: Vec::new(),
             item_pickups: Vec::new(),
             death_events: Vec::new(),
@@ -618,7 +618,7 @@ pub fn is_replaceable(block_id: u8) -> bool {
     )
 }
 
-pub use self::tiles::TileData;
+pub use self::tiles::{TileData, WorldTiles};
 pub(crate) use self::tiles::{animal_kind_of, animal_string_id, mob_kind_of, mob_string_id, pending_creature};
 
 #[cfg(test)]

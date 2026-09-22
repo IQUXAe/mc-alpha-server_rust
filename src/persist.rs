@@ -250,9 +250,9 @@ pub fn encode_chunk_blob(world: &World, cx: i32, cz: i32, zstd: bool) -> Option<
     let mut tiles = Vec::new();
     let mut tile_cells: Vec<((i32, i32, i32), TileData)> = world
         .tiles
+        .chunk_cells(cx, cz)
         .iter()
-        .filter(|((x, _, z), _)| (x.div_euclid(16), z.div_euclid(16)) == (cx, cz))
-        .map(|(k, v)| (*k, *v))
+        .filter_map(|&pos| world.tiles.get(&pos).map(|&tile| (pos, tile)))
         .collect();
     tile_cells.sort_by_key(|(k, _)| *k);
     for ((x, y, z), tile) in tile_cells {
@@ -838,9 +838,7 @@ impl World {
         chunk.pending_boats = d.boats;
         self.insert_chunk(chunk);
         // Tiles replace this chunk's cells.
-        self.tiles.retain(|(x, _, z), _| {
-            (x.div_euclid(16), z.div_euclid(16)) != (cx, cz)
-        });
+        self.tiles.remove_chunk(cx, cz);
         for ((x, y, z), s) in d.furnaces {
             self.tiles.insert((x, y, z), TileData::Furnace(s));
         }
