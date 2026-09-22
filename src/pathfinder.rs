@@ -128,6 +128,9 @@ fn get_safe_point(
     None
 }
 
+/// Maximum number of nodes popped from the priority queue before cutting off search.
+pub const MAX_PATHFIND_NODES: usize = 512;
+
 /// Shared A* core (mirrors the C++ `Pathfinder` search): cheapest-first
 /// expansion over safe standing points, falling back to the closest reached
 /// point when the target is unreachable. World answers arrive as closures
@@ -175,7 +178,6 @@ pub fn find_path_native(
         previous: None,
         is_closed: false,
     });
-
     heap.push(HeapEntry {
         key: start_key,
         f_score: start_target_dist,
@@ -183,8 +185,14 @@ pub fn find_path_native(
 
     let mut best_key = start_key;
     let mut target_found = false;
+    let mut iterations = 0;
 
     while let Some(HeapEntry { key, f_score: _ }) = heap.pop() {
+        iterations += 1;
+        if iterations > MAX_PATHFIND_NODES {
+            break;
+        }
+
         let current_node = match nodes.get(&key) {
             Some(n) => n.clone(),
             None => continue,
@@ -272,4 +280,62 @@ pub fn find_path_native(
     }
     path.reverse();
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_path_flat_ground() {
+        let is_liquid = |_x, _y, _z| false;
+        let blocks_movement = |_x, y, _z| y <= 60;
+        let q = BlockQueries {
+            is_liquid: &is_liquid,
+            blocks_movement: &blocks_movement,
+        };
+
+        let path = find_path_native(
+            &q,
+            [0.5, 61.0, 0.5],
+            [3.5, 61.0, 0.5],
+            [0.6, 1.8],
+            16.0,
+        );
+
+        assert!(!path.is_empty());
+        assert_eq!(path.last(), Some(&(3, 61, 0)));
+    }
+
+    #[test]
+    fn test_find_path_unreachable_target_bounded_by_budget() {
+        // Flat ground, but target is walled off completely
+        let is_liquid = |_x, _y, _z| false;
+        let blocks_movement = |x: i32, y: i32, z: i32| {
+            if y <= 60 {
+                return true;
+            }
+            // Wall around target (10, 61, 10)
+            if (x - 10).abs() <= 2 && (z - 10).abs() <= 2 && y <= 65 {
+                return true;
+            }
+            false
+        };
+        let q = BlockQueries {
+            is_liquid: &is_liquid,
+            blocks_movement: &blocks_movement,
+        };
+
+        let path = find_path_native(
+            &q,
+            [0.5, 61.0, 0.5],
+            [10.5, 61.0, 10.5],
+            [0.6, 1.8],
+            32.0,
+        );
+
+        // Since target is walled off, it should return a best-effort path towards it
+        // and terminate within the node budget without infinite search.
+        assert!(!path.is_empty());
+    }
 }
