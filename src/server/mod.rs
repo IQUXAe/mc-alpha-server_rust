@@ -38,6 +38,7 @@ use crate::entity::table::EntityId;
 use crate::persist::ChunkStore;
 use crate::world::World;
 
+pub mod chunk_worker;
 pub mod console;
 pub mod saves;
 pub mod sessions;
@@ -100,4 +101,6 @@ pub struct Server {
     pub events: mio::Events,
     pub waker: std::sync::Arc<mio::Waker>,
     pub listener: Option<mio::net::TcpListener>,
+    pub chunk_worker: Option<chunk_worker::ChunkGenWorker>,
+    pub pending_chunk_gens: HashSet<(i32, i32)>,
 }

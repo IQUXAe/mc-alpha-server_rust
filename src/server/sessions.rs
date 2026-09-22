@@ -1,7 +1,7 @@
 //! Connections and the login pump: accept, join/leave, packet fan-out.
 //! Split out of `server.rs`; behavior unchanged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::entity::table::{Entity, PlayerEnt};
 use crate::network::PacketData;
 use crate::persist::ChunkStore;
@@ -122,6 +122,8 @@ impl Server {
             events,
             waker,
             listener: None,
+            chunk_worker: Some(crate::server::chunk_worker::ChunkGenWorker::start(seed)),
+            pending_chunk_gens: HashSet::new(),
         })
     }
 

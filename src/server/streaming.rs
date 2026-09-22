@@ -95,6 +95,21 @@ impl Server {
             }
             stream.queue = merged;
         }
+
+        // Drain any completed background chunk generations.
+        if let Some(ref worker) = self.chunk_worker {
+            while let Ok(raw) = worker.resp_rx.try_recv() {
+                self.pending_chunk_gens.remove(&(raw.cx, raw.cz));
+                if !self.world.has_chunk(raw.cx, raw.cz) {
+                    let mut c = crate::chunk::Chunk::new(raw.cx, raw.cz);
+                    let meta = [0u8; 32768];
+                    c.load_arrays(&raw.blocks, &meta);
+                    c.generate_skylight_map();
+                    self.world.insert_chunk(c);
+                }
+            }
+        }
+
         // Send within budget (mirrors the 15-chunk pass; the native
         // ensure path loads the store first, then generates). Fresh
         // generation is separately budgeted: a cold generate costs ~12 ms,
@@ -112,10 +127,21 @@ impl Server {
                     if !self.world.has_chunk(nx, nz) && !self.world.recall_chunk(nx, nz) {
                         let _ = self.world.load_chunk_from(&mut self.store, nx, nz);
                         if !self.world.has_chunk(nx, nz) {
-                            generated += 1;
-                            if generated > CHUNK_GEN_PER_TICK {
+                            if let Some(ref worker) = self.chunk_worker {
+                                if !self.pending_chunk_gens.contains(&(nx, nz))
+                                    && self.pending_chunk_gens.len() < 64
+                                {
+                                    self.pending_chunk_gens.insert((nx, nz));
+                                    let _ = worker.req_tx.send((nx, nz));
+                                }
                                 deferred = true;
                                 break 'nb;
+                            } else {
+                                generated += 1;
+                                if generated > CHUNK_GEN_PER_TICK {
+                                    deferred = true;
+                                    break 'nb;
+                                }
                             }
                         }
                     }
