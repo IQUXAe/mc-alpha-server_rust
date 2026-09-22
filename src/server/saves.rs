@@ -85,24 +85,40 @@ impl Server {
     }
 
     /// Flush staged unloaded chunks to LevelDB and free their memory.
+    /// A failed encode/put keeps the chunk staged (vanilla retries via
+    /// `isModified`) instead of silently dropping player builds.
     pub(crate) fn flush_unloaded_chunks(&mut self) {
         if self.world.unloaded.is_empty() {
             return;
         }
         let keys: Vec<(i32, i32)> = self.world.unloaded.keys().copied().collect();
         for (cx, cz) in keys {
-            if let Some(blob) = crate::persist::encode_chunk_blob(&self.world, cx, cz, true) {
-                let _ = self.store.put_chunk(cx, cz, &blob);
+            match crate::persist::encode_chunk_blob(&self.world, cx, cz, true) {
+                None => {
+                    log::warning(&format!("Failed to encode chunk {cx},{cz}; keeping staged"));
+                }
+                Some(blob) => match self.store.put_chunk(cx, cz, &blob) {
+                    Ok(()) => {
+                        self.world.unloaded.remove(&(cx, cz));
+                    }
+                    Err(e) => {
+                        log::warning(&format!(
+                            "Failed to save chunk {cx},{cz}: {e}; keeping staged"
+                        ));
+                    }
+                },
             }
-            self.world.unloaded.remove(&(cx, cz));
         }
     }
 
-    /// Flush level.dat plus every loaded chunk (mirrors the C++ flushing
-    /// `saveWorld`; live boats pin their chunks like the C++ touch-up,
-    /// staged unloads are flushed to LevelDB and freed from memory).
+    /// Flush level.dat plus modified loaded chunks (mirrors vanilla
+    /// `saveWorld`: only `isModified` chunks hit the disk, flag cleared on
+    /// success; live boats pin their chunks like the C++ touch-up, staged
+    /// unloads are flushed to LevelDB and freed from memory).
     pub(crate) fn save_world(&mut self) {
-        self.world.save_level_to(&self.level_dir);
+        if !self.world.save_level_to(&self.level_dir) {
+            log::warning("Failed to save level.dat");
+        }
         self.flush_unloaded_chunks();
         for eid in self.world.entities.alive_ids() {
             if let Some(Entity::Boat(b)) = self.world.entities.get(eid) {
@@ -115,18 +131,32 @@ impl Server {
         }
         let coords = self.world.loaded_chunk_coords();
         let mut saved = 0;
+        let mut skipped = 0;
         for (cx, cz) in coords {
+            let dirty = self
+                .world
+                .chunk_ref(cx, cz)
+                .map(|c| c.is_modified)
+                .unwrap_or(false);
+            if !dirty {
+                skipped += 1;
+                continue;
+            }
             if self.world.save_chunk_to(&mut self.store, cx, cz) {
                 if let Some(c) = self.world.chunk_ref_mut(cx, cz) {
                     c.clear_modified();
                 }
                 saved += 1;
+            } else {
+                log::warning(&format!("Failed to save chunk {cx},{cz}; keeping dirty"));
             }
         }
         if let Err(e) = self.store.flush() {
             log::warning(&format!("Failed to flush chunk store to disk: {e}"));
         }
-        log::info(&format!("Saved level.dat and flushed {saved} loaded chunks to disk."));
+        log::info(&format!(
+            "Saved level.dat and flushed {saved} modified chunks to disk ({skipped} clean skipped)."
+        ));
     }
 
     /// Graceful shutdown (mirrors the `run` tail): kick everyone with
