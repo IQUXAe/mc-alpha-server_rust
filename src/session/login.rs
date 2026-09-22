@@ -194,7 +194,7 @@ impl LoginSession {
                 let verify = self.verify.take();
                 let sid = self.server_id.clone();
                 let uname = username.clone();
-                thread::Builder::new()
+                if thread::Builder::new()
                     .name(format!("login-verify-{uname}"))
                     .spawn(move || {
                         struct VerifyGuard;
@@ -210,7 +210,15 @@ impl LoginSession {
                         };
                         let _ = tx.send(res);
                     })
-                    .ok();
+                    .is_err()
+                {
+                    // Thread spawn failed (EMFILE/OOM): release the slot or
+                    // the counter leaks and all future logins get rejected.
+                    ACTIVE_VERIFICATIONS.fetch_sub(1, Ordering::SeqCst);
+                    self.verifying = false;
+                    self.verify_rx = None;
+                    self.kick("Login service unavailable, try again shortly");
+                }
             }
             _ => {}
         }

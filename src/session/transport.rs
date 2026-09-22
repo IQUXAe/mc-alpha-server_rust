@@ -7,6 +7,12 @@ use mio::net::TcpStream;
 use crate::network::{PacketData, try_decode_packet};
 use crate::server_constants::SEND_QUEUE_MAX_BYTES;
 
+/// Max packets decoded from one socket buffer per poll. Legit clients
+/// send a handful per tick; without a cap a 1MB buffer of 1-byte packets
+/// decodes into ~1M events before the per-tick kick in `sessions` runs.
+/// Leftover bytes stay in `recv_buf` for the next poll.
+pub const MAX_PACKETS_PER_POLL: usize = 256;
+
 /// Connection event: a decoded packet or a dead socket.
 pub enum ConnEvent {
     Packet(PacketData),
@@ -68,6 +74,9 @@ impl ConnInner {
         }
 
         while !self.recv_buf.is_empty() {
+            if self.inbound.len() >= MAX_PACKETS_PER_POLL {
+                break;
+            }
             match try_decode_packet(&mut self.recv_buf) {
                 Ok(Some(PacketData::KickDisconnect { .. })) => {
                     self.closed = true;
