@@ -538,6 +538,22 @@ pub fn decode_chunk_blob(bytes: &[u8], cx: i32, cz: i32) -> Option<DecodedChunk>
                     s.cook_time = get_short(&c.map, "CookTime");
                     s.current_item_burn_time = get_short(&c.map, "ItemBurnTime");
                     read_stack_slots(&c.map, &mut s.slots);
+                    if !c.map.contains_key("ItemBurnTime") && s.burn_time > 0 {
+                        let slot_fuel =
+                            if s.slots[crate::tile_entity::furnace::SLOT_FUEL].count > 0 {
+                                crate::tile_entity::furnace::fuel_burn_time(
+                                    s.slots[crate::tile_entity::furnace::SLOT_FUEL].item_id,
+                                )
+                            } else {
+                                0
+                            };
+                        s.current_item_burn_time =
+                            crate::tile_entity::furnace::infer_furnace_max_burn_time(
+                                s.burn_time,
+                                0,
+                                slot_fuel,
+                            ) as i16;
+                    }
                     furnaces.push(((x, y, z), s));
                 }
                 "Chest" => {

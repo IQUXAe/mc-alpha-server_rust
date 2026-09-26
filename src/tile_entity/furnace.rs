@@ -61,6 +61,28 @@ pub fn fuel_burn_time(item_id: i32) -> i32 {
     }
 }
 
+/// Infer the initial fuel burn duration for a burning furnace when
+/// `current_item_burn_time` was not persisted (e.g. vanilla Alpha NBT).
+pub fn infer_furnace_max_burn_time(
+    burn_time: i16,
+    current_item_burn_time: i16,
+    slot_fuel_burn: i32,
+) -> i32 {
+    let burn = burn_time as i32;
+    if current_item_burn_time > 0 && (current_item_burn_time as i32) >= burn {
+        return current_item_burn_time as i32;
+    }
+    if slot_fuel_burn > 0 && slot_fuel_burn >= burn {
+        return slot_fuel_burn;
+    }
+    for tier in [100, 200, 300, 1600, 20000] {
+        if tier >= burn {
+            return tier;
+        }
+    }
+    burn.max(200)
+}
+
 /// Native tick: the fuel burn time is looked up from the fuel slot,
 /// then the shared core runs.
 pub fn furnace_tick_native(state: &mut FurnaceState) -> FurnaceTickResult {
@@ -72,6 +94,7 @@ fn tick_core(state: &mut FurnaceState, fuel: i32) -> FurnaceTickResult {
     let mut changed = false;
 
     let was_burning = state.burn_time > 0;
+    let prev_cook_time = state.cook_time;
 
     if state.burn_time > 0 {
         state.burn_time -= 1;
@@ -105,6 +128,9 @@ fn tick_core(state: &mut FurnaceState, fuel: i32) -> FurnaceTickResult {
     }
 
     let is_burning = state.burn_time > 0;
+    if was_burning || is_burning || prev_cook_time != state.cook_time {
+        changed = true;
+    }
     FurnaceTickResult {
         changed,
         needs_block_update: was_burning != is_burning,
@@ -227,12 +253,32 @@ mod tests {
     fn native_tick_smelts_cobble_to_stone() {
         let mut s = state_with(stack(4, 1), stack(263, 1));
         for _ in 0..200 {
-            furnace_tick_native(&mut s);
+            let r = furnace_tick_native(&mut s);
+            assert!(r.changed, "burning/cooking ticks must notify client");
         }
         assert_eq!(s.slots[SLOT_OUTPUT].item_id, 1);
         assert_eq!(s.slots[SLOT_OUTPUT].count, 1);
         assert_eq!(s.slots[SLOT_INPUT].item_id, -1);
         // Coal still burning (1600 - 200).
         assert!(s.burn_time > 0);
+    }
+
+    #[test]
+    fn native_tick_marks_changed_until_burnout_then_goes_quiet() {
+        let mut s = state_with(stack(4, 1), stack(280, 1)); // stick = 100 ticks
+        for t in 0..100 {
+            let r = furnace_tick_native(&mut s);
+            assert!(r.changed, "tick {t} should mark changed");
+        }
+        // Tick 100: burn_time goes 1 -> 0 and cook_time resets 100 -> 0.
+        let r = furnace_tick_native(&mut s);
+        assert!(r.changed);
+        assert!(r.needs_block_update);
+        assert_eq!(s.burn_time, 0);
+        assert_eq!(s.cook_time, 0);
+        // Subsequent idle ticks: no changes.
+        let r = furnace_tick_native(&mut s);
+        assert!(!r.changed);
+        assert!(!r.needs_block_update);
     }
 }
