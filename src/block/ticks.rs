@@ -220,6 +220,15 @@ fn fluid_can_flow_into(w: &World, pos: BlockPos) -> bool {
     FLOW_PASSABLE.contains(&id)
 }
 
+fn same_fluid(w: &World, pos: BlockPos, is_lava: bool) -> bool {
+    let id = q_id(w, pos);
+    if is_lava {
+        id == 10 || id == 11
+    } else {
+        id == 8 || id == 9
+    }
+}
+
 pub fn block_fluid_added(w: &mut World, block_id: u8, tick_rate: i32, pos: BlockPos) {
     u_schedule(w, pos, block_id, tick_rate);
 }
@@ -242,17 +251,80 @@ pub fn block_fluid_tick(w: &mut World, block_id: u8, is_lava: bool, pos: BlockPo
         }
     }
 
-    let metadata = q_meta(w, pos);
-    if metadata >= 8 {
-        return;
-    }
-    if fluid_can_flow_into(w, pos.below()) {
-        u_set_meta_notify(w, pos.below(), block_id, 8);
-    } else if metadata < 7 {
-        let mut new_meta = metadata + 1;
-        if is_lava {
-            new_meta = metadata + 2;
+    let mut metadata = q_meta(w, pos) as i32;
+    let step: i32 = if is_lava { 2 } else { 1 };
+    if metadata > 0 {
+        let mut adj_sources = 0;
+        let mut min_decay: i32 = -100;
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let n = pos.offset(dx, 0, dz);
+            if same_fluid(w, n, is_lava) {
+                let mut nm = q_meta(w, n) as i32;
+                if nm == 0 {
+                    adj_sources += 1;
+                }
+                if nm >= 8 {
+                    nm = 0;
+                }
+                if min_decay < 0 || nm < min_decay {
+                    min_decay = nm;
+                }
+            }
         }
+        let mut expected = min_decay + step;
+        if expected >= 8 || min_decay < 0 {
+            expected = -1;
+        }
+        if same_fluid(w, pos.above(), is_lava) {
+            let above_meta = q_meta(w, pos.above()) as i32;
+            expected = if above_meta >= 8 {
+                above_meta
+            } else {
+                above_meta + 8
+            };
+        }
+        if adj_sources >= 2
+            && !is_lava
+            && (q_attach_world(w, pos.below())
+                || (same_fluid(w, pos.below(), false) && q_meta(w, pos.below()) == 0))
+        {
+            expected = 0;
+        }
+        if expected != metadata {
+            metadata = expected;
+            if expected < 0 {
+                u_set_notify(w, pos, 0);
+                return;
+            }
+            let new_id = if expected == 0 {
+                if is_lava { 11 } else { 9 }
+            } else {
+                block_id
+            };
+            u_set_meta_notify(w, pos, new_id, expected as u8);
+        }
+    }
+
+    if pos.y > 0 && fluid_can_flow_into(w, pos.below()) {
+        if q_id(w, pos.below()) != 0 {
+            w.drop_block_as_item(pos.x, pos.y - 1, pos.z);
+        }
+        let down_meta = if metadata >= 8 {
+            metadata as u8
+        } else {
+            (metadata + 8) as u8
+        };
+        u_set_meta_notify(w, pos.below(), block_id, down_meta);
+    } else if metadata == 0
+        || (pos.y > 0
+            && !fluid_can_flow_into(w, pos.below())
+            && !same_fluid(w, pos.below(), is_lava))
+    {
+        let new_meta = if metadata >= 8 {
+            step
+        } else {
+            metadata + step
+        };
         if new_meta < 8 {
             for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
                 let n = pos.offset(dx, 0, dz);
@@ -260,15 +332,11 @@ pub fn block_fluid_tick(w: &mut World, block_id: u8, is_lava: bool, pos: BlockPo
                     if q_id(w, n) != 0 {
                         w.drop_block_as_item(n.x, n.y, n.z);
                     }
-                    u_set_meta_notify(w, n, block_id, new_meta);
+                    u_set_meta_notify(w, n, block_id, new_meta as u8);
                 }
             }
         }
     }
-    // No self-reschedule: spread continues through the new cells' own
-    // added/neighbor ticks (apply_set_meta_notify → block_fluid_added).
-    // Self-perpetuating every 5 ticks would pin oceans/lakes in the
-    // scheduler forever (1000-tick cap stall).
 }
 
 // ---- flower ----

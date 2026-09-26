@@ -161,7 +161,8 @@ static BLOCK_PROPS: [AlphaBlockProperties; 256] = {
     props[41] = b!(3.0, 30.0, Iron, 255, 0, false, false, true, Normal, 41, 1, true);
     props[42] = b!(5.0, 30.0, Iron, 255, 0, false, false, true, Normal, 42, 1, true);
     props[43] = b!(2.0, 30.0, Rock, 255, 0, false, false, true, Normal, 44, 1, true); // double slab drops one single slab
-    props[44] = b!(2.0, 30.0, Rock, 255, 0, false, false, true, Normal, 44, 1, true);
+    props[44] = b!(2.0, 30.0, Rock, 255, 0, false, false, true, Normal, 44, 1, true,
+        0.0, 0.0, 0.0, 1.0, 0.5, 1.0);
     props[45] = b!(2.0, 30.0, Rock, 255, 0, false, false, true, Normal, 45, 1, true);
     props[46] = b!(0.0, 0.0, Tnt, 255, 0, false, false, true, Normal, 46, 0, true); // TNT drops nothing (quantityDropped=0)
     props[47] = b!(1.5, 7.5, Wood, 255, 0, false, false, true, Normal, 47, 0, true); // bookshelf drops nothing in Alpha
@@ -195,7 +196,7 @@ static BLOCK_PROPS: [AlphaBlockProperties; 256] = {
     props[74] = b!(3.0, 15.0, Rock, 255, 9, true, false, true, Ore, 331, 4, true);
     props[75] = b!(0.0, 0.0, Circuits, 0, 7, false, false, false, Normal, 76, 1, true);
     props[76] = b!(0.0, 0.0, Circuits, 0, 7, false, false, false, Normal, 76, 1, true);
-    props[77] = b!(0.5, 2.5, Circuits, 0, 0, false, false, false, Normal, 77, 1, true);
+    props[77] = b!(0.5, 2.5, Circuits, 0, 0, true, false, false, Normal, 77, 1, true);
     props[78] = b!(0.1, 0.5, Snow, 0, 0, true, false, false, Normal, 332, 1, true); // snow layer drops 1 snowball via harvest
     props[79] = b!(0.5, 2.5, Ice, 3, 0, true, false, true, Normal, 79, 0, true); // ice drops nothing
     props[80] = b!(0.2, 1.0, Snow, 255, 0, true, false, true, Normal, 332, 4, true); // snow block drops 4 snowballs
@@ -204,10 +205,12 @@ static BLOCK_PROPS: [AlphaBlockProperties; 256] = {
     props[82] = b!(0.6, 3.0, Clay, 255, 0, false, false, true, Normal, 337, 4, true); // clay drops 4 clay balls
     props[83] = b!(0.0, 0.0, Plants, 0, 0, true, false, false, Reed, 338, 1, true); // reed drops itself (Item.reed=338)
     props[84] = b!(2.0, 30.0, Wood, 255, 0, false, false, true, Normal, 84, 1, true);
-    props[85] = b!(2.0, 15.0, Wood, 255, 0, false, false, true, Normal, 85, 1, true);
+    props[85] = b!(2.0, 15.0, Wood, 255, 0, false, false, true, Normal, 85, 1, true,
+        0.0, 0.0, 0.0, 1.0, 1.5, 1.0);
     props[86] = b!(1.0, 5.0, Pumpkin, 255, 0, true, false, true, Normal, 86, 1, true);
     props[87] = b!(0.4, 2.0, Rock, 255, 0, false, false, true, Normal, 87, 1, true);
-    props[88] = b!(0.5, 2.5, Sand, 255, 0, false, false, true, Normal, 88, 1, true);
+    props[88] = b!(0.5, 2.5, Sand, 255, 0, false, false, true, Normal, 88, 1, true,
+        0.0, 0.0, 0.0, 1.0, 0.875, 1.0);
     props[89] = b!(0.3, 1.5, Glass, 0, 15, false, false, false, Normal, 348, 1, true); // glowstone drops dust
     props[90] = b!(-1.0, 0.0, Portal, 0, 11, false, false, false, Normal, 90, 0, true); // portal: unbreakable, lights
     props[91] = b!(1.0, 5.0, Pumpkin, 255, 15, true, false, true, Normal, 91, 1, true); // jack-o-lantern lights

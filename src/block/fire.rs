@@ -153,7 +153,57 @@ pub fn block_fire_neighbor(w: &mut World, pos: BlockPos) {
     }
 }
 
+/// Attempt to ignite a 4x5 Nether portal frame (`BlockPortal.tryToCreatePortal`).
+pub fn try_create_portal(w: &mut World, pos: BlockPos) -> bool {
+    let mut dx = 0;
+    let mut dz = 0;
+    if q_id(w, pos.offset(-1, 0, 0)) == 49 || q_id(w, pos.offset(1, 0, 0)) == 49 {
+        dx = 1;
+    }
+    if q_id(w, pos.offset(0, 0, -1)) == 49 || q_id(w, pos.offset(0, 0, 1)) == 49 {
+        dz = 1;
+    }
+    if dx == dz {
+        return false;
+    }
+    let (mut x, y, mut z) = (pos.x, pos.y, pos.z);
+    let left_id = q_id(w, BlockPos::new(x - dx, y, z - dz));
+    if left_id == 0 || left_id == 51 {
+        x -= dx;
+        z -= dz;
+    }
+    for ih in -1..=2 {
+        for iv in -1..=3 {
+            let is_frame = ih == -1 || ih == 2 || iv == -1 || iv == 3;
+            if (ih != -1 && ih != 2) || (iv != -1 && iv != 3) {
+                let bid = q_id(w, BlockPos::new(x + dx * ih, y + iv, z + dz * ih));
+                if is_frame {
+                    if bid != 49 {
+                        return false;
+                    }
+                } else if bid != 0 && bid != 51 {
+                    return false;
+                }
+            }
+        }
+    }
+    for ih in 0..2 {
+        for iv in 0..3 {
+            w.set_block_id(x + dx * ih, y + iv, z + dz * ih, 90);
+        }
+    }
+    for ih in 0..2 {
+        for iv in 0..3 {
+            w.notify_neighbors_of(x + dx * ih, y + iv, z + dz * ih);
+        }
+    }
+    true
+}
+
 pub fn block_fire_added(w: &mut World, fire_id: u8, tick_rate: i32, pos: BlockPos) {
+    if q_id(w, pos.below()) == 49 && try_create_portal(w, pos) {
+        return;
+    }
     if !q_attach(w, pos.below()) && !has_burnable_neighbor(w, pos) {
         u_set_notify(w, pos, 0);
     } else {
