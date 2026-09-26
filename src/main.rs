@@ -15,13 +15,17 @@ use alpha_server::server_log as log;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
+#[allow(unsafe_code)]
 extern "C" fn signal_handler(signum: libc::c_int) {
     if STOP.swap(true, Ordering::SeqCst) {
-        // Second signal: exit without saving.
-        std::process::exit(128 + signum);
+        // Second signal: exit immediately using async-signal-safe _exit.
+        unsafe {
+            libc::_exit(128 + signum);
+        }
     }
 }
 
+#[allow(unsafe_code)]
 fn main() {
     println!("  ___  _      _         ___                      ");
     println!(" / _ \\| |_ __| |_  __ _/ __| ___ _ ___ _____ _ _ ");
