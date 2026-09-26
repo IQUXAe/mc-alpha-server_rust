@@ -649,15 +649,26 @@
         // Drain first (streaming/tracker noise), then tick into the flip.
         while next_pkt_opt(&mut a, Duration::from_millis(200)).is_some() {}
         srv.tick();
-        let mut saw_flip = false;
-        while let Some((id, _)) = next_pkt_opt(&mut a, Duration::from_millis(300)) {
-            if id == 53 {
-                saw_flip = true;
-                break;
-            }
+        let mut flip_pkts = Vec::new();
+        while let Some((id, _)) = next_pkt_opt(&mut a, Duration::from_millis(100)) {
+            flip_pkts.push(id);
         }
-        assert!(saw_flip);
+        assert!(flip_pkts.contains(&53), "must send Packet53BlockChange on ignition: {flip_pkts:?}");
+        assert_eq!(
+            flip_pkts.iter().filter(|&&id| id == 59).count(),
+            1,
+            "ignition tick must send Packet59 once (not duplicated by drain_tile_updates): {flip_pkts:?}"
+        );
         assert_eq!(srv.world.get_block_id(fx, 64, fz), 62);
+        // Tick again and verify dynamic progress updates (Packet59ComplexEntity, id 59)
+        // arrive followed by a Packet51MapChunk (id 51) subchunk that preserves facing metadata.
+        srv.tick();
+        let mut cook_pkts = Vec::new();
+        while let Some((id, _)) = next_pkt_opt(&mut a, Duration::from_millis(100)) {
+            cook_pkts.push(id);
+        }
+        assert!(cook_pkts.contains(&59), "cooking ticks must stream Packet59 updates: {cook_pkts:?}");
+        assert!(cook_pkts.contains(&51), "cooking Packet59 must be followed by Packet51 subchunk: {cook_pkts:?}");
     }
 
     #[test]

@@ -178,6 +178,13 @@ impl Server {
             for &(x, y, z) in self.world.tiles.chunk_cells(qx, qz) {
                 if let Some(tile) = self.world.tiles.get(&(x, y, z)) {
                     play.outbox.push(tile_packet(x, y, z, tile));
+                    if matches!(tile, crate::world::TileData::Furnace(_)) {
+                        if let Some(sc) =
+                            crate::session_packets::pkt_subchunk_block(&self.world, x, y, z)
+                        {
+                            play.outbox.push(sc);
+                        }
+                    }
                 }
             }
             stream.sent.insert(chunk_key(qx, qz));

@@ -449,6 +449,7 @@ impl Server {
                             if let SessionState::Play(play, _) = &mut other.state {
                                 play.send_tile(&self.world, x, y, z);
                             }
+                            other.flush();
                         }
                     }
                     // ...plus the source session itself when loaded.

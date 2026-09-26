@@ -212,27 +212,81 @@ impl Server {
 
     /// Ship queued block changes to chunk-loaded players (one packet
     /// per changed cell per tick).
-    fn drain_block_updates(&mut self) {
+    /// For furnaces (`61`/`62`), precede `Packet53BlockChange` with per-chunk
+    /// subchunk packets covering the 13-block light radius so `Chunk.func_1004_a`
+    /// on the client updates the block ID, facing metadata, and surrounding
+    /// blocklight/skylight maps without calling `BlockFurnace.onBlockAdded`
+    /// (which would replace `GuiFurnace.field_978_j` and clobber facing metadata).
+    fn drain_block_updates(&mut self) -> std::collections::HashSet<(i32, i32, i32)> {
+        self.world.refresh_light();
+        let mut sent_tiles = std::collections::HashSet::new();
         for [x, y, z] in self.world.take_block_updates() {
-            let bytes = pkt_block_change(x, y, z, self.world.get_block_id(x, y, z), self.world.get_block_meta(x, y, z));
+            let id = self.world.get_block_id(x, y, z);
+            let meta = self.world.get_block_meta(x, y, z);
+            if matches!(id, 61 | 62) {
+                for ((lcx, lcz), sc) in
+                    crate::session_packets::pkt_subchunk_furnace_light(&self.world, x, y, z)
+                {
+                    for cid in self.conns_with_chunk(chunk_key(lcx, lcz)) {
+                        if let Some(sess) = self.sessions.get(&cid) {
+                            sess.conn.send(sc.clone());
+                        }
+                    }
+                }
+            }
+            let subchunk = if matches!(id, 61 | 62) {
+                crate::session_packets::pkt_subchunk_block(&self.world, x, y, z)
+            } else {
+                None
+            };
+            let furnace_tile = if matches!(id, 61 | 62) {
+                self.world
+                    .tiles
+                    .get(&(x, y, z))
+                    .map(|t| crate::session_packets::tile_packet(x, y, z, t))
+            } else {
+                None
+            };
+            if furnace_tile.is_some() {
+                sent_tiles.insert((x, y, z));
+            }
+            let bytes = pkt_block_change(x, y, z, id, meta);
             let cids = self.conns_with_chunk(chunk_key(x.div_euclid(16), z.div_euclid(16)));
             for cid in cids {
                 if let Some(sess) = self.sessions.get(&cid) {
                     sess.conn.send(bytes.clone());
+                    if let Some(ref tp) = furnace_tile {
+                        sess.conn.send(tp.clone());
+                        if let Some(ref sc) = subchunk {
+                            sess.conn.send(sc.clone());
+                        }
+                    }
                 }
             }
         }
+        sent_tiles
     }
 
     /// Ship queued tile-entity updates (`Packet59ComplexEntity`) to chunk-loaded players.
-    fn drain_tile_updates(&mut self) {
+    fn drain_tile_updates(&mut self, mut already_sent: std::collections::HashSet<(i32, i32, i32)>) {
         for [x, y, z] in self.world.take_tile_updates() {
+            if !already_sent.insert((x, y, z)) {
+                continue;
+            }
             if let Some(tile) = self.world.tiles.get(&(x, y, z)).copied() {
                 let bytes = crate::session_packets::tile_packet(x, y, z, &tile);
+                let subchunk = if matches!(tile, crate::world::TileData::Furnace(_)) {
+                    crate::session_packets::pkt_subchunk_block(&self.world, x, y, z)
+                } else {
+                    None
+                };
                 let cids = self.conns_with_chunk(chunk_key(x.div_euclid(16), z.div_euclid(16)));
                 for cid in cids {
                     if let Some(sess) = self.sessions.get(&cid) {
                         sess.conn.send(bytes.clone());
+                        if let Some(ref sc) = subchunk {
+                            sess.conn.send(sc.clone());
+                        }
                     }
                 }
             }
@@ -279,8 +333,8 @@ impl Server {
             self.save_world();
         }
         self.tracker_tick();
-        self.drain_block_updates();
-        self.drain_tile_updates();
+        let sent_tiles = self.drain_block_updates();
+        self.drain_tile_updates(sent_tiles);
         self.poll_network(std::time::Duration::ZERO);
         let lines = std::mem::take(&mut self.console);
         for line in lines {
