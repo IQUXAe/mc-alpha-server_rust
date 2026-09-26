@@ -7,6 +7,26 @@ use crate::session::play::PlaySession;
 use crate::session::{SessionBroadcast, SessionCtx};
 use crate::world::tiles::TileData;
 
+/// Strict count for a tile stack from a client NBT packet (unknown ids and
+/// non-positive counts become 0, i.e. the slot stays empty; the rest clamp
+/// to the per-item max stack like `apply_inventory`).
+fn strict_tile_count(item_id: i32, count: i32) -> i32 {
+    if !crate::item_data::item_is_valid(item_id) {
+        return 0;
+    }
+    count.clamp(0, crate::player::inventory::inventory_max_stack_size(item_id).max(1))
+}
+
+/// Strict damage for a tile stack from a client NBT packet.
+fn strict_tile_damage(item_id: i32, damage: i32) -> i32 {
+    let max = crate::item_data::item_max_damage(item_id);
+    if max > 0 {
+        damage.clamp(0, max)
+    } else {
+        0
+    }
+}
+
 impl PlaySession {
     /// Ghost fallback for a held item id the server cannot find in any
     /// real slot (desync/creative): a 1-count copy that shadows slot 35
@@ -98,25 +118,34 @@ impl PlaySession {
         inv_type: i32,
         slots: &[crate::network::SlotData],
     ) {
+        // Server-authoritative clamp (deliberate vanilla divergence, see
+        // `server::mod` docs): vanilla `handlePlayerInventory` assigns the
+        // client stacks verbatim (`NetServerHandler.java:413`), so a hacked
+        // client can grant itself 127-count stacks, out-of-range damage, or
+        // unknown ids. Clamp to the same tables the survival code uses:
+        // unknown ids are dropped, counts to the per-item max stack, damage
+        // to the per-item max durability.
         fn apply(bank: &mut [Option<ItemStack>], slots: &[crate::network::SlotData]) {
             let n = slots.len().min(bank.len());
             for i in 0..n {
                 let id = slots[i].item_id as i32;
-                if (0..32000).contains(&id) {
-                    let dmg = if crate::item_data::item_max_damage(id) > 0 {
-                        slots[i].damage as i32
-                    } else {
-                        0
-                    };
-                    let count = slots[i].count as i32;
-                    bank[i] = if count > 0 {
-                        Some(ItemStack::new(id, count, dmg))
-                    } else {
-                        None
-                    };
-                } else {
+                if !crate::item_data::item_is_valid(id) {
                     bank[i] = None;
+                    continue;
                 }
+                let max_stack = crate::player::inventory::inventory_max_stack_size(id).max(1);
+                let count = (slots[i].count as i32).clamp(0, max_stack);
+                let max_dmg = crate::item_data::item_max_damage(id);
+                let dmg = if max_dmg > 0 {
+                    (slots[i].damage as i32).clamp(0, max_dmg)
+                } else {
+                    0
+                };
+                bank[i] = if count > 0 {
+                    Some(ItemStack::new(id, count, dmg))
+                } else {
+                    None
+                };
             }
         }
         let me = self.player;
@@ -231,14 +260,19 @@ impl PlaySession {
                 ctx.world.tiles.insert((x, y, z), TileData::Sign(s));
             }
             TileData::Furnace(mut s) => {
+                // Strict (vanilla `readFromNBT` copies the shorts
+                // verbatim): clamp to the survival ranges — cook progress
+                // never exceeds the 200-tick recipe, burn timers never
+                // exceed the hottest fuel (lava bucket, 20000 ticks).
+                // Otherwise a hacked sign-update packet grants free smelts.
                 if let Some(NbtTag::Short(v)) = nbt.map.get("BurnTime") {
-                    s.burn_time = *v;
+                    s.burn_time = (*v).clamp(0, 20000);
                 }
                 if let Some(NbtTag::Short(v)) = nbt.map.get("CookTime") {
-                    s.cook_time = *v;
+                    s.cook_time = (*v).clamp(0, 200);
                 }
                 if let Some(NbtTag::Short(v)) = nbt.map.get("ItemBurnTime") {
-                    s.current_item_burn_time = *v;
+                    s.current_item_burn_time = (*v).clamp(0, 20000);
                 }
                 // Same replace-not-merge rule as chests (vanilla
                 // readFromNBT starts from a fresh bank).
@@ -252,8 +286,9 @@ impl PlaySession {
                             };
                             if slot < s.slots.len() {
                                 let mut stack = crate::persist::read_stack(&im.map);
-                                stack.count = stack.count.clamp(0, 64);
-                                if stack.count > 0 && (0..32000).contains(&stack.item_id) {
+                                stack.count = strict_tile_count(stack.item_id, stack.count);
+                                stack.damage = strict_tile_damage(stack.item_id, stack.damage);
+                                if stack.count > 0 {
                                     s.slots[slot] = stack;
                                 }
                             }
@@ -275,8 +310,9 @@ impl PlaySession {
                             };
                             if slot < s.slots.len() {
                                 let mut stack = crate::persist::read_stack(&im.map);
-                                stack.count = stack.count.clamp(0, 64);
-                                if stack.count > 0 && (0..32000).contains(&stack.item_id) {
+                                stack.count = strict_tile_count(stack.item_id, stack.count);
+                                stack.damage = strict_tile_damage(stack.item_id, stack.damage);
+                                if stack.count > 0 {
                                     s.slots[slot] = stack;
                                 }
                             }
@@ -284,6 +320,10 @@ impl PlaySession {
                     }
                 }
                 ctx.world.tiles.insert((x, y, z), TileData::Chest(s));
+            }
+            TileData::MobSpawner(_) => {
+                // Clients cannot rewrite mob spawners via Packet59ComplexEntity.
+                return;
             }
         }
         ctx.broadcast.push(SessionBroadcast::TileChanged(x, y, z));

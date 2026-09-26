@@ -7,8 +7,8 @@ use crate::inventory::ItemStack;
 use crate::item_data::{item_food_heal, item_max_damage};
 use crate::item_use::item_food_bite;
 use crate::item_verbs::{
-    item_block_use, item_boat_aim, item_boat_throw, item_flint_use, item_hoe_use, item_seeds_use,
-    item_sign_use, BlockPlace, BoatAimIn, ItemUseWorld,
+    item_block_use, item_boat_aim, item_boat_throw, item_door_use, item_flint_use, item_hoe_use,
+    item_record_use, item_seeds_use, item_sign_use, BlockPlace, BoatAimIn, ItemUseWorld,
 };
 use crate::session::play::PlaySession;
 use crate::session::{SessionCtx, SessionOutcome};
@@ -133,18 +133,20 @@ impl PlaySession {
                     s.count -= 1;
                 }
                 self.write_stack_slot(ctx, stack_slot, s);
-            } else if matches!(clicked, 54 | 58 | 61 | 62) {
-                // GUI blocks swallow the click (chest/furnace already synced).
+            } else if matches!(clicked, 54 | 58 | 61 | 62 | 64 | 69 | 77)
+                || (clicked == 84 && ctx.world.get_block_meta(x, y, z) > 0)
+            {
                 let _ = self.activated_block(ctx, clicked, x, y, z);
             } else {
                 let used_first = self.active_block_or_use(ctx, &mut s, x, y, z, dir);
-                if !used_first && s.item_id == 333 {
-                    // Boat fallback: right-click throw on blocks.
+                if !used_first && matches!(s.item_id, 325 | 326 | 327 | 333) {
                     self.use_item_air(ctx, s);
                 } else {
                     self.write_stack_slot(ctx, stack_slot, s);
                 }
             }
+        } else if clicked > 0 {
+            let _ = self.activated_block(ctx, clicked, x, y, z);
         }
         // Drop emptied stacks like C++.
         if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
@@ -189,9 +191,8 @@ impl PlaySession {
         }
     }
 
-    /// GUI block activation (mirrors blockActivated for chest/furnace/
-    /// workbench; the chest tile-removal line in C++ is a data-eating bug
-    /// and is deliberately NOT mirrored).
+    /// Block activation (mirrors `blockActivated` for chest/furnace/
+    /// workbench/doors/levers/buttons/jukebox).
     fn activated_block(&mut self, ctx: &mut SessionCtx, clicked: u8, x: i32, y: i32, z: i32) -> bool {
         match clicked {
             54 => {
@@ -213,6 +214,11 @@ impl PlaySession {
                 true
             }
             58 => true,
+            64 => ctx.world.toggle_door(x, y, z),
+            71 => true,
+            69 => ctx.world.toggle_lever(x, y, z),
+            77 => ctx.world.press_button(x, y, z),
+            84 => ctx.world.eject_jukebox_record(x, y, z),
             _ => false,
         }
     }
@@ -229,11 +235,17 @@ impl PlaySession {
         side: i32,
     ) -> bool {
         let clicked = ctx.world.get_block_id(x, y, z);
-        if clicked > 0 && matches!(clicked, 54 | 58 | 61 | 62) {
+        if clicked > 0
+            && (matches!(clicked, 54 | 58 | 61 | 62 | 64 | 69 | 77)
+                || (clicked == 84 && ctx.world.get_block_meta(x, y, z) > 0))
+        {
             return self.activated_block(ctx, clicked, x, y, z);
         }
         if s.count <= 0 {
             return false;
+        }
+        if matches!(s.item_id, 325..=327) {
+            return self.use_bucket_on_block(ctx, s, x, y, z, side);
         }
         let me = self.player;
         let yaw = ctx.world.entities.get(me).map(|e| e.body().yaw).unwrap_or(0.0);
@@ -283,6 +295,44 @@ impl PlaySession {
                     true
                 }
             }
+            324 | 330 => {
+                let door_id = if s.item_id == 324 { 64 } else { 71 };
+                if !item_door_use(&mut u, pos, side, yaw, door_id) {
+                    false
+                } else {
+                    if s.count > 0 {
+                        s.count -= 1;
+                    }
+                    true
+                }
+            }
+            2256 | 2257 => {
+                if !item_record_use(&mut u, pos, s.item_id) {
+                    false
+                } else {
+                    if s.count > 0 {
+                        s.count -= 1;
+                    }
+                    true
+                }
+            }
+            331 | 338 => {
+                let block_id = if s.item_id == 331 { 55 } else { 83 };
+                let place = BlockPlace {
+                    block_id,
+                    stack_count: s.count,
+                    side,
+                    yaw,
+                };
+                if !item_block_use(&mut u, place, pos) {
+                    false
+                } else {
+                    if s.count > 0 {
+                        s.count -= 1;
+                    }
+                    true
+                }
+            }
             333 => false,
             1..=255 => {
                 let place = BlockPlace {
@@ -304,8 +354,59 @@ impl PlaySession {
         }
     }
 
+    fn use_bucket_on_block(
+        &mut self,
+        ctx: &mut SessionCtx,
+        s: &mut ItemStack,
+        x: i32,
+        y: i32,
+        z: i32,
+        side: i32,
+    ) -> bool {
+        let (nx, ny, nz) = match side {
+            0 => (x, y - 1, z),
+            1 => (x, y + 1, z),
+            2 => (x, y, z - 1),
+            3 => (x, y, z + 1),
+            4 => (x - 1, y, z),
+            5 => (x + 1, y, z),
+            _ => (x, y, z),
+        };
+        if s.item_id == 325 {
+            for (tx, ty, tz) in [(x, y, z), (nx, ny, nz)] {
+                let bid = ctx.world.get_block_id(tx, ty, tz);
+                let meta = ctx.world.get_block_meta(tx, ty, tz);
+                if (bid == 8 || bid == 9) && meta == 0 {
+                    ctx.world.apply_set_notify(tx, ty, tz, 0);
+                    *s = ItemStack::new(326, 1, 0);
+                    return true;
+                }
+                if (bid == 10 || bid == 11) && meta == 0 {
+                    ctx.world.apply_set_notify(tx, ty, tz, 0);
+                    *s = ItemStack::new(327, 1, 0);
+                    return true;
+                }
+            }
+            return false;
+        }
+        if !(0..crate::world::WORLD_HEIGHT).contains(&ny) {
+            return false;
+        }
+        let target_id = ctx.world.get_block_id(nx, ny, nz);
+        if target_id == 0 || !ctx.world.material_at(nx, ny, nz).is_solid() {
+            let fluid_id = if s.item_id == 326 { 8 } else { 10 };
+            if target_id != 0 && !matches!(target_id, 8..=11) {
+                ctx.world.drop_block_as_item(nx, ny, nz);
+            }
+            ctx.world.apply_set_meta_notify(nx, ny, nz, fluid_id, 0);
+            *s = ItemStack::new(325, 1, 0);
+            return true;
+        }
+        false
+    }
+
     /// Right-click in air (mirrors `useItem`: food bites with heal,
-    /// soup to bowl, boats via aim+throw).
+    /// soup to bowl, buckets, and boats via aim+throw).
     pub(crate) fn use_item_air(&mut self, ctx: &mut SessionCtx, mut s: ItemStack) -> bool {
         let me = self.player;
         let heal = item_food_heal(s.item_id);
@@ -339,6 +440,74 @@ impl PlaySession {
             self.write_back_current(ctx, s);
             self.send_inventory(ctx.world);
             return true;
+        }
+        if matches!(s.item_id, 325..=327) {
+            let (pyaw, ppitch, ppos, pyoff, prev_yaw, prev_pitch, prev_pos) =
+                match ctx.world.entities.get(me) {
+                    Some(e) => {
+                        let b = e.body();
+                        (b.yaw, b.pitch, b.pos, b.y_offset as f64, b.prev_yaw, b.prev_pitch, b.prev_pos)
+                    }
+                    None => return false,
+                };
+            let aim = item_boat_aim(BoatAimIn {
+                prev_yaw,
+                yaw: pyaw,
+                prev_pitch,
+                pitch: ppitch,
+                prev: prev_pos,
+                cur: ppos,
+                y_offset: pyoff,
+            });
+            let Some([hx, hy, hz]) =
+                ctx.world.ray_trace_hit_liquids([aim.sx, aim.sy, aim.sz], [aim.ex, aim.ey, aim.ez])
+            else {
+                return false;
+            };
+            if s.item_id == 325 {
+                let bid = ctx.world.get_block_id(hx, hy, hz);
+                let meta = ctx.world.get_block_meta(hx, hy, hz);
+                if (bid == 8 || bid == 9) && meta == 0 {
+                    ctx.world.apply_set_notify(hx, hy, hz, 0);
+                    s = ItemStack::new(326, 1, 0);
+                    self.write_back_current(ctx, s);
+                    self.send_inventory(ctx.world);
+                    return true;
+                }
+                if (bid == 10 || bid == 11) && meta == 0 {
+                    ctx.world.apply_set_notify(hx, hy, hz, 0);
+                    s = ItemStack::new(327, 1, 0);
+                    self.write_back_current(ctx, s);
+                    self.send_inventory(ctx.world);
+                    return true;
+                }
+                return false;
+            }
+            // Place fluid at the last air/non-solid cell before the hit cell along the ray
+            let fluid_id = if s.item_id == 326 { 8 } else { 10 };
+            let (mut tx, mut ty, mut tz) = (hx, hy, hz);
+            if ctx.world.material_at(hx, hy, hz).is_solid() {
+                let dx = aim.sx - (hx as f64 + 0.5);
+                let dy = aim.sy - (hy as f64 + 0.5);
+                let dz = aim.sz - (hz as f64 + 0.5);
+                if dy.abs() >= dx.abs() && dy.abs() >= dz.abs() {
+                    ty += if dy >= 0.0 { 1 } else { -1 };
+                } else if dx.abs() >= dz.abs() {
+                    tx += if dx >= 0.0 { 1 } else { -1 };
+                } else {
+                    tz += if dz >= 0.0 { 1 } else { -1 };
+                }
+            }
+            if (0..crate::world::WORLD_HEIGHT).contains(&ty)
+                && !ctx.world.material_at(tx, ty, tz).is_solid()
+            {
+                ctx.world.apply_set_meta_notify(tx, ty, tz, fluid_id, 0);
+                s = ItemStack::new(325, 1, 0);
+                self.write_back_current(ctx, s);
+                self.send_inventory(ctx.world);
+                return true;
+            }
+            return false;
         }
         if s.item_id == 333 {
             let (pyaw, ppitch, ppos, pyoff, prev_yaw, prev_pitch, prev_pos) =

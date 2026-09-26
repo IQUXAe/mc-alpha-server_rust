@@ -892,3 +892,106 @@
     }
 
 
+
+    #[test]
+    fn test_strict_inventory_clamps_hacked_stacks() {
+        // Vanilla assigns client stacks verbatim; strict mode clamps:
+        // 127 diamonds -> 64, over-damage stone sword (max 64) -> 64,
+        // unknown id 31000 -> dropped, 5x diamond sword (max 1) -> 1.
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+        let mut slots =
+            vec![crate::network::SlotData { item_id: -1, count: 0, damage: 0 }; 36];
+        slots[0] = crate::network::SlotData { item_id: 264, count: 127, damage: 0 };
+        slots[1] = crate::network::SlotData { item_id: 272, count: 1, damage: 500 };
+        slots[2] = crate::network::SlotData { item_id: 31000, count: 10, damage: 0 };
+        slots[3] = crate::network::SlotData { item_id: 276, count: 5, damage: 0 };
+        assert!(sess
+            .pump(&mut ctx(&mut w, &ops, &mut bc), PacketData::PlayerInventory {
+                inventory_type: -1,
+                slots,
+            })
+            .is_none());
+        let got = match w.entities.get(player).unwrap() {
+            Entity::Player(p) => [
+                p.inventory.main[0].map(|s| (s.item_id, s.count, s.damage)),
+                p.inventory.main[1].map(|s| (s.item_id, s.count, s.damage)),
+                p.inventory.main[2].map(|s| (s.item_id, s.count, s.damage)),
+                p.inventory.main[3].map(|s| (s.item_id, s.count, s.damage)),
+            ],
+            _ => unreachable!(),
+        };
+        assert_eq!(got[0], Some((264, 64, 0)));
+        assert_eq!(got[1], Some((272, 1, 64)));
+        assert_eq!(got[2], None);
+        assert_eq!(got[3], Some((276, 1, 0)));
+    }
+
+    #[test]
+    fn test_strict_held_switch_rejects_unknown_id() {
+        // Unknown held ids clear the selection instead of arming a ghost
+        // for an item that can never exist server-side.
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockItemSwitch { entity_id: player, item_id: 31000 },
+        );
+        assert_eq!(sess.held_id, 0);
+        assert!(sess.held_fallback.is_none());
+    }
+
+    #[test]
+    fn test_strict_furnace_clamps_burn_and_cook() {
+        // BurnTime 30000 -> 20000 (lava bucket max), CookTime 500 -> 200,
+        // ItemBurnTime -5 -> 0; over-stacked furnace slots clamp to 64.
+        use crate::nbt::{NbtCompound, NbtList, NbtTag, write_root};
+        use std::collections::BTreeMap;
+        use std::io::Write as _;
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        w.set_block_id(3, 64, 4, 61);
+        w.tiles.insert((3, 64, 4), TileData::Furnace(crate::tile_entity::furnace::furnace_create()));
+        let mut items = NbtList::with_type(10);
+        let mut im = BTreeMap::new();
+        im.insert("Slot".to_string(), NbtTag::Byte(0));
+        im.insert("id".to_string(), NbtTag::Short(15));
+        im.insert("Count".to_string(), NbtTag::Byte(100));
+        im.insert("Damage".to_string(), NbtTag::Short(0));
+        items.push(NbtTag::Compound(crate::nbt::NbtCompound { map: im }));
+        let mut map = BTreeMap::new();
+        map.insert("x".to_string(), NbtTag::Int(3));
+        map.insert("y".to_string(), NbtTag::Int(64));
+        map.insert("z".to_string(), NbtTag::Int(4));
+        map.insert("BurnTime".to_string(), NbtTag::Short(30000));
+        map.insert("CookTime".to_string(), NbtTag::Short(500));
+        map.insert("ItemBurnTime".to_string(), NbtTag::Short(-5));
+        map.insert("Items".to_string(), NbtTag::List(items));
+        let mut raw = Vec::new();
+        write_root(&mut raw, "", &NbtCompound { map }).unwrap();
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&raw).unwrap();
+        let gz = enc.finish().unwrap();
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::ComplexEntity { x: 3, y: 64, z: 4, nbt_data: gz },
+        );
+        match w.tiles.get(&(3, 64, 4)) {
+            Some(TileData::Furnace(s)) => {
+                assert_eq!(s.burn_time, 20000);
+                assert_eq!(s.cook_time, 200);
+                assert_eq!(s.current_item_burn_time, 0);
+                assert_eq!(s.slots[0].count, 64);
+            }
+            _ => panic!("furnace tile missing"),
+        }
+    }

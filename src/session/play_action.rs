@@ -128,6 +128,10 @@ impl PlaySession {
         if damage <= 0 {
             return None;
         }
+        if matches!(ctx.world.entities.get(target), Some(Entity::Boat(_))) {
+            ctx.world.damage_boat(target, damage);
+            return None;
+        }
         ctx.world.attack_living(target, damage, Some(me));
         // Tool wear only against living targets.
         let living_target = matches!(
@@ -262,7 +266,10 @@ const CHAT_ALLOWED: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQR
     }
 
     pub(crate) fn held_switch(&mut self, ctx: &mut SessionCtx, item_id: i16) {
-        if item_id == 0 {
+        // Strict like `apply_inventory` (vanilla stores the id verbatim):
+        // unknown ids clear the selection instead of arming a ghost stack
+        // for an item that can never exist server-side.
+        if item_id <= 0 || !crate::item_data::item_is_valid(item_id as i32) {
             self.held_id = 0;
             self.held_fallback = None;
             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(self.player) {

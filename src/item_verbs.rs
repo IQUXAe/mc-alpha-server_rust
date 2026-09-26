@@ -267,6 +267,68 @@ pub fn item_sign_use(w: &mut ItemUseWorld, pos: BlockPos, side: i32, yaw: f32) -
     true
 }
 
+/// Door placement (mirrors `ItemDoor.onItemUse` for wooden door 324 -> 64 and
+/// iron door 330 -> 71). True means the caller should decrement the stack.
+pub fn item_door_use(
+    w: &mut ItemUseWorld,
+    pos: BlockPos,
+    side: i32,
+    yaw: f32,
+    door_block_id: u8,
+) -> bool {
+    if side != 1 {
+        return false;
+    }
+    let lower = pos.above();
+    let upper = lower.above();
+    if lower.y <= 0 || lower.y >= 127 {
+        return false;
+    }
+    if !w.world.attach_at(pos) || q_id(w, lower) != 0 || q_id(w, upper) != 0 {
+        return false;
+    }
+    let mut dir = (crate::math_helper::floor_double(((yaw + 180.0) * 4.0 / 360.0) as f64 - 0.5)
+        & 3) as u8;
+    let (dx, dz) = match dir {
+        0 => (0, 1),
+        1 => (-1, 0),
+        2 => (0, -1),
+        _ => (1, 0),
+    };
+    let left_solid = i32::from(w.world.attach_at(lower.offset(-dx, 0, -dz)))
+        + i32::from(w.world.attach_at(upper.offset(-dx, 0, -dz)));
+    let right_solid = i32::from(w.world.attach_at(lower.offset(dx, 0, dz)))
+        + i32::from(w.world.attach_at(upper.offset(dx, 0, dz)));
+    let left_door = q_id(w, lower.offset(-dx, 0, -dz)) == door_block_id
+        || q_id(w, upper.offset(-dx, 0, -dz)) == door_block_id;
+    let right_door = q_id(w, lower.offset(dx, 0, dz)) == door_block_id
+        || q_id(w, upper.offset(dx, 0, dz)) == door_block_id;
+    if (left_door && !right_door) || right_solid > left_solid {
+        dir = (dir.wrapping_sub(1) & 3) + 4;
+    }
+    w.world.set_block_id(lower.x, lower.y, lower.z, door_block_id);
+    w.world.set_block_meta(lower.x, lower.y, lower.z, dir);
+    w.world.set_block_id(upper.x, upper.y, upper.z, door_block_id);
+    w.world.set_block_meta(upper.x, upper.y, upper.z, dir | 8);
+    w.world.notify_neighbors_of(lower.x, lower.y, lower.z);
+    w.world.notify_neighbors_of(upper.x, upper.y, upper.z);
+    true
+}
+
+/// Record insertion into an empty jukebox (`84`, meta `0`) for records
+/// `2256` ("13") and `2257` ("cat") (mirrors `ItemRecord.onItemUse`).
+pub fn item_record_use(w: &mut ItemUseWorld, pos: BlockPos, item_id: i32) -> bool {
+    if q_id(w, pos) == 84
+        && w.world.meta_at(pos) == 0
+        && (item_id == 2256 || item_id == 2257)
+    {
+        let meta = (item_id - 2255) as u8;
+        w.world.set_meta_at(pos, meta);
+        return true;
+    }
+    false
+}
+
 /// Block placement input bundled to keep the arity clippy-clean.
 #[derive(Clone, Copy, Debug)]
 pub struct BlockPlace {
@@ -276,9 +338,44 @@ pub struct BlockPlace {
     pub yaw: f32,
 }
 
+fn lever_or_button_meta(w: &World, pos: BlockPos, side: i32, is_lever: bool) -> Option<u8> {
+    match side {
+        1 if is_lever && w.attach_at(pos.below()) => Some(5),
+        2 if w.attach_at(pos.offset(0, 0, 1)) => Some(4),
+        3 if w.attach_at(pos.offset(0, 0, -1)) => Some(3),
+        4 if w.attach_at(pos.offset(1, 0, 0)) => Some(2),
+        5 if w.attach_at(pos.offset(-1, 0, 0)) => Some(1),
+        _ => {
+            if w.attach_at(pos.offset(-1, 0, 0)) {
+                Some(1)
+            } else if w.attach_at(pos.offset(1, 0, 0)) {
+                Some(2)
+            } else if w.attach_at(pos.offset(0, 0, -1)) {
+                Some(3)
+            } else if w.attach_at(pos.offset(0, 0, 1)) {
+                Some(4)
+            } else if is_lever && w.attach_at(pos.below()) {
+                Some(5)
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// Block placement (mirrors `ItemBlock::onItemUse`). True means the caller should
 /// decrement the stack.
 pub fn item_block_use(w: &mut ItemUseWorld, place: BlockPlace, pos: BlockPos) -> bool {
+    if place.stack_count == 0 {
+        return false;
+    }
+    // Single slab placed on top of a single slab merges into a double slab (BlockStep).
+    if place.block_id == 44 && place.side == 1 && q_id(w, pos) == 44 {
+        if placement_clear(w, 43, pos) && w.world.set_notify_at(pos, 43) {
+            return true;
+        }
+        return false;
+    }
     let mut target = pos;
     // Snow layers are replaced instead of offset.
     if q_id(w, pos) != 78 {
@@ -287,7 +384,7 @@ pub fn item_block_use(w: &mut ItemUseWorld, place: BlockPlace, pos: BlockPos) ->
         };
         target = target.offset(dx, dy, dz);
     }
-    if place.stack_count == 0 || !(0..128).contains(&target.y) {
+    if !(0..128).contains(&target.y) {
         return false;
     }
     let occupying = q_id(w, target);
@@ -300,6 +397,14 @@ pub fn item_block_use(w: &mut ItemUseWorld, place: BlockPlace, pos: BlockPos) ->
     if !can_stay(w, place.block_id, target) {
         return false;
     }
+    let attach_meta = if place.block_id == 69 || place.block_id == 77 {
+        let Some(m) = lever_or_button_meta(w.world, target, place.side, place.block_id == 69) else {
+            return false;
+        };
+        Some(m)
+    } else {
+        None
+    };
     if !placement_clear(w, place.block_id, target) {
         return false;
     }
@@ -309,6 +414,9 @@ pub fn item_block_use(w: &mut ItemUseWorld, place: BlockPlace, pos: BlockPos) ->
     if place.block_id == 61 || place.block_id == 62 {
         let meta = item_furnace_facing(place.yaw);
         w.world.set_meta_at(target, meta);
+    }
+    if let Some(m) = attach_meta {
+        w.world.set_meta_at(target, m);
     }
     torch_placed(w, place.block_id, target, place.side);
     true
