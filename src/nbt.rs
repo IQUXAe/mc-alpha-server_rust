@@ -468,8 +468,14 @@ pub fn read_string<R: Read>(reader: &mut R) -> std::io::Result<String> {
         ));
     }
     let len = len_signed as usize;
-    let mut bytes = vec![0u8; len];
-    reader.read_exact(&mut bytes)?;
+    let mut bytes = Vec::with_capacity(len.min(8192));
+    reader.take(len as u64).read_to_end(&mut bytes)?;
+    if bytes.len() != len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "NBT readTag: unexpected EOF reading string",
+        ));
+    }
     String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
@@ -481,7 +487,8 @@ pub fn write_string<W: Write>(writer: &mut W, s: &str) -> std::io::Result<()> {
 }
 
 pub fn read_payload<R: Read>(reader: &mut R, tag_type: u8) -> std::io::Result<NbtTag> {
-    read_payload_depth(reader, tag_type, 0)
+    let mut budget = MAX_NBT_NODES;
+    read_payload_depth(reader, tag_type, 0, &mut budget)
 }
 
 /// Max byte-array / list lengths accepted from disk/network NBT (`Read`
@@ -494,11 +501,14 @@ pub const MAX_NBT_BYTES: i32 = 4_194_304;
 pub const MAX_NBT_LIST: i32 = 100_000;
 /// Max compound/list nesting (chunk NBT nests ~4 deep).
 const MAX_NBT_DEPTH: u32 = 16;
+/// Max total NBT nodes decoded in a single payload tree.
+const MAX_NBT_NODES: usize = 250_000;
 
 fn read_payload_depth<R: Read>(
     reader: &mut R,
     tag_type: u8,
     depth: u32,
+    budget: &mut usize,
 ) -> std::io::Result<NbtTag> {
     if depth > MAX_NBT_DEPTH {
         return Err(std::io::Error::new(
@@ -506,6 +516,13 @@ fn read_payload_depth<R: Read>(
             "NBT: nesting too deep",
         ));
     }
+    if *budget == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "NBT: node budget exceeded",
+        ));
+    }
+    *budget -= 1;
     match tag_type {
         0 => Ok(NbtTag::End),
         1 => {
@@ -551,8 +568,15 @@ fn read_payload_depth<R: Read>(
                     format!("NBT readTag: byte array length {len} exceeds limit {MAX_NBT_BYTES}"),
                 ));
             }
-            let mut bytes = vec![0u8; len as usize];
-            reader.read_exact(&mut bytes)?;
+            let len_usize = len as usize;
+            let mut bytes = Vec::with_capacity(len_usize.min(8192));
+            reader.take(len_usize as u64).read_to_end(&mut bytes)?;
+            if bytes.len() != len_usize {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "NBT readTag: unexpected EOF reading byte array",
+                ));
+            }
             Ok(NbtTag::ByteArray(bytes))
         }
         8 => {
@@ -563,6 +587,12 @@ fn read_payload_depth<R: Read>(
             let mut type_buf = [0u8; 1];
             reader.read_exact(&mut type_buf)?;
             let tag_type = type_buf[0];
+            if NbtTagType::from_u8(tag_type).is_none() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("NBT readTag: unknown list element tag type {tag_type}"),
+                ));
+            }
             let mut len_buf = [0u8; 4];
             reader.read_exact(&mut len_buf)?;
             let len = i32::from_be_bytes(len_buf);
@@ -575,9 +605,15 @@ fn read_payload_depth<R: Read>(
                     format!("NBT readTag: list count {len} exceeds limit {MAX_NBT_LIST}"),
                 ));
             }
+            if len > 0 && tag_type == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "NBT readTag: non-empty list of TAG_End is invalid",
+                ));
+            }
             let mut elements = Vec::with_capacity((len as usize).min(1024));
             for _ in 0..len {
-                elements.push(read_payload_depth(reader, tag_type, depth + 1)?);
+                elements.push(read_payload_depth(reader, tag_type, depth + 1, budget)?);
             }
             Ok(NbtTag::List(NbtList { tag_type, elements }))
         }
@@ -591,7 +627,7 @@ fn read_payload_depth<R: Read>(
                     break;
                 }
                 let name = read_string(reader)?;
-                let val = read_payload_depth(reader, tag_type, depth + 1)?;
+                let val = read_payload_depth(reader, tag_type, depth + 1, budget)?;
                 map.insert(name, val);
             }
             Ok(NbtTag::Compound(NbtCompound { map }))
@@ -690,6 +726,23 @@ fn write_nbt_string_to_buffer(buf: &mut ByteBuffer, s: &str) -> Result<(), NbtEr
 }
 
 pub fn read_payload_from_buffer(buf: &mut ByteBuffer, tag_type: u8) -> Result<NbtTag, NbtError> {
+    let mut budget = MAX_NBT_NODES;
+    read_payload_from_buffer_depth(buf, tag_type, 0, &mut budget)
+}
+
+fn read_payload_from_buffer_depth(
+    buf: &mut ByteBuffer,
+    tag_type: u8,
+    depth: u32,
+    budget: &mut usize,
+) -> Result<NbtTag, NbtError> {
+    if depth > MAX_NBT_DEPTH {
+        return Err(NbtError::Io("NBT: nesting too deep".to_string()));
+    }
+    if *budget == 0 {
+        return Err(NbtError::Io("NBT: node budget exceeded".to_string()));
+    }
+    *budget -= 1;
     match tag_type {
         0 => Ok(NbtTag::End),
         1 => {
@@ -721,6 +774,9 @@ pub fn read_payload_from_buffer(buf: &mut ByteBuffer, tag_type: u8) -> Result<Nb
             if len < 0 {
                 return Err(NbtError::NegativeByteArrayLength(len));
             }
+            if len > MAX_NBT_BYTES {
+                return Err(NbtError::ArrayTooLong(len as usize));
+            }
             if len == 0 {
                 return Ok(NbtTag::ByteArray(Vec::new()));
             }
@@ -746,17 +802,28 @@ pub fn read_payload_from_buffer(buf: &mut ByteBuffer, tag_type: u8) -> Result<Nb
             if count < 0 {
                 return Err(NbtError::NegativeListLength(count));
             }
+            if count > MAX_NBT_LIST {
+                return Err(NbtError::ArrayTooLong(count as usize));
+            }
             if count == 0 {
                 return Ok(NbtTag::List(NbtList {
                     tag_type: elem_type,
                     elements: Vec::new(),
                 }));
             }
+            if elem_type == 0 {
+                return Err(NbtError::UnknownTagType(0));
+            }
             match usize::try_from(count) {
                 Ok(n) => {
-                    let mut elements = Vec::with_capacity(n.min(1024 * 1024));
+                    let mut elements = Vec::with_capacity(n.min(1024));
                     for _ in 0..n {
-                        elements.push(read_payload_from_buffer(buf, elem_type)?);
+                        elements.push(read_payload_from_buffer_depth(
+                            buf,
+                            elem_type,
+                            depth + 1,
+                            budget,
+                        )?);
                     }
                     Ok(NbtTag::List(NbtList {
                         tag_type: elem_type,
@@ -769,9 +836,6 @@ pub fn read_payload_from_buffer(buf: &mut ByteBuffer, tag_type: u8) -> Result<Nb
         10 => {
             let mut map = BTreeMap::new();
             loop {
-                if buf.remaining() == 0 {
-                    break;
-                }
                 let t = buf.read_ubyte().map_err(NbtError::from)?;
                 if t == 0 {
                     break;
@@ -781,7 +845,7 @@ pub fn read_payload_from_buffer(buf: &mut ByteBuffer, tag_type: u8) -> Result<Nb
                     None => return Err(NbtError::UnknownTagType(t)),
                 }
                 let name = read_nbt_string_from_buffer(buf)?;
-                let val = read_payload_from_buffer(buf, t)?;
+                let val = read_payload_from_buffer_depth(buf, t, depth + 1, budget)?;
                 map.insert(name, val);
             }
             Ok(NbtTag::Compound(NbtCompound { map }))
@@ -906,9 +970,16 @@ pub fn read_gzip_root(data: &[u8]) -> Result<(String, NbtCompound), NbtError> {
     if data.is_empty() {
         return Err(NbtError::InvalidRoot("empty gzip input".to_string()));
     }
-    let mut decoder = GzDecoder::new(data);
+    let max_decompressed = (MAX_NBT_BYTES as usize) * 2;
+    let decoder = GzDecoder::new(data);
     let mut raw = Vec::new();
-    decoder.read_to_end(&mut raw).map_err(NbtError::from)?;
+    decoder
+        .take((max_decompressed as u64) + 1)
+        .read_to_end(&mut raw)
+        .map_err(NbtError::from)?;
+    if raw.len() > max_decompressed {
+        return Err(NbtError::Io("decompressed NBT exceeds size limit".to_string()));
+    }
     if raw.is_empty() {
         return Err(NbtError::InvalidRoot("empty decompressed NBT".to_string()));
     }
@@ -1374,5 +1445,99 @@ mod tests {
         assert!(read_root_from_buffer(&mut buf).is_err());
         let mut buf2 = ByteBuffer::from_vec(vec![1, 0, 0]);
         assert!(read_root_from_buffer(&mut buf2).is_err());
+    }
+
+    #[test]
+    fn test_nbt_dos_list_of_tag_end_and_depth_and_oversized_rejected() {
+        // 1. Non-empty list of TAG_End (elem_type=0, len=100000) consumes 0 bytes per element
+        // and must be rejected immediately by both Read and ByteBuffer decoders.
+        let mut raw = Vec::new();
+        raw.push(10); // root TAG_Compound
+        raw.extend_from_slice(&0u16.to_be_bytes()); // root name ""
+        raw.push(9); // field TAG_List
+        raw.extend_from_slice(&1u16.to_be_bytes());
+        raw.push(b'x'); // field name "x"
+        raw.push(0); // elem_type = TAG_End (0)
+        raw.extend_from_slice(&100_000i32.to_be_bytes()); // len = 100000
+        raw.push(0); // end of compound
+        assert!(read_root(&mut std::io::Cursor::new(&raw)).is_err());
+        let mut bb = ByteBuffer::from_vec(raw);
+        assert!(read_root_from_buffer(&mut bb).is_err());
+
+        // 2. Deeply nested compounds (> MAX_NBT_DEPTH = 16) in ByteBuffer must be rejected.
+        let mut deep = Vec::new();
+        deep.push(10);
+        deep.extend_from_slice(&0u16.to_be_bytes());
+        for _ in 0..20 {
+            deep.push(10);
+            deep.extend_from_slice(&1u16.to_be_bytes());
+            deep.push(b'c');
+        }
+        for _ in 0..=20 {
+            deep.push(0);
+        }
+        assert!(read_root(&mut std::io::Cursor::new(&deep)).is_err());
+        let mut bb_deep = ByteBuffer::from_vec(deep);
+        assert!(read_root_from_buffer(&mut bb_deep).is_err());
+    }
+
+    #[test]
+    fn rejects_tag_end_list_infinite_loop() {
+        let mut raw = vec![10, 0, 0, 9, 0, 1, b'l', 0];
+        raw.extend_from_slice(&50_000i32.to_be_bytes());
+        raw.push(0);
+        assert!(read_root(&mut std::io::Cursor::new(&raw)).is_err());
+        let mut bb = ByteBuffer::from_vec(raw);
+        assert!(read_root_from_buffer(&mut bb).is_err());
+    }
+
+    #[test]
+    fn rejects_deeply_nested_lists_in_buffer_and_reader() {
+        let mut raw = vec![10, 0, 0, 9, 0, 1, b'l'];
+        for _ in 0..18 {
+            raw.push(9);
+            raw.extend_from_slice(&1i32.to_be_bytes());
+        }
+        raw.push(1);
+        raw.extend_from_slice(&1i32.to_be_bytes());
+        raw.push(42);
+        raw.push(0);
+        assert!(read_root(&mut std::io::Cursor::new(&raw)).is_err());
+        let mut bb = ByteBuffer::from_vec(raw);
+        assert!(read_root_from_buffer(&mut bb).is_err());
+    }
+
+    #[test]
+    fn rejects_node_budget_exhaustion_in_buffer() {
+        // 3 lists of 100,000 bytes = 300,000 nodes > MAX_NBT_NODES (250,000)
+        let mut raw = vec![10, 0, 0];
+        for idx in 0..3u8 {
+            raw.push(9);
+            raw.extend_from_slice(&1u16.to_be_bytes());
+            raw.push(b'a' + idx);
+            raw.push(1);
+            raw.extend_from_slice(&100_000i32.to_be_bytes());
+            raw.extend(std::iter::repeat_n(0u8, 100_000));
+        }
+        raw.push(0);
+        assert!(read_root(&mut std::io::Cursor::new(&raw)).is_err());
+        let mut bb = ByteBuffer::from_vec(raw);
+        assert!(read_root_from_buffer(&mut bb).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_string_allocation_in_truncated_buffer() {
+        // Truncated string claiming 30,000 bytes in a 10-byte buffer
+        let mut raw = vec![10, 0, 0, 8, 0, 1, b's'];
+        raw.extend_from_slice(&30_000i16.to_be_bytes());
+        raw.extend_from_slice(b"abc");
+        assert!(read_root(&mut std::io::Cursor::new(&raw)).is_err());
+        let mut bb = ByteBuffer::from_vec(raw);
+        assert!(read_root_from_buffer(&mut bb).is_err());
+
+        // Truncated compound missing TAG_End in ByteBuffer must error
+        let truncated_compound = vec![10, 0, 0, 1, 0, 1, b'a', 7];
+        let mut bb_trunc = ByteBuffer::from_vec(truncated_compound);
+        assert!(read_root_from_buffer(&mut bb_trunc).is_err());
     }
 }
