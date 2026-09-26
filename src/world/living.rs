@@ -415,8 +415,11 @@ impl World {
     pub fn tick_living(&mut self, id: EntityId) {
         self.entities.tick_base(id);
         // Fire decay (Entity.onUpdate: fire-- each tick, 1 damage per 20
-        // ticks while burning, extinguished in water). The old code never
-        // decayed `fire`, so daylight-ignited mobs burned forever.
+        // ticks while burning, extinguished in water). Water only, like
+        // vanilla `handleWaterMovement` (Entity.java:446): lava must NOT
+        // extinguish — it is the igniter. (`is_liquid` covers both; the
+        // old code cleared `fire` inside lava, so lava dealt contact
+        // damage but never burned.)
         let in_water_for_fire = {
             match self.entities.get(id) {
                 Some(Entity::Mob(m)) => {
@@ -426,8 +429,8 @@ impl World {
                         floor_double(b.bounding_box.min_y),
                         floor_double(b.pos[2]),
                     );
-                    self.material_at(fx, fy, fz).is_liquid()
-                        || self.material_at(fx, fy + 1, fz).is_liquid()
+                    self.material_at(fx, fy, fz) == Material::WATER
+                        || self.material_at(fx, fy + 1, fz) == Material::WATER
                 }
                 Some(Entity::Animal(a)) => {
                     let b = &a.living.body;
@@ -436,8 +439,8 @@ impl World {
                         floor_double(b.bounding_box.min_y),
                         floor_double(b.pos[2]),
                     );
-                    self.material_at(fx, fy, fz).is_liquid()
-                        || self.material_at(fx, fy + 1, fz).is_liquid()
+                    self.material_at(fx, fy, fz) == Material::WATER
+                        || self.material_at(fx, fy + 1, fz) == Material::WATER
                 }
                 Some(Entity::Player(p)) => {
                     let b = &p.living.body;
@@ -446,8 +449,8 @@ impl World {
                         floor_double(b.bounding_box.min_y),
                         floor_double(b.pos[2]),
                     );
-                    self.material_at(fx, fy, fz).is_liquid()
-                        || self.material_at(fx, fy + 1, fz).is_liquid()
+                    self.material_at(fx, fy, fz) == Material::WATER
+                        || self.material_at(fx, fy + 1, fz) == Material::WATER
                 }
                 _ => false,
             }
@@ -456,11 +459,13 @@ impl World {
             Some(Entity::Mob(m)) => {
                 if in_water_for_fire {
                     m.living.body.fire = 0;
+                    m.burn_ticks = 0;
                     false
                 } else if m.living.body.fire > 0 {
                     m.living.body.fire -= 1;
-                    // Damage every 20 ticks of burn (300 → ~15 hits).
-                    m.living.body.fire % 20 == 0 && m.living.body.fire > 0
+                    // Damage every 20 ticks of burn (300 → ~15 hits), unless
+                    // `burn_ticks` in `tick_mob` is already managing the burn schedule.
+                    m.burn_ticks <= 0 && m.living.body.fire % 20 == 0 && m.living.body.fire > 0
                 } else {
                     false
                 }

@@ -247,16 +247,17 @@ impl World {
     /// disjoint field borrows, so the closures share the exact selection
     /// flow.
     fn wander_destination(&mut self, rule: WeightRule, base: [i32; 3]) -> Option<[i32; 3]> {
+        let sky_sub = self.skylight_subtracted;
         let rng = &mut self.rng;
         let chunks = &self.chunks;
         let mut next = |bound: i32| rng.next_int_bound(bound);
         let mut weight = |x: i32, y: i32, z: i32| match rule {
             WeightRule::Mob => {
-                ai_mob_path_weight(World::block_light_in(chunks, x, y, z) as f32 / 15.0)
+                ai_mob_path_weight(World::block_light_sub_in(chunks, sky_sub, x, y, z) as f32 / 15.0)
             }
             WeightRule::Animal => ai_animal_path_weight(
                 World::block_id_in(chunks, x, y - 1, z) == GRASS_BLOCK_ID,
-                World::block_light_in(chunks, x, y, z) as f32 / 15.0,
+                World::block_light_sub_in(chunks, sky_sub, x, y, z) as f32 / 15.0,
             ),
         };
         wander_pick(base, &mut next, &mut weight)
@@ -307,18 +308,19 @@ impl World {
         )
     }
 
-    /// Path to an entity (mirrors the pointer `getPathToEntity` overload:
-    /// target feet plus eye height, not the bounding-box floor).
-    fn path_target_points(&self, id: EntityId, target: EntityId, max_dist: f32) -> Vec<[i32; 3]> {
+    /// Path to an entity (mirrors `Pathfinder.createEntityPathTo(Entity, Entity, float)`:
+    /// uses `target.boundingBox.minY` so the target PathPoint sits at ground level).
+    pub(crate) fn path_target_points(&self, id: EntityId, target: EntityId, max_dist: f32) -> Vec<[i32; 3]> {
         let (bb, width, height) = match self.entities.get(id) {
             Some(e) => (e.body().bounding_box, e.body().width, e.body().height),
             None => return Vec::new(),
         };
         let tp = match self.entities.get(target) {
-            Some(t) => {
-                let eye = Self::living_eye_height(t);
-                [t.body().pos[0], t.body().pos[1] + eye, t.body().pos[2]]
-            }
+            Some(t) => [
+                t.body().pos[0],
+                t.body().bounding_box.min_y,
+                t.body().pos[2],
+            ],
             None => return Vec::new(),
         };
         self.path_points((bb.min_x, bb.min_y, bb.min_z), (tp[0], tp[1], tp[2]), width, height, max_dist)

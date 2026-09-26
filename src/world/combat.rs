@@ -257,14 +257,7 @@ impl World {
                     if !has_collision_box(props.block_type) || !has_collision_id(bid) {
                         continue;
                     }
-                    let bb = AxisAlignedBB::get_bounding_box(
-                        x as f64 + props.min_x as f64,
-                        y as f64 + props.min_y as f64,
-                        z as f64 + props.min_z as f64,
-                        x as f64 + props.max_x as f64,
-                        y as f64 + props.max_y as f64,
-                        z as f64 + props.max_z as f64,
-                    );
+                    let bb = self.block_collision_box(x, y, z, bid);
                     if let Some(hit) = bb.clip(from, to) {
                         let d = (from.x_coord - hit.hit_vec.x_coord).powi(2)
                             + (from.y_coord - hit.hit_vec.y_coord).powi(2)
@@ -340,7 +333,7 @@ impl World {
     /// lift, and 0.6/12.0 launch. The ctor-equivalent spread run is kept
     /// (draws consumed like C++) with its result discarded unless the
     /// volley aim degenerates.
-    fn spawn_skeleton_arrow(&mut self, id: EntityId, target: EntityId) {
+    pub(crate) fn spawn_skeleton_arrow(&mut self, id: EntityId, target: EntityId) {
         use crate::entity::misc::arrow_shoot_run;
         use crate::math_helper::{cos, sin};
         let (sp, yaw, pitch, eye) = match self.entities.get(id) {
@@ -356,7 +349,7 @@ impl World {
         };
         let rad = yaw / 180.0 * std::f32::consts::PI;
         let (ax, ay, az) =
-            (sp[0] - cos(rad) as f64 * 0.16, sp[1] + eye - 0.1 + 1.4, sp[2] - sin(rad) as f64 * 0.16);
+            (sp[0] - cos(rad) as f64 * 0.16, sp[1] + eye - 0.1, sp[2] - sin(rad) as f64 * 0.16);
         let (dx, dz) = (tp[0] - sp[0], tp[2] - sp[2]);
         let dy = tp[1] - 0.2 - ay;
         let lift = sqrt_float((dx * dx + dz * dz) as f32) * 0.2;
@@ -557,37 +550,65 @@ impl World {
             }
             self.attack_living(v, damage.max(1), attacker);
         }
-        // Phase 2: blocks in the sphere.
-        let (cx, cy, cz) = (px.floor() as i32, py.floor() as i32, pz.floor() as i32);
-        let r = radius.ceil() as i32;
-        let mut tnt_chain: Vec<(i32, i32, i32)> = Vec::new();
-        let mut removals: Vec<(i32, i32, i32, u8, u8)> = Vec::new();
-        for dx in -r..=r {
-            for dy in -r..=r {
-                for dz in -r..=r {
-                    let d = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
-                    if d > radius {
+        // Phase 2: 16x16x16 border raycasting with per-step resistance attenuation (Explosion.java:46-75).
+        let mut destroyed = std::collections::BTreeSet::new();
+        for ix in 0..16 {
+            for iy in 0..16 {
+                for iz in 0..16 {
+                    if ix != 0 && ix != 15 && iy != 0 && iy != 15 && iz != 0 && iz != 15 {
                         continue;
                     }
-                    let (bx, by, bz) = (cx + dx, cy + dy, cz + dz);
-                    let bid = self.get_block_id(bx, by, bz);
-                    if bid == 0 {
-                        continue;
-                    }
-                    if block_properties_get(bid as u32).hardness < 0.0 {
-                        continue;
-                    }
-                    if bid == 46 {
-                        tnt_chain.push((bx, by, bz));
-                        removals.push((bx, by, bz, bid, self.get_block_meta(bx, by, bz)));
-                        continue;
-                    }
-                    if self.rng.next_float() <= 0.3 {
-                        removals.push((bx, by, bz, bid, self.get_block_meta(bx, by, bz)));
-                    } else {
-                        removals.push((bx, by, bz, 0, 0));
+                    let mut vx = ix as f64 / 15.0 * 2.0 - 1.0;
+                    let mut vy = iy as f64 / 15.0 * 2.0 - 1.0;
+                    let mut vz = iz as f64 / 15.0 * 2.0 - 1.0;
+                    let len = (vx * vx + vy * vy + vz * vz).sqrt();
+                    vx /= len;
+                    vy /= len;
+                    vz /= len;
+
+                    let mut power = radius * (0.7 + self.rng.next_float() * 0.6);
+                    let mut rx = px;
+                    let mut ry = py;
+                    let mut rz = pz;
+                    while power > 0.0 {
+                        let bx = rx.floor() as i32;
+                        let by = ry.floor() as i32;
+                        let bz = rz.floor() as i32;
+                        let bid = self.get_block_id(bx, by, bz);
+                        if bid > 0 {
+                            let props = block_properties_get(bid as u32);
+                            if props.hardness < 0.0 {
+                                break;
+                            }
+                            power -= (props.resistance / 5.0 + 0.3) * 0.3;
+                        }
+                        if power > 0.0 && bid > 0 {
+                            destroyed.insert((bx, by, bz));
+                        }
+                        rx += vx * 0.3;
+                        ry += vy * 0.3;
+                        rz += vz * 0.3;
+                        power -= 0.3 * 0.75;
                     }
                 }
+            }
+        }
+        let mut tnt_chain: Vec<(i32, i32, i32)> = Vec::new();
+        let mut removals: Vec<(i32, i32, i32, u8, u8)> = Vec::new();
+        for (bx, by, bz) in destroyed {
+            let bid = self.get_block_id(bx, by, bz);
+            if bid == 0 {
+                continue;
+            }
+            if bid == 46 {
+                tnt_chain.push((bx, by, bz));
+                removals.push((bx, by, bz, bid, self.get_block_meta(bx, by, bz)));
+                continue;
+            }
+            if self.rng.next_float() <= 0.3 {
+                removals.push((bx, by, bz, bid, self.get_block_meta(bx, by, bz)));
+            } else {
+                removals.push((bx, by, bz, 0, 0));
             }
         }
         for (bx, by, bz, bid, meta) in removals {
