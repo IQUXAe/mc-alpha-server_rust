@@ -451,74 +451,87 @@ impl Tracker {
             });
         }
 
-        // Movement pass.
-        let entry = match self.entries.get_mut(&e.id) {
-            Some(en) => en,
+        // Movement pass (gated by `entry.rate`; state/mount/held/health
+        // checks below run every tick so Packet39AttachEntity, hurt flash,
+        // sneak, fire, and held-item switches are never delayed by `rate`).
+        let do_move = match self.entries.get_mut(&e.id) {
+            Some(entry) => {
+                entry.tick += 1;
+                (entry.tick - 1).is_multiple_of(entry.rate as u64)
+            }
             None => return,
         };
-        entry.tick += 1;
-        if (entry.tick - 1) % (entry.rate as u64) != 0 {
-            return;
-        }
-        let fx = tracker_encode_pos(e.pos[0]);
-        let fy = tracker_encode_pos(e.pos[1]);
-        let fz = tracker_encode_pos(e.pos[2]);
-        let yaw = tracker_encode_rot(e.yaw);
-        let pitch = tracker_encode_rot(e.pitch);
-        let dx = fx - entry.last_fixed[0];
-        let dy = fy - entry.last_fixed[1];
-        let dz = fz - entry.last_fixed[2];
-        let moved = dx != 0 || dy != 0 || dz != 0;
-        let turned = yaw != entry.last_yaw || pitch != entry.last_pitch;
+        if do_move {
+            let fx = tracker_encode_pos(e.pos[0]);
+            let fy = tracker_encode_pos(e.pos[1]);
+            let fz = tracker_encode_pos(e.pos[2]);
+            let yaw = tracker_encode_rot(e.yaw);
+            let pitch = tracker_encode_rot(e.pitch);
+            let (dx, dy, dz, moved, turned, vel_changed) = {
+                let entry = &self.entries[&e.id];
+                let dx = fx - entry.last_fixed[0];
+                let dy = fy - entry.last_fixed[1];
+                let dz = fz - entry.last_fixed[2];
+                let moved = dx != 0 || dy != 0 || dz != 0;
+                let turned = yaw != entry.last_yaw || pitch != entry.last_pitch;
+                let vel_changed = tracker_velocity_changed(
+                    e.motion[0],
+                    e.motion[1],
+                    e.motion[2],
+                    entry.last_motion[0],
+                    entry.last_motion[1],
+                    entry.last_motion[2],
+                    entry.send_velocity,
+                );
+                (dx, dy, dz, moved, turned, vel_changed)
+            };
 
-        if tracker_velocity_changed(
-            e.motion[0], e.motion[1], e.motion[2],
-            entry.last_motion[0], entry.last_motion[1], entry.last_motion[2],
-            entry.send_velocity,
-        ) {
-            entry.last_motion = e.motion;
-            let bytes = encode_velocity(e.id, e.motion);
-            let _ = entry;
-            self.send_to_watchers(e.id, bytes, out);
-        }
+            if vel_changed {
+                if let Some(entry) = self.entries.get_mut(&e.id) {
+                    entry.last_motion = e.motion;
+                }
+                let bytes = encode_velocity(e.id, e.motion);
+                self.send_to_watchers(e.id, bytes, out);
+            }
 
-        let kind = tracker_move_kind(dx, dy, dz, moved, turned);
-        let move_bytes = match kind {
-            3 => encode(Packet::RelEntityMoveLook {
-                entity_id: e.id,
-                dx: dx as i8,
-                dy: dy as i8,
-                dz: dz as i8,
-                yaw,
-                pitch,
-            }),
-            1 => encode(Packet::RelEntityMove {
-                entity_id: e.id,
-                dx: dx as i8,
-                dy: dy as i8,
-                dz: dz as i8,
-            }),
-            2 => encode(Packet::EntityLook { entity_id: e.id, yaw, pitch }),
-            // Tracker teleport (EntityTrackerEntry:86 → Packet34) reuses the
-            // floor-encoded yaw/pitch, NOT the spawn trunc form. Using trunc
-            // here skewed negative angles by 1 unit (0.35°).
-            4 => encode(Packet::EntityTeleport {
-                entity_id: e.id,
-                x: fx,
-                y: fy,
-                z: fz,
-                yaw,
-                pitch,
-            }),
-            _ => encode(Packet::Entity { entity_id: e.id }),
-        };
-        self.send_to_watchers(e.id, move_bytes, out);
+            let kind = tracker_move_kind(dx, dy, dz, moved, turned);
+            let move_bytes = match kind {
+                3 => encode(Packet::RelEntityMoveLook {
+                    entity_id: e.id,
+                    dx: dx as i8,
+                    dy: dy as i8,
+                    dz: dz as i8,
+                    yaw,
+                    pitch,
+                }),
+                1 => encode(Packet::RelEntityMove {
+                    entity_id: e.id,
+                    dx: dx as i8,
+                    dy: dy as i8,
+                    dz: dz as i8,
+                }),
+                2 => encode(Packet::EntityLook { entity_id: e.id, yaw, pitch }),
+                // Tracker teleport (EntityTrackerEntry:86 → Packet34) reuses the
+                // floor-encoded yaw/pitch, NOT the spawn trunc form. Using trunc
+                // here skewed negative angles by 1 unit (0.35°).
+                4 => encode(Packet::EntityTeleport {
+                    entity_id: e.id,
+                    x: fx,
+                    y: fy,
+                    z: fz,
+                    yaw,
+                    pitch,
+                }),
+                _ => encode(Packet::Entity { entity_id: e.id }),
+            };
+            self.send_to_watchers(e.id, move_bytes, out);
 
-        if moved || turned {
-            if let Some(entry) = self.entries.get_mut(&e.id) {
-                entry.last_fixed = [fx, fy, fz];
-                entry.last_yaw = yaw;
-                entry.last_pitch = pitch;
+            if moved || turned {
+                if let Some(entry) = self.entries.get_mut(&e.id) {
+                    entry.last_fixed = [fx, fy, fz];
+                    entry.last_yaw = yaw;
+                    entry.last_pitch = pitch;
+                }
             }
         }
 
