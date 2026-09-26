@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use mio::net::TcpStream;
-use crate::network::{PacketData, try_decode_packet};
+use crate::network::{PacketData, try_decode_packet_slice};
 use crate::server_constants::SEND_QUEUE_MAX_BYTES;
 
 /// Max packets decoded from one socket buffer per poll. Legit clients
@@ -73,12 +73,14 @@ impl ConnInner {
             }
         }
 
-        while !self.recv_buf.is_empty() {
+        let mut read_pos = 0;
+        while read_pos < self.recv_buf.len() {
             if self.inbound.len() >= MAX_PACKETS_PER_POLL {
                 break;
             }
-            match try_decode_packet(&mut self.recv_buf) {
-                Ok(Some(PacketData::KickDisconnect { .. })) => {
+            match try_decode_packet_slice(&self.recv_buf[read_pos..]) {
+                Ok(Some((PacketData::KickDisconnect { .. }, consumed))) => {
+                    read_pos += consumed;
                     self.closed = true;
                     if !self.dropped_reported {
                         self.dropped_reported = true;
@@ -86,7 +88,8 @@ impl ConnInner {
                     }
                     break;
                 }
-                Ok(Some(pkt)) => {
+                Ok(Some((pkt, consumed))) => {
+                    read_pos += consumed;
                     self.inbound.push(ConnEvent::Packet(pkt));
                 }
                 Ok(None) => break,
@@ -100,20 +103,24 @@ impl ConnInner {
                 }
             }
         }
+        if read_pos > 0 {
+            self.recv_buf.drain(..read_pos);
+        }
     }
 
     fn flush_outbound(&mut self) {
         if self.closed {
             return;
         }
-        while !self.outbound.is_empty() {
-            match self.stream.write(&self.outbound) {
+        let mut write_pos = 0;
+        while write_pos < self.outbound.len() {
+            match self.stream.write(&self.outbound[write_pos..]) {
                 Ok(0) => {
                     self.closed = true;
-                    return;
+                    break;
                 }
                 Ok(n) => {
-                    self.outbound.drain(..n);
+                    write_pos += n;
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     break;
@@ -123,11 +130,14 @@ impl ConnInner {
                 }
                 Err(_) => {
                     self.closed = true;
-                    return;
+                    break;
                 }
             }
         }
-        if self.outbound.is_empty() && self.closing {
+        if write_pos > 0 {
+            self.outbound.drain(..write_pos);
+        }
+        if self.outbound.is_empty() && self.closing && !self.closed {
             let _ = self.stream.shutdown(std::net::Shutdown::Write);
             self.closed = true;
         }
@@ -143,12 +153,14 @@ pub struct Conn {
 impl Conn {
     pub fn new(stream: std::net::TcpStream) -> std::io::Result<Self> {
         let remote = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+        let _ = stream.set_nodelay(true);
         stream.set_nonblocking(true)?;
         let stream = TcpStream::from_std(stream);
         Ok(Self::from_mio(stream, remote))
     }
 
     pub fn from_mio(stream: TcpStream, remote: String) -> Self {
+        let _ = stream.set_nodelay(true);
         Self {
             inner: RefCell::new(ConnInner {
                 stream,

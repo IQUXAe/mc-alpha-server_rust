@@ -408,12 +408,11 @@ pub(crate) fn read_packet_payload<R: Read>(stream: &mut R, packet_id: u8) -> std
     }
 }
 
-/// Try to decode one packet from the front of `buf`.
+/// Try to decode one packet from the front of `buf` slice without draining.
 ///
-/// If a full packet is present, it is drained from `buf` and `Ok(Some(pkt))`
-/// is returned. If more data is needed, `buf` is left untouched and `Ok(None)`
-/// is returned. If the data is corrupt or violates protocol, `Err` is returned.
-pub(crate) fn try_decode_packet(buf: &mut Vec<u8>) -> std::io::Result<Option<PacketData>> {
+/// Returns `Ok(Some((pkt, consumed_bytes)))` when a full packet is decoded,
+/// `Ok(None)` when more data is needed, or `Err` on protocol error.
+pub(crate) fn try_decode_packet_slice(buf: &[u8]) -> std::io::Result<Option<(PacketData, usize)>> {
     if buf.is_empty() {
         return Ok(None);
     }
@@ -422,11 +421,26 @@ pub(crate) fn try_decode_packet(buf: &mut Vec<u8>) -> std::io::Result<Option<Pac
     match read_packet_payload(&mut cursor, packet_id) {
         Ok(pkt) => {
             let consumed = 1 + cursor.position() as usize;
-            buf.drain(..consumed);
-            Ok(Some(pkt))
+            Ok(Some((pkt, consumed)))
         }
         Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
         Err(e) => Err(e),
+    }
+}
+
+/// Try to decode one packet from the front of `buf`.
+///
+/// If a full packet is present, it is drained from `buf` and `Ok(Some(pkt))`
+/// is returned. If more data is needed, `buf` is left untouched and `Ok(None)`
+/// is returned. If the data is corrupt or violates protocol, `Err` is returned.
+#[allow(dead_code)]
+pub(crate) fn try_decode_packet(buf: &mut Vec<u8>) -> std::io::Result<Option<PacketData>> {
+    match try_decode_packet_slice(buf)? {
+        Some((pkt, consumed)) => {
+            buf.drain(..consumed);
+            Ok(Some(pkt))
+        }
+        None => Ok(None),
     }
 }
 
@@ -633,4 +647,29 @@ mod tests {
         encode_packet(&pkt, &mut buf);
         assert_eq!(buf, vec![22, 0, 0, 0, 9, 0, 0, 0, 1]);
     }
+
+    #[test]
+    fn test_try_decode_packet_slice_multiple_and_partial() {
+        let mut raw = Vec::new();
+        // Packet 1: Handshake("Steve")
+        put_u8(&mut raw, 2);
+        put_str(&mut raw, "Steve");
+        let first_len = raw.len();
+        // Packet 2: Chat("hello")
+        put_u8(&mut raw, 3);
+        put_str(&mut raw, "hello");
+
+        // Partial slice of Packet 1 returns Ok(None)
+        assert!(try_decode_packet_slice(&raw[..3]).unwrap().is_none());
+
+        // Full stream decodes Packet 1 then Packet 2
+        let (p1, used1) = try_decode_packet_slice(&raw).unwrap().unwrap();
+        assert_eq!(used1, first_len);
+        assert!(matches!(p1, PacketData::Handshake { username } if username == "Steve"));
+
+        let (p2, used2) = try_decode_packet_slice(&raw[used1..]).unwrap().unwrap();
+        assert_eq!(used1 + used2, raw.len());
+        assert!(matches!(p2, PacketData::Chat { message } if message == "hello"));
+    }
 }
+
