@@ -40,6 +40,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const WORLD_HEIGHT: i32 = 128;
 
+/// World explosion event payload `(x, y, z, radius, destroyed_cells)`.
+pub type ExplosionEvent = (f64, f64, f64, f32, Vec<(i32, i32, i32)>);
+
 /// Per-phase wall-clock breakdown of the last [`World::tick_world`], in
 /// microseconds. Read-only diagnostics (perf harness, lag warnings).
 #[derive(Clone, Copy, Debug, Default)]
@@ -178,6 +181,9 @@ pub struct World {
     /// Entity velocity impulses since the last tick as `(id, motion)`
     /// (mirrors `EntityTrackerEntry` `field_9078_E` -> `Packet28` broadcast).
     pub velocity_events: Vec<(EntityId, [f64; 3])>,
+    /// Explosions since the last tick as `(x, y, z, radius, cells)`
+    /// (mirrors `WorldServer.func_12015_a` -> `Packet60` broadcast).
+    pub explosion_events: Vec<ExplosionEvent>,
     /// Primed TNT pending blasts as `(x, y, z, ticks_left)` (our stand-in
     /// for `EntityTNTPrimed`: the block is already air, the blast lands at
     /// radius 4 when the fuse runs out — 80 ticks hand-lit, 10..30 chained).
@@ -249,6 +255,7 @@ impl World {
             death_events: Vec::new(),
             status_events: Vec::new(),
             velocity_events: Vec::new(),
+            explosion_events: Vec::new(),
             pending_tnt: Vec::new(),
             player_pos_cache: (-1, Vec::new()),
             light_dirty: HashSet::new(),

@@ -1899,3 +1899,176 @@
         assert_eq!(w.saved_light_value(1, 16, 64, 16), 0, "diagonal chunk (1,1) must clear stale blocklight");
     }
 
+    #[test]
+    fn test_mob_parity_zombie_reach_spider_stop_creeper_explosion_and_armor_iframes() {
+        // 1. Zombie reach on Alpha 1.2.6 server (EntityMobs.java:50 dist < 2.5):
+        // On flat ground, at 2.6 blocks horizontally (dx = 2.6, dist = 2.6 >= 2.5), zombie must NOT hit.
+        let mut w = world_with_floor();
+        let player = add_player(&mut w, "steve", 6.1, 64.0, 4.5);
+        let zombie = add_mob(&mut w, MobKind::Zombie, 3.5, 64.0, 4.5);
+        { let ids = snap(&w); w.tick_mob(zombie, &ids); }
+        assert_eq!(player_health(&w, player), 20, "zombie at 2.6 blocks horizontally must not hit player yet");
+
+        // Move zombie to 2.1 blocks horizontally (dist = 2.1 < 2.5): zombie hits!
+        if let Some(e) = w.entities.get_mut(zombie) {
+            e.body_mut().set_position(4.0, 64.0, 4.5);
+        }
+        { let ids = snap(&w); w.tick_mob(zombie, &ids); }
+        assert_eq!(player_health(&w, player), 15, "zombie at 2.1 blocks horizontally must hit player");
+
+        // Height elevation: player standing 1 block higher (y=65.0, zombie at y=64.0, dx=1.5):
+        // dy = 1.0, dist = sqrt(1.5^2 + 1.0^2) = 1.80 < 2.5. Vertical overlap is true. Zombie can hit!
+        let mut w_elev = world_with_floor();
+        for x in 0..10 {
+            for z in 0..10 {
+                w_elev.set_block_id(x, 64, z, 1);
+            }
+        }
+        let p_elev = add_player(&mut w_elev, "steve", 5.0, 65.0, 4.5);
+        let z_elev = add_mob(&mut w_elev, MobKind::Zombie, 3.5, 64.0, 4.5);
+        { let ids = snap(&w_elev); w_elev.tick_mob(z_elev, &ids); }
+        assert_eq!(player_health(&w_elev, p_elev), 15, "zombie must hit player elevated by 1 block within reach");
+
+        // 2. Spider stops path-driving within width * 2.0 = 2.8 blocks (instead of charging at 0.8 moveSpeed)
+        // and mounted_y_offset matches EntitySpider (height * 0.75 - 0.5).
+        let mut w2 = world_with_floor();
+        let p2 = add_player(&mut w2, "steve", 5.5, 64.0, 4.5);
+        let spider = add_mob(&mut w2, MobKind::Spider, 3.5, 64.0, 4.5);
+        let off = w2.entities.get(spider).unwrap().mounted_y_offset();
+        assert!((off - (0.9f32 as f64 * 0.75 - 0.5)).abs() < 1e-6);
+        if let Some(crate::entity::table::Entity::Mob(m)) = w2.entities.get_mut(spider) {
+            m.target = Some(p2);
+            m.target_timer = 5;
+            // Path point at [5, 64, 4] has center (5.5, 64.0, 4.5), which is 2.0 blocks from (3.5, 64.0, 4.5) (< 2.8).
+            m.path = vec![[5, 64, 4]];
+            m.path_index = 0;
+        }
+        let (_strafe, forward) = w2.update_mob_ai(spider, MobKind::Spider, false);
+        assert_eq!(forward, 0.0, "spider within 2.8 blocks of final path point must stop path-driving");
+
+        // 3. Creeper swells, stops advancing when path is exhausted, defuses with status 5 when LOS is blocked,
+        // and disappears IMMEDIATELY (0-tick purge) with Packet60 explosion_events when exploding!
+        let mut w3 = world_with_floor();
+        let _p3 = add_player(&mut w3, "steve", 5.0, 64.0, 4.5);
+        let creeper = add_mob(&mut w3, MobKind::Creeper, 3.5, 64.0, 4.5);
+        { let ids = snap(&w3); w3.tick_mob(creeper, &ids); }
+        assert!(w3.status_events.contains(&(creeper, 4)), "creeper ignite must emit status 4");
+        w3.status_events.clear();
+        // Place a stone wall between creeper (x=3.5) and player (x=5.0) at x=4 to block LOS:
+        for y in 64..67 {
+            w3.set_block_id(4, y, 4, 1);
+        }
+        { let ids = snap(&w3); w3.tick_mob(creeper, &ids); }
+        assert!(w3.status_events.contains(&(creeper, 5)), "breaking LOS must defuse creeper and emit status 5");
+        let (swell_time, swell_dir) = match w3.entities.get(creeper).unwrap() {
+            crate::entity::table::Entity::Mob(m) => (m.swell_time, m.swell_dir),
+            _ => unreachable!(),
+        };
+        assert_eq!((swell_time, swell_dir), (0, -1));
+
+        // Clear wall and let creeper explode:
+        for y in 64..67 {
+            w3.set_block_id(4, y, 4, 0);
+        }
+        if let Some(crate::entity::table::Entity::Mob(m)) = w3.entities.get_mut(creeper) {
+            m.swell_time = 29;
+            m.swell_dir = 1;
+            m.living.body.set_position(3.5, 64.0, 4.5);
+        }
+        w3.explosion_events.clear();
+        w3.tick_world();
+        assert!(
+            w3.entities.get(creeper).is_none(),
+            "exploded creeper must be purged immediately on the explosion tick (no 20-tick corpse delay)"
+        );
+        assert_eq!(w3.explosion_events.len(), 1, "creeper explosion must queue Packet60 explosion event");
+        assert!(!w3.explosion_events[0].4.is_empty(), "Packet60 explosion event must include blast cells");
+
+        // 4. Armor durability is NOT damaged by rejected hits during invulnerability frames (hurt_resist > 10),
+        // and attacking a mob sets its retaliation target.
+        let mut w4 = world_with_floor();
+        let p4 = add_player(&mut w4, "steve", 3.5, 64.0, 4.5);
+        let z4 = add_mob(&mut w4, MobKind::Zombie, 5.5, 64.0, 4.5);
+        set_slot(&mut w4, p4, 1, 0, stk(306, 1, 0)); // iron helmet
+        w4.attack_living(p4, 5, Some(z4));
+        let dmg_after_first = match w4.entities.get(p4).unwrap() {
+            crate::entity::table::Entity::Player(p) => p.inventory.armor[0].unwrap().damage,
+            _ => unreachable!(),
+        };
+        assert_eq!(dmg_after_first, 5);
+        // Second identical hit during hurt_resist window is ignored and must NOT wear armor:
+        w4.attack_living(p4, 5, Some(z4));
+        let dmg_after_second = match w4.entities.get(p4).unwrap() {
+            crate::entity::table::Entity::Player(p) => p.inventory.armor[0].unwrap().damage,
+            _ => unreachable!(),
+        };
+        assert_eq!(dmg_after_second, 5, "blocked hit during invulnerability window must not damage armor");
+
+        // Attacking z4 sets z4.target = Some(p4):
+        w4.attack_living(z4, 2, Some(p4));
+        let z4_target = match w4.entities.get(z4).unwrap() {
+            crate::entity::table::Entity::Mob(m) => m.target,
+            _ => unreachable!(),
+        };
+        assert_eq!(z4_target, Some(p4), "damaged mob must target its attacker");
+    }
+
+    #[test]
+    fn test_spider_retaliates_in_daylight_when_attacked() {
+        let mut w = world_with_floor();
+        let player = add_player(&mut w, "steve", 5.0, 64.0, 4.5);
+        let spider = add_mob(&mut w, MobKind::Spider, 3.5, 64.0, 4.5);
+        // Daylight: sky light = 15 everywhere
+        set_sky(&mut w, 3, 64, 4, 15);
+        set_sky(&mut w, 5, 64, 4, 15);
+
+        // Before being attacked, spider ignores the player in daylight:
+        { let ids = snap(&w); w.tick_mob(spider, &ids); }
+        let target_before = match w.entities.get(spider).unwrap() {
+            crate::entity::table::Entity::Mob(m) => m.target,
+            _ => unreachable!(),
+        };
+        assert_eq!(target_before, None, "unprovoked spider in daylight must not target player");
+
+        // Give spider an active wander path away from player:
+        if let Some(crate::entity::table::Entity::Mob(m)) = w.entities.get_mut(spider) {
+            m.path = vec![[0, 64, 4]];
+            m.path_index = 0;
+        }
+
+        // Player attacks spider in broad daylight:
+        w.attack_living(spider, 2, Some(player));
+        let (target_after_hit, path_len_after_hit) = match w.entities.get(spider).unwrap() {
+            crate::entity::table::Entity::Mob(m) => (m.target, m.path.len()),
+            _ => unreachable!(),
+        };
+        assert_eq!(target_after_hit, Some(player), "spider must target attacker upon being damaged");
+        assert_eq!(path_len_after_hit, 0, "spider must clear old wander path when provoked");
+
+        // Tick spider in daylight: spider must RETAIN the player target, repath, and bite!
+        // At distance 1.5 blocks, spider can bite (dist < 2.5)
+        for _ in 0..5 {
+            let ids = snap(&w);
+            w.tick_mob(spider, &ids);
+        }
+        let target_after_ticks = match w.entities.get(spider).unwrap() {
+            crate::entity::table::Entity::Mob(m) => m.target,
+            _ => unreachable!(),
+        };
+        assert_eq!(target_after_ticks, Some(player), "spider must not discard retaliation target in daylight");
+        assert_eq!(player_health(&w, player), 18, "retaliating spider must attack player for 2 damage");
+
+        // If player teleports far away (> 24 blocks), spider drops target:
+        if let Some(e) = w.entities.get_mut(player) {
+            e.body_mut().set_position(50.0, 64.0, 4.5);
+        }
+        { let ids = snap(&w); w.tick_mob(spider, &ids); }
+        let target_after_far = match w.entities.get(spider).unwrap() {
+            crate::entity::table::Entity::Mob(m) => m.target,
+            _ => unreachable!(),
+        };
+        assert_eq!(target_after_far, None, "spider must lose target when player is beyond 24 blocks");
+    }
+
+
+

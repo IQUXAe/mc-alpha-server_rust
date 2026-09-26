@@ -480,10 +480,11 @@ impl Entity {
     }
 
     /// Mounted-vehicle eye height for riders (mirrors `getMountedYOffset`;
-    /// boats override to -0.3).
+    /// boats override to -0.3, spiders to `height * 0.75 - 0.5`).
     pub fn mounted_y_offset(&self) -> f64 {
         match self {
             Entity::Boat(_) => -0.3,
+            Entity::Mob(m) if m.kind == MobKind::Spider => self.body().height as f64 * 0.75 - 0.5,
             _ => self.body().height as f64 * 0.75,
         }
     }
@@ -529,10 +530,10 @@ impl EntityTable {
     /// the player row survives death for the respawn packet and is only
     /// dropped explicitly on logout.
     pub fn purge_dead(&mut self) -> Vec<EntityId> {
-        // Vanilla EntityLiving: death_time ticks to 20 before setEntityDead.
-        // Instant purge collapsed the corpse (status 3 + destroy in one tick).
-        // Hold dead mobs/animals 20 ticks for the death animation; players
-        // are never purged here.
+        // Vanilla EntityLiving: death_time ticks to 20 before setEntityDead
+        // ONLY when health <= 0 (damage death playing status-3 animation).
+        // When setEntityDead is called directly with health > 0 (creeper
+        // explosion, despawn, peaceful clear), remove on the same tick.
         for e in self.rows.values_mut() {
             let dead = e.body().dead;
             if !dead {
@@ -540,11 +541,11 @@ impl EntityTable {
             }
             match e {
                 Entity::Mob(m)
-                    if m.living.death_time < 20 => {
+                    if m.living.health <= 0 && m.living.death_time < 20 => {
                         m.living.death_time += 1;
                     }
                 Entity::Animal(a)
-                    if a.living.death_time < 20 => {
+                    if a.living.health <= 0 && a.living.death_time < 20 => {
                         a.living.death_time += 1;
                     }
                 _ => {}
@@ -558,8 +559,8 @@ impl EntityTable {
                     return false;
                 }
                 match e {
-                    Entity::Mob(m) => m.living.death_time >= 20,
-                    Entity::Animal(a) => a.living.death_time >= 20,
+                    Entity::Mob(m) => m.living.health > 0 || m.living.death_time >= 20,
+                    Entity::Animal(a) => a.living.health > 0 || a.living.death_time >= 20,
                     // Items/arrows/boats/falling have no death_time: purge now.
                     _ => true,
                 }

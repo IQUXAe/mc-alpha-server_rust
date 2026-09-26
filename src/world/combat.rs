@@ -286,9 +286,9 @@ impl World {
     ) -> Option<EntityId> {
         match kind {
             MobKind::Zombie => self.zombie_punch(id, target, dist),
-            MobKind::Skeleton => self.skeleton_volley(id, target, dist),
+            MobKind::Skeleton => self.skeleton_volley(id, target, dist, snap),
             MobKind::Spider => self.spider_attack(id, target, dist, snap),
-            MobKind::Creeper => self.creeper_swell(id, target, dist),
+            MobKind::Creeper => self.creeper_swell(id, target, dist, snap),
         }
     }
 
@@ -312,17 +312,34 @@ impl World {
         Some(target)
     }
 
-    /// Skeleton volley (mirrors the override): loose an arrow inside
-    /// reach 10 on cooldown 30. NOTE: C++ also writes `moveForward_` here,
-    /// but the mob chase tail unconditionally overwrites it right after,
-    /// so that store is dead and skipped deliberately.
-    fn skeleton_volley(&mut self, id: EntityId, target: EntityId, dist: f32) -> Option<EntityId> {
-        let ready = matches!(self.entities.get(id), Some(Entity::Mob(m)) if m.attack_cooldown == 0);
-        if dist < 10.0 && ready {
-            if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
-                m.attack_cooldown = 30;
+    /// Skeleton volley (mirrors `EntitySkeleton.java:30-53`): loose an arrow
+    /// inside reach 10 on cooldown 30, face the target, and raise
+    /// `has_attacked` (`field_387_ah = true`) so the skeleton strafes/stops
+    /// instead of charging into melee range.
+    fn skeleton_volley(
+        &mut self,
+        id: EntityId,
+        target: EntityId,
+        dist: f32,
+        snap: &mut CreatureSnap,
+    ) -> Option<EntityId> {
+        if dist < 10.0 {
+            let (dx, dz, ready) = match (self.entities.get(id), self.entities.get(target)) {
+                (Some(s), Some(t)) => (
+                    t.body().pos[0] - s.body().pos[0],
+                    t.body().pos[2] - s.body().pos[2],
+                    matches!(s, Entity::Mob(m) if m.attack_cooldown == 0),
+                ),
+                _ => return Some(target),
+            };
+            if ready {
+                if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
+                    m.attack_cooldown = 30;
+                }
+                self.spawn_skeleton_arrow(id, target);
             }
-            self.spawn_skeleton_arrow(id, target);
+            snap.yaw = (dz.atan2(dx) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
+            snap.has_attacked = true;
         }
         Some(target)
     }
@@ -402,17 +419,19 @@ impl World {
         dist: f32,
         snap: &mut CreatureSnap,
     ) -> Option<EntityId> {
-        let (px, min_y, pz, on_ground, motion) = match self.entities.get(id) {
+        let (px, min_y, height, pz, on_ground, motion) = match self.entities.get(id) {
             Some(e) => (
                 e.body().pos[0],
                 e.body().bounding_box.min_y,
+                e.body().height as f64,
                 e.body().pos[2],
                 e.body().on_ground,
                 e.body().motion,
             ),
             None => return Some(target),
         };
-        if self.brightness(floor_double(px), floor_double(min_y), floor_double(pz)) > 0.5
+        // EntitySpider.java:38-40: 1/100 daytime target drop
+        if self.brightness(floor_double(px), floor_double(min_y + height * 0.66), floor_double(pz)) > 0.5
             && self.rng.next_int_bound(100) == 0
         {
             self.store_mob_target(id, None);
@@ -429,6 +448,8 @@ impl World {
                     b.motion[0] = dx / len * 0.4 + motion[0] * 0.2;
                     b.motion[2] = dz / len * 0.4 + motion[2] * 0.2;
                     b.motion[1] = 0.4;
+                    let m = b.motion;
+                    self.velocity_events.push((id, m));
                 }
             }
             return Some(target);
@@ -450,16 +471,23 @@ impl World {
         Some(target)
     }
 
-    /// Creeper fuse (mirrors the override): swell while close (3 blocks
-    /// cold, 7 once lit), decay otherwise, explode at 30. The
-    /// `moveForward_` stores are dead like the skeleton's (chase tail
-    /// overwrites) and skipped. The fuse hiss has no native audio yet.
-    fn creeper_swell(&mut self, id: EntityId, target: EntityId, dist: f32) -> Option<EntityId> {
-        let (time, dir) = match self.entities.get(id) {
+    /// Creeper fuse when target is visible (`EntityCreeper.java:85-100`):
+    /// swell while close (3 blocks cold, 7 once lit), raise `has_attacked`
+    /// (`field_387_ah = true`) so the creeper stops advancing while hissing,
+    /// decay otherwise, and explode at 30.
+    fn creeper_swell(
+        &mut self,
+        id: EntityId,
+        target: EntityId,
+        dist: f32,
+        snap: &mut CreatureSnap,
+    ) -> Option<EntityId> {
+        let (time, prev_dir) = match self.entities.get(id) {
             Some(Entity::Mob(m)) => (m.swell_time, m.swell_dir),
             _ => return Some(target),
         };
-        let (time, dir) = if (dir <= 0 && dist < 3.0) || (dir > 0 && dist < 7.0) {
+        if (prev_dir <= 0 && dist < 3.0) || (prev_dir > 0 && dist < 7.0) {
+            snap.has_attacked = true;
             let time = time + 1;
             if time >= 30 {
                 if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
@@ -469,35 +497,46 @@ impl World {
                 self.creeper_explode(id);
                 return Some(target);
             }
-            (time, 1)
+            if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
+                m.swell_time = time;
+                m.swell_dir = 1;
+            }
+            if prev_dir <= 0 {
+                self.status_events.push((id, 4));
+            }
         } else {
-            (if time > 0 { time - 1 } else { time }, -1)
-        };
-        // Fuse status (EntityCreeper.func_9206_a): 4 on ignite front,
-        // 5 on defuse front + zap sound on ignite. Without this the client
-        // never flashes white.
-        let prev_dir = match self.entities.get(id) {
-            Some(Entity::Mob(m)) => m.swell_dir,
-            _ => -1,
-        };
-        if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
-            m.swell_time = time;
-            m.swell_dir = dir;
-        }
-        if prev_dir != dir {
-            self.status_events.push((id, if dir > 0 { 4 } else { 5 }));
+            self.creeper_defuse_step(id);
         }
         Some(target)
     }
 
-    /// Shared blast (vanilla `Explosion` simplified): entity damage with the
-    /// Java formula `(v*v+v)/2*8*size+1` and knockback, LOS-gated by the
-    /// eye raytrace; blocks in the sphere destroyed unless unbreakable,
-    /// drops at 0.3 via the harvest table, TNT cells chain-ignite instead
-    /// of dropping. Neither creepers nor TNT set fire in Alpha (only the
-    /// ghast fireball does), so no fire phase here.
+    /// Creeper fuse decay when out of range, out of LOS, or targetless
+    /// (`EntityCreeper.java:55-83`): decrements `swell_time` if `> 0`,
+    /// sets `swell_dir = -1`, and emits status 5 when transitioning from
+    /// ignited (`> 0`) to defused (`-1`).
+    pub(crate) fn creeper_defuse_step(&mut self, id: EntityId) {
+        let (time, prev_dir) = match self.entities.get(id) {
+            Some(Entity::Mob(m)) => (m.swell_time, m.swell_dir),
+            _ => return,
+        };
+        let new_time = if time > 0 { time - 1 } else { time };
+        if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
+            m.swell_time = new_time;
+            m.swell_dir = -1;
+        }
+        if prev_dir > 0 {
+            self.status_events.push((id, 5));
+        }
+    }
+
+    /// Shared blast (vanilla `Explosion`): entity damage with the Java
+    /// formula `(v*v+v)/2*8*size+1` followed by blast velocity impulse
+    /// (`Explosion.java:103-106`), LOS-gated by the eye raytrace; blocks in
+    /// the sphere destroyed unless unbreakable, drops at 0.3 via the harvest
+    /// table, TNT cells chain-ignite instead of dropping, and queues an
+    /// explosion event for `Packet60` (`WorldServer.java:92-96`).
     pub(crate) fn blast(&mut self, px: f64, py: f64, pz: f64, radius: f32, attacker: Option<EntityId>) {
-        // Phase 1: living victims in the radius*2 box.
+        // Phase 1: living victims in the blast radius.
         let mut victims: Vec<EntityId> = Vec::new();
         for oid in self.entities.alive_ids() {
             let is_living = match self.entities.get(oid) {
@@ -540,15 +579,18 @@ impl World {
             }
             let vfrac = 1.0 - d / radius;
             let damage = ((vfrac as f64 * vfrac as f64 + vfrac as f64) / 2.0 * 8.0 * radius as f64 + 1.0) as i32;
-            // Knockback along the blast direction, scaled by exposure.
+            // Explosion.java:103-106: attackEntity runs FIRST, then the blast
+            // velocity is added on top of post-hit motion.
+            self.attack_living(v, damage.max(1), attacker);
             let len = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
             if let Some(e) = self.entities.get_mut(v) {
                 let b = e.body_mut();
                 b.motion[0] += dx / len * vfrac as f64;
                 b.motion[1] += dy / len * vfrac as f64;
                 b.motion[2] += dz / len * vfrac as f64;
+                let m = b.motion;
+                self.velocity_events.push((v, m));
             }
-            self.attack_living(v, damage.max(1), attacker);
         }
         // Phase 2: 16x16x16 border raycasting with per-step resistance attenuation (Explosion.java:46-75).
         let mut destroyed = std::collections::BTreeSet::new();
@@ -582,7 +624,7 @@ impl World {
                             }
                             power -= (props.resistance / 5.0 + 0.3) * 0.3;
                         }
-                        if power > 0.0 && bid > 0 {
+                        if power > 0.0 {
                             destroyed.insert((bx, by, bz));
                         }
                         rx += vx * 0.3;
@@ -593,6 +635,8 @@ impl World {
                 }
             }
         }
+        let cells: Vec<(i32, i32, i32)> = destroyed.iter().copied().collect();
+        self.explosion_events.push((px, py, pz, radius, cells));
         let mut tnt_chain: Vec<(i32, i32, i32)> = Vec::new();
         let mut removals: Vec<(i32, i32, i32, u8, u8)> = Vec::new();
         for (bx, by, bz) in destroyed {

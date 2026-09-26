@@ -37,7 +37,7 @@ impl World {
         self.sheep_shear(id, attacker);
         let amount = match self.entities.get(id) {
             Some(Entity::Player(p)) if p.respawn_ticks > 0 => return,
-            Some(Entity::Player(_)) => match self.player_armored_damage(id, amount, attacker) {
+            Some(Entity::Player(_)) => match self.player_difficulty_scale(amount, attacker) {
                 Some(scaled) => scaled,
                 None => return,
             },
@@ -84,10 +84,16 @@ impl World {
             let rng = &mut self.rng;
             living_attack_run(&input, &mut || rng.next_double())
         };
-        let r = match result {
+        let mut r = match result {
             Some(r) => r,
             None => return,
         };
+        if matches!(self.entities.get(id), Some(Entity::Player(_))) {
+            let raw_dealt = (input.health as i32) - (r.health as i32);
+            let after_armor = self.player_apply_armor(id, raw_dealt);
+            r.health = input.health.wrapping_sub(after_armor as i16);
+            r.died = r.health <= 0;
+        }
         let died = r.died;
         match self.entities.get_mut(id) {
             Some(Entity::Mob(m)) => {
@@ -98,6 +104,18 @@ impl World {
                 m.living.attack_time = r.attack_time;
                 if r.knocked {
                     m.living.body.motion = [r.kmx, r.kmy, r.kmz];
+                }
+                // Java EntityMobs.attackEntity (lines 35-38): set target to attacker
+                // when damaged by another entity that isn't rider/vehicle.
+                if let Some(atk_id) = attacker {
+                    if atk_id != id
+                        && atk_id != m.living.body.ridden_by
+                        && atk_id != m.living.body.riding
+                    {
+                        m.target = Some(atk_id);
+                        m.path.clear();
+                        m.path_index = 0;
+                    }
                 }
             }
             Some(Entity::Animal(a)) => {
@@ -227,24 +245,22 @@ impl World {
             self.scatter_player_inventory(id, px, py, pz);
         }
         if let Some(e) = self.entities.get_mut(id) {
+            match e {
+                Entity::Mob(m) => m.living.health = m.living.health.min(0),
+                Entity::Animal(a) => a.living.health = a.living.health.min(0),
+                Entity::Player(p) => p.living.health = p.living.health.min(0),
+                _ => {}
+            }
             e.body_mut().dead = true;
         }
         self.death_events.push(id);
     }
 
-    /// Player damage scaling (mirrors `EntityPlayerMP::attackEntityFrom`
-    /// minus messaging and packets): difficulty scaling plus armor
-    /// absorption with carry, damaging worn armor on the way. Returns
-    /// `None` when the hit is fully absorbed.
-    fn player_armored_damage(
-        &mut self,
-        id: EntityId,
-        amount: i32,
-        attacker: Option<EntityId>,
-    ) -> Option<i32> {
-        use crate::inventory::ItemStack;
+    /// Player difficulty scaling (mirrors `EntityPlayer::attackEntityFrom`
+    /// lines 197-213): scales mob/arrow hits by world difficulty before
+    /// `super.attackEntityFrom` checks `hurt_resist` and `last_damage`.
+    fn player_difficulty_scale(&self, amount: i32, attacker: Option<EntityId>) -> Option<i32> {
         use crate::player::combat::combat_calculate_damage;
-        use crate::player::inventory::{inventory_calc_armor, inventory_damage_armor};
         let attacker_is_player = attacker
             .and_then(|a| self.entities.get(a))
             .map(|e| matches!(e, Entity::Player(_)))
@@ -253,6 +269,25 @@ impl World {
         // Environmental damage (fall/drown/fire/cactus, attacker=None) must
         // NOT scale — otherwise peaceful zeroes falls and easy nerfs them.
         let skip_difficulty_scale = attacker.is_none() || attacker_is_player;
+        let res = combat_calculate_damage(amount, skip_difficulty_scale, self.difficulty, 0, 0);
+        if res.scaled_damage <= 0 {
+            None
+        } else {
+            Some(res.scaled_damage)
+        }
+    }
+
+    /// Player armor absorption and durability wear (mirrors
+    /// `EntityPlayer::damageEntity` / `func_6099_c`): only runs when a hit
+    /// passes the `EntityLiving` invulnerability gate, damaging worn armor
+    /// by the raw damage dealt (`amount` or `amount - last_damage`).
+    fn player_apply_armor(&mut self, id: EntityId, raw_dealt: i32) -> i32 {
+        use crate::inventory::ItemStack;
+        use crate::player::combat::combat_calculate_damage;
+        use crate::player::inventory::{inventory_calc_armor, inventory_damage_armor};
+        if raw_dealt <= 0 {
+            return 0;
+        }
         let mut tmp = [ItemStack::empty(); 4];
         let carry = match self.entities.get(id) {
             Some(Entity::Player(p)) => {
@@ -261,19 +296,16 @@ impl World {
                 }
                 p.armor_carry
             }
-            _ => return Some(amount),
+            _ => return raw_dealt,
         };
         let res = combat_calculate_damage(
-            amount,
-            skip_difficulty_scale,
+            raw_dealt,
+            true,
             self.difficulty,
             inventory_calc_armor(&tmp),
             carry,
         );
-        if res.scaled_damage <= 0 {
-            return None;
-        }
-        inventory_damage_armor(&mut tmp, res.scaled_damage);
+        inventory_damage_armor(&mut tmp, raw_dealt);
         if let Some(Entity::Player(p)) = self.entities.get_mut(id) {
             p.armor_carry = res.new_armor_damage_carry;
             for (i, slot) in p.inventory.armor.iter_mut().enumerate() {
@@ -284,7 +316,7 @@ impl World {
                 };
             }
         }
-        Some(res.damage_after_armor)
+        res.damage_after_armor
     }
 
     /// Death scatter (mirrors `EntityPlayerMP::onDeath` drops): every

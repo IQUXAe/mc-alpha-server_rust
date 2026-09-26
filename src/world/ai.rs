@@ -2,13 +2,12 @@
 //! Split out of `world.rs`; behavior unchanged.
 
 use crate::entity::ai::{
-    ai_animal_path_weight, ai_mob_path_weight, chase_speed, face_run, steer_run, wander_pick,
-    SteerIn,
+    ai_animal_path_weight, ai_mob_path_weight, face_run, steer_run, wander_pick, SteerIn,
 };
 use crate::entity::living::{living_fall_damage, living_heading_run, HeadingIo, MoveFeedback};
 use crate::entity::physics::entity_push;
 use crate::entity::table::{
-    mob_attack_reach, mob_burns_in_daylight, AnimalKind, Entity, EntityId, MobKind,
+    mob_burns_in_daylight, AnimalKind, Entity, EntityId, MobKind,
 };
 use crate::material::Material;
 use crate::math_helper::{floor_double, sqrt_float};
@@ -48,6 +47,7 @@ pub(crate) struct CreatureSnap {
     pub(crate) move_speed: f32,
     pub(crate) path: Vec<[i32; 3]>,
     pub(crate) path_index: usize,
+    pub(crate) has_attacked: bool,
 }
 
 impl World {
@@ -114,8 +114,8 @@ impl World {
         }
     }
 
-    /// Ladder grip (mirrors `isOnLadder`): ladders for everyone, any
-    /// adjacent solid block for spiders (the Java wall-climb).
+    /// Ladder grip (mirrors `EntityLiving::isOnLadder` in Alpha 1.2.6):
+    /// ladders for everyone (spiders do not climb walls in Alpha 1.2.6).
     fn ladder_for(&self, id: EntityId) -> bool {
         let row = self.entities.get(id);
         let (px, min_y, pz) = match row {
@@ -123,25 +123,19 @@ impl World {
             None => return false,
         };
         let (x, y, z) = (floor_double(px), floor_double(min_y), floor_double(pz));
-        let spider = matches!(row, Some(Entity::Mob(m)) if m.kind == MobKind::Spider);
-        if spider {
-            self.is_solid(x - 1, y, z)
-                || self.is_solid(x + 1, y, z)
-                || self.is_solid(x, y, z - 1)
-                || self.is_solid(x, y, z + 1)
-        } else {
-            self.get_block_id(x, y, z) == LADDER_BLOCK_ID
-                || self.get_block_id(x, y + 1, z) == LADDER_BLOCK_ID
-        }
+        self.get_block_id(x, y, z) == LADDER_BLOCK_ID
+            || self.get_block_id(x, y + 1, z) == LADDER_BLOCK_ID
     }
 
-    /// A target row counts when it is a live player with health left
-    /// (mirrors `hasValidTarget`).
+    /// A target row counts when it is a live entity with health left
+    /// (mirrors `isEntityAlive` on `playerToAttack`).
     pub(crate) fn target_alive(&self, id: EntityId) -> bool {
-        matches!(
-            self.entities.get(id),
-            Some(Entity::Player(p)) if !p.living.body.dead && p.living.health > 0
-        )
+        match self.entities.get(id) {
+            Some(Entity::Player(p)) => !p.living.body.dead && p.living.health > 0,
+            Some(Entity::Mob(m)) => !m.living.body.dead && m.living.health > 0,
+            Some(Entity::Animal(a)) => !a.living.body.dead && a.living.health > 0,
+            _ => false,
+        }
     }
 
     /// Aggro gate (mirrors `shouldAggroPlayer`): spiders only hunt when
@@ -150,11 +144,17 @@ impl World {
         if kind != MobKind::Spider {
             return true;
         }
-        let (px, min_y, pz) = match self.entities.get(id) {
-            Some(e) => (e.body().pos[0], e.body().bounding_box.min_y, e.body().pos[2]),
+        let (px, min_y, height, pz) = match self.entities.get(id) {
+            Some(e) => (
+                e.body().pos[0],
+                e.body().bounding_box.min_y,
+                e.body().height as f64,
+                e.body().pos[2],
+            ),
             None => return false,
         };
-        self.brightness(floor_double(px), floor_double(min_y), floor_double(pz)) < 0.5
+        // Entity.java:490-496 (getEntityBrightness): samples at minY + height * 0.66
+        self.brightness(floor_double(px), floor_double(min_y + height * 0.66), floor_double(pz)) < 0.5
     }
 
     /// Fresh-target scan (mirrors `acquireTarget`): closest live player in
@@ -210,34 +210,38 @@ impl World {
         if target.map(|t| !self.target_alive(t)).unwrap_or(false) {
             target = None;
         }
+        if let Some(cur) = target {
+            let max = CREATURE_TARGET_RANGE * 1.5;
+            let out_of_range = match (self.entities.get(id), self.entities.get(cur)) {
+                (Some(s), Some(t)) => {
+                    let (sp, tp) = (s.body().pos, t.body().pos);
+                    let (dx, dy, dz) = (tp[0] - sp[0], tp[1] - sp[1], tp[2] - sp[2]);
+                    dx * dx + dy * dy + dz * dz > max * max
+                }
+                _ => true,
+            };
+            if out_of_range {
+                target = None;
+            }
+        }
+        let prev_target = target;
         timer -= 1;
         if timer <= 0 {
             timer = 5;
-            match self.acquire_target(id, kind) {
-                Some(fresh) => target = Some(fresh),
-                None => {
-                    if let Some(cur) = target {
-                        let max = CREATURE_TARGET_RANGE * 1.5;
-                        let (sp, tp) = match (self.entities.get(id), self.entities.get(cur)) {
-                            (Some(s), Some(t)) => (s.body().pos, t.body().pos),
-                            _ => return None,
-                        };
-                        let (dx, dy, dz) = (tp[0] - sp[0], tp[1] - sp[1], tp[2] - sp[2]);
-                        if dx * dx + dy * dy + dz * dz > max * max {
-                            target = None;
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(cur) = target {
-            if !self.target_alive(cur) || !self.mob_aggro_ok(kind, id) {
-                target = None;
+            // Java EntityCreature.java:15: `if(this.field_389_ag == null) this.field_389_ag = this.func_158_i();`
+            // Mobs retain existing targets (including retaliating against attackers)
+            // and only acquire a fresh target when targetless.
+            if target.is_none() {
+                target = self.acquire_target(id, kind);
             }
         }
         if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
             m.target_timer = timer;
             m.target = target;
+            if prev_target.is_none() && target.is_some() {
+                m.path.clear();
+                m.path_index = 0;
+            }
         }
         target
     }
@@ -354,6 +358,7 @@ impl World {
             move_speed,
             path,
             path_index,
+            has_attacked: false,
         })
     }
 
@@ -386,11 +391,10 @@ impl World {
         }
     }
 
-    /// Shared creature phases (mirrors `EntityCreature::updateAI` minus the
-    /// attack hook): target validation, wander/re-path selection, and path
-    /// following. The `canSee + attackEntityAt` call arrives with the attack
-    /// slice; `isAttacking_` is a literal false because C++ sets it false
-    /// and never raises it. Returns the effective target.
+    /// Shared creature phases (mirrors `EntityCreature::updateAI`):
+    /// target validation, per-kind attack hook (`canSee + attackEntity`),
+    /// wander/re-path selection (skipped when `has_attacked`), and path
+    /// following (only sets `forward = move_speed` when a path point exists).
     #[allow(clippy::too_many_arguments)]
     fn creature_phases(
         &mut self,
@@ -412,26 +416,39 @@ impl World {
                 self.store_mob_target(id, None);
             }
         }
+        let mut attacked_in_los = false;
         if let (Some(kind), Some(t)) = (mob_kind, target) {
             let (sp, tp, teye) = match (self.entities.get(id), self.entities.get(t)) {
                 (Some(s), Some(te)) => (s.body().pos, te.body().pos, Self::living_eye_height(te)),
                 _ => return target,
             };
+            // Alpha 1.2.6 server EntityCreature.java:23 getDistanceToEntity:
+            // In multiplayer server (EntityPlayerMP.java:39: yOffset = 0.0F),
+            // player.posY and mob.posY are both at ground level (minY), so dy = tp[1] - sp[1].
             let (dx, dy, dz) = (tp[0] - sp[0], tp[1] - sp[1], tp[2] - sp[2]);
             let dist = sqrt_float((dx * dx + dy * dy + dz * dz) as f32);
             let self_eye = snap.height as f64 * 0.85;
             let from = [sp[0], sp[1] + self_eye, sp[2]];
             let to = [tp[0], tp[1] + teye, tp[2]];
             if self.ray_trace_clear(from, to) {
+                attacked_in_los = true;
                 target = self.mob_attack(id, kind, t, dist, snap);
             }
         }
-        // Phase 2: wander when targetless (or when the re-path gate skips),
-        // else refresh the chase path. Draw order and short-circuits mirror
-        // C++ exactly.
+        // EntityCreeper.java:55-83: when a creeper has no target or cannot see
+        // its target, its fuse still decays every tick and transitions to
+        // status 5 (defuse).
+        if mob_kind == Some(MobKind::Creeper) && !attacked_in_los {
+            self.creeper_defuse_step(id);
+        }
+        // Phase 2: wander when targetless (or when `has_attacked` or the
+        // re-path gate skips), else refresh the chase path
+        // (EntityCreature.java:29-35).
         let had_path = !snap.path.is_empty();
-        if target.is_none() || (had_path && self.rng.next_int_bound(20) != 0) {
-            if (!had_path && self.rng.next_int_bound(80) == 0) || self.rng.next_int_bound(80) == 0
+        if snap.has_attacked || target.is_none() || (had_path && self.rng.next_int_bound(20) != 0) {
+            if !snap.has_attacked
+                && ((!had_path && self.rng.next_int_bound(80) == 0)
+                    || self.rng.next_int_bound(80) == 0)
             {
                 let base =
                     [floor_double(snap.pos[0]), floor_double(snap.min_y), floor_double(snap.pos[2])];
@@ -444,7 +461,7 @@ impl World {
             snap.path = self.path_target_points(id, t, CREATURE_TARGET_RANGE as f32);
             snap.path_index = 0;
         }
-        // Phase 3: follow the path (mirrors `followPath`).
+        // Phase 3: follow the path (mirrors `EntityCreature.java:52-125`).
         *strafe = 0.0;
         *forward = 0.0;
         *jumping = false;
@@ -481,21 +498,26 @@ impl World {
                 let dx = px - snap.pos[0];
                 let dz = pz - snap.pos[2];
                 let dy = py - floor_double(snap.min_y) as f64;
-                // `moveForward_` was just zeroed, so `forward_in` is 0.0
-                // literally like C++.
                 let (tdx, tdz) = match target.and_then(|t| self.entities.get(t)) {
                     Some(t) => (t.body().pos[0] - snap.pos[0], t.body().pos[2] - snap.pos[2]),
                     None => (0.0, 0.0),
                 };
+                // EntityCreature.java:85-109: `field_9130_bp = field_9126_bt`
+                // (`forward = move_speed`) is ONLY set when `var25 != null`,
+                // and when `field_387_ah` (`has_attacked`) is true, movement
+                // rotates 90 degrees into a strafe while facing the target.
                 let steer = steer_run(SteerIn {
                     delta: [dx, dy, dz],
                     cur_yaw: snap.yaw,
-                    attacking: false,
+                    attacking: snap.has_attacked,
                     has_target: target.is_some(),
                     target: [tdx, tdz],
-                    forward_in: 0.0,
+                    forward_in: snap.move_speed,
                 });
                 snap.yaw = steer.new_yaw;
+                if snap.has_attacked && target.is_some() {
+                    snap.yaw = (tdz.atan2(tdx) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
+                }
                 *strafe = steer.strafe;
                 *forward = steer.forward;
                 if steer.jump {
@@ -528,15 +550,12 @@ impl World {
                 }
             }
         }
-        // Jump over obstacles, paddle in liquid, then walk the path.
+        // Jump over obstacles and paddle in liquid (EntityCreature.java:120-125).
         if snap.collided_horiz {
             *jumping = true;
         }
         if self.rng.next_float() < 0.8 && in_liquid {
             *jumping = true;
-        }
-        if !snap.path.is_empty() {
-            *forward = snap.move_speed;
         }
         target
     }
@@ -684,10 +703,10 @@ impl World {
         }
     }
 
-    /// Mob AI update (mirrors `EntityMob::updateAI`): target refresh, the
-    /// shared creature phases, the chase-speed bonus, and the liquid paddle
-    /// gate. Returns the (strafe, forward) pair for the heading move.
-    fn update_mob_ai(&mut self, id: EntityId, kind: MobKind, in_liquid: bool) -> (f32, f32) {
+    /// Mob AI update (mirrors `EntityMob::updateAI`): target refresh and the
+    /// shared creature phases. Returns the (strafe, forward) pair for the
+    /// heading move.
+    pub(crate) fn update_mob_ai(&mut self, id: EntityId, kind: MobKind, in_liquid: bool) -> (f32, f32) {
         let mut strafe = 0.0f32;
         let mut forward = 0.0f32;
         let mut jumping = false;
@@ -696,20 +715,17 @@ impl World {
             Some(s) => s,
             None => return (0.0, 0.0),
         };
-        let target =
-            self.creature_phases(id, target, WeightRule::Mob, Some(kind), &mut snap, in_liquid, &mut strafe, &mut forward, &mut jumping);
-        // Chase bonus: full speed plus 20% past attack reach + 1.
-        if let Some(t) = target {
-            if let (Some(s), Some(te)) = (self.entities.get(id), self.entities.get(t)) {
-                let (sp, tp) = (s.body().pos, te.body().pos);
-                let (dx, dy, dz) = (tp[0] - sp[0], tp[1] - sp[1], tp[2] - sp[2]);
-                let dist = sqrt_float((dx * dx + dy * dy + dz * dz) as f32);
-                forward = chase_speed(snap.move_speed, dist, mob_attack_reach(kind));
-            }
-        }
-        if in_liquid && self.rng.next_int_bound(5) != 0 {
-            jumping = true;
-        }
+        let _target = self.creature_phases(
+            id,
+            target,
+            WeightRule::Mob,
+            Some(kind),
+            &mut snap,
+            in_liquid,
+            &mut strafe,
+            &mut forward,
+            &mut jumping,
+        );
         self.store_creature_nav(id, &snap, jumping);
         (strafe, forward)
     }
@@ -864,6 +880,7 @@ impl World {
             }
         }
         self.push_neighbors(id, ids);
+        self.entities.update_rider_position(id);
     }
 
     /// Animal tick (mirrors `EntityAnimals::tick`): living maintenance, the
@@ -892,6 +909,7 @@ impl World {
             self.chicken_extra(id);
         }
         self.push_neighbors(id, ids);
+        self.entities.update_rider_position(id);
     }
 
     /// Chicken extras (mirrors `tickExtra`): slow sinking plus the egg
