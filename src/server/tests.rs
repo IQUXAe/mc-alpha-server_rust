@@ -300,6 +300,16 @@
                 r_skip(c, n);
                 String::new()
             }
+            60 => {
+                r_skip(c, 8 + 8 + 8 + 4);
+                let n = {
+                    let mut b = [0u8; 4];
+                    c.read_exact(&mut b).unwrap();
+                    i32::from_be_bytes(b) as usize
+                };
+                r_skip(c, n * 3);
+                String::new()
+            }
             other => panic!("unexpected packet id {other}"),
         };
         Some((id[0], text))
@@ -931,6 +941,53 @@
 
         assert!(pids.contains(&38), "Packet38 (EntityStatus hurt) must arrive on the same tick, got: {pids:?}");
         assert!(pids.contains(&28), "Packet28 (EntityVelocity knockback) must arrive on the same tick, got: {pids:?}");
+    }
+
+    #[test]
+    fn creeper_explosion_sends_packet60_and_destroy_entity() {
+        let mut srv = mk_server("");
+        for x in -5..=5 {
+            for z in -5..=5 {
+                srv.world.set_block_id(x, 63, z, 1);
+                srv.world.set_block_id(x, 64, z, 1);
+                srv.world.set_block_id(x, 65, z, 0);
+                srv.world.set_block_id(x, 66, z, 0);
+            }
+        }
+        let (mut a, _cid) = pair(&mut srv);
+        join(&mut srv, &mut a, "Steve");
+        let player_id = srv.entity_named("Steve").unwrap();
+
+        srv.queue_console("summon creeper 1 Steve".to_string());
+        srv.tick();
+        srv.tick(); // tracker introduces creeper
+
+        let creeper_id = srv
+            .world
+            .entities
+            .alive_ids()
+            .iter()
+            .copied()
+            .find(|eid| matches!(srv.world.entities.get(*eid), Some(Entity::Mob(m)) if m.kind == MobKind::Creeper))
+            .expect("creeper must exist");
+
+        srv.world.entities.get_mut(player_id).unwrap().body_mut().set_position(0.5, 65.0, 0.5);
+        srv.world.entities.get_mut(creeper_id).unwrap().body_mut().set_position(0.5, 65.0, 2.5);
+        drain_all(&mut a);
+
+        if let Some(Entity::Mob(m)) = srv.world.entities.get_mut(creeper_id) {
+            m.swell_time = 29;
+            m.swell_dir = 1;
+            m.target = Some(player_id);
+        }
+        srv.tick();
+
+        let mut pids = Vec::new();
+        while let Some((pid, _)) = next_pkt_opt(&mut a, Duration::from_millis(50)) {
+            pids.push(pid);
+        }
+        assert!(pids.contains(&60), "Packet60 (explosion) must be sent on creeper explosion, got: {pids:?}");
+        assert!(pids.contains(&29), "Packet29 (destroy entity) must be sent to destroy exploded creeper, got: {pids:?}");
     }
 
     /// Raw accept without unwrapping: keeps the client socket alive and

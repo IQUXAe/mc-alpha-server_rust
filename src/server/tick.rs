@@ -6,7 +6,7 @@ use crate::entity::table::{Entity, EntityId};
 use crate::server::sessions::{Session, SessionState};
 use crate::server::{ConnId, Server, chunk_key};
 use crate::server_constants::TICKS_PER_SECOND;
-use crate::session::{pkt_block_change, pkt_health, pkt_time};
+use crate::session::{pkt_block_change, pkt_explosion, pkt_health, pkt_time};
 use crate::tracker::{Observer, TrackedEntity};
 
 impl Server {
@@ -157,28 +157,47 @@ impl Server {
         }
     }
 
-    /// Ship death animations (mirrors the status-3 broadcast in
-    /// `EntityLiving.onDeath` via `WorldServer.func_9206_a`): drained
-    /// before `tracker_tick` so the animation precedes the destroy packet
+    /// Ship death animations, status changes, velocity impulses, and
+    /// explosions (`Packet60`, `WorldServer.java:92-96` within 64 blocks):
+    /// drained before `tracker_tick` so animations precede destroy packets
     /// for the same tick's kills.
     fn drain_death_events(&mut self) {
         let deaths = std::mem::take(&mut self.world.death_events);
         let statuses = std::mem::take(&mut self.world.status_events);
         let velocities = std::mem::take(&mut self.world.velocity_events);
-        if deaths.is_empty() && statuses.is_empty() && velocities.is_empty() {
-            return;
+        let explosions = std::mem::take(&mut self.world.explosion_events);
+        if !deaths.is_empty() || !statuses.is_empty() || !velocities.is_empty() {
+            let mut out = Vec::new();
+            for id in deaths {
+                self.world.tracker.death_fx(id, &mut out);
+            }
+            for (id, status) in statuses {
+                self.world.tracker.status_fx(id, status, &mut out);
+            }
+            for (id, motion) in velocities {
+                self.world.tracker.velocity_fx(id, motion, &mut out);
+            }
+            self.route_outbox(out);
         }
-        let mut out = Vec::new();
-        for id in deaths {
-            self.world.tracker.death_fx(id, &mut out);
+        for (ex, ey, ez, radius, cells) in explosions {
+            let pkt = pkt_explosion(ex, ey, ez, radius, &cells);
+            for (&pid, &cid) in &self.players {
+                let in_range = match self.world.entities.get(pid) {
+                    Some(Entity::Player(p)) => {
+                        let dx = ex - p.living.body.pos[0];
+                        let dy = ey - p.living.body.pos[1];
+                        let dz = ez - p.living.body.pos[2];
+                        dx * dx + dy * dy + dz * dz < 4096.0
+                    }
+                    _ => false,
+                };
+                if in_range {
+                    if let Some(sess) = self.sessions.get(&cid) {
+                        sess.conn.send(pkt.clone());
+                    }
+                }
+            }
         }
-        for (id, status) in statuses {
-            self.world.tracker.status_fx(id, status, &mut out);
-        }
-        for (id, motion) in velocities {
-            self.world.tracker.velocity_fx(id, motion, &mut out);
-        }
-        self.route_outbox(out);
     }
 
     /// Health watch (mirrors the `Packet8` send in

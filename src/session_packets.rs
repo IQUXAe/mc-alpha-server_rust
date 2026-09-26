@@ -150,6 +150,25 @@ pub fn pkt_pre_chunk(x: i32, z: i32, mode: bool) -> Vec<u8> {
     b
 }
 
+pub fn pkt_explosion(x: f64, y: f64, z: f64, radius: f32, cells: &[(i32, i32, i32)]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(1 + 32 + cells.len() * 3);
+    put_u8(&mut b, 60);
+    put_f64(&mut b, x);
+    put_f64(&mut b, y);
+    put_f64(&mut b, z);
+    put_f32(&mut b, radius);
+    put_i32(&mut b, cells.len() as i32);
+    let ox = x as i32;
+    let oy = y as i32;
+    let oz = z as i32;
+    for &(cx, cy, cz) in cells {
+        put_i8(&mut b, (cx - ox) as i8);
+        put_i8(&mut b, (cy - oy) as i8);
+        put_i8(&mut b, (cz - oz) as i8);
+    }
+    b
+}
+
 pub fn pkt_map_chunk(
     x: i32,
     y: i32,

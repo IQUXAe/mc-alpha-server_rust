@@ -21,7 +21,7 @@
 //! The `pub` re-exports below are the session tree's public surface (used
 //! by `server`/`server_admin`); everything else is module-tree-internal.
 
-pub use crate::session_packets::{pkt_handshake, pkt_kick, pkt_login_response, pkt_chat, pkt_time, pkt_spawn_pos, pkt_health, pkt_teleport, pkt_block_change, pkt_inventory_section, pkt_tile_entity, pkt_respawn, pkt_keepalive, pkt_arm, pkt_pre_chunk, pkt_map_chunk, tile_packet};
+pub use crate::session_packets::{pkt_handshake, pkt_kick, pkt_login_response, pkt_chat, pkt_time, pkt_spawn_pos, pkt_health, pkt_teleport, pkt_block_change, pkt_inventory_section, pkt_tile_entity, pkt_respawn, pkt_keepalive, pkt_arm, pkt_pre_chunk, pkt_explosion, pkt_map_chunk, tile_packet};
 
 use std::collections::HashSet;
 use crate::entity::table::EntityId;
