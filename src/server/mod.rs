@@ -19,7 +19,7 @@
 //! immediate `Conn::send` into the per-socket write thread, like the C++
 //! send queue.
 //!
-//! Deliberate divergences from C++ (all safe direction):
+//! Deliberate divergences from vanilla/C++ (all safe direction):
 //! - Duplicate login fully logs the old session out (save + tracker
 //!   destroy, no "left" chat like C++): C++ kicks the socket but deletes
 //!   the player row without saving and leaves a ghost entity on watchers.
@@ -29,6 +29,23 @@
 //!   used there; it is not parsed here either.
 //! - RNG is the native deterministic stream (documented everywhere), so a
 //!   fresh world's seed and spawn walk match in shape, not bit-for-bit.
+//! - Anti-cheat clamps (strict by default): vanilla trusts the client —
+//!   `handlePlayerInventory` assigns stacks verbatim and `readFromNBT`
+//!   copies furnace timers verbatim — so hacked clients can grant 127
+//!   stacks, over-damage tools, unknown ids, and infinite furnace burn.
+//!   Counts clamp to the per-item max stack, damage to the per-item max
+//!   durability, unknown ids drop, furnace `BurnTime`/`ItemBurnTime` to
+//!   20000 (lava bucket) and `CookTime` to 200, with an inventory resync
+//!   so the client sees the rollback.
+//! - Accept gates vanilla lacks: a global `max-connections` TCP cap
+//!   (vanilla gates only at join via `max-players`) and a per-IP login
+//!   throttle (5 accepts / 10s). Gameplay packets are untouched.
+//!
+//! Faithful-to-vanilla notes (not divergences, do not "fix"):
+//! - `teleport_wait` uses exact x/z equality like
+//!   `NetServerHandler.java:48` (`==` on doubles, y² < 0.01).
+//! - Chat allow-list excludes `§`: vanilla clients never send colors,
+//!   so color packets are spoof attempts, not legit traffic.
 //!
 //! The `pub` re-exports below are the server tree's public surface (used
 //! by `main`); everything else is module-tree-internal.
@@ -59,6 +76,12 @@ pub const READ_TIMEOUT_TICKS: u32 = 1200;
 /// Inbound packets processed per connection per tick (mirrors the C++
 /// `kMaxPacketsPerTick`; more is a rate-limit kick).
 pub const MAX_PACKETS_PER_TICK: usize = 50;
+/// Accepts per IP per login window (10s at 20 TPS). Vanilla has no login
+/// throttle at all; without one, 8 slow logins (~5s HTTP each) wedge the
+/// whole verifier pool (`MAX_CONCURRENT_VERIFICATIONS`).
+pub const LOGIN_ATTEMPTS_MAX: u32 = 5;
+/// Sliding window for the per-IP login throttle, in ticks.
+pub const LOGIN_WINDOW_TICKS: u64 = 200;
 /// Opaque connection handle.
 pub type ConnId = u64;
 
@@ -94,6 +117,9 @@ pub struct Server {
     pub players_by_chunk: HashMap<i64, HashSet<EntityId>>,
     pub next_conn: ConnId,
     pub ip_count: HashMap<String, i32>,
+    /// Per-IP login throttle state: window-start tick + accepts in window.
+    /// Pruned periodically in `tick`; see `LOGIN_ATTEMPTS_MAX`.
+    pub login_attempts: HashMap<String, (u64, u32)>,
     pub tick_count: u64,
     pub console: Vec<String>,
     pub running: bool,

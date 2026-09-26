@@ -109,6 +109,7 @@ impl Server {
             mio::Waker::new(poll.registry(), crate::server::WAKER_TOKEN)
                 .map_err(|e| format!("cannot create mio waker: {e}"))?,
         );
+        let world_seed = world.seed;
         Ok(Self {
             settings,
             world,
@@ -126,6 +127,7 @@ impl Server {
             players_by_chunk: HashMap::new(),
             next_conn: 1,
             ip_count: HashMap::new(),
+            login_attempts: HashMap::new(),
             tick_count: 0,
             console: Vec::new(),
             running: true,
@@ -133,7 +135,7 @@ impl Server {
             events,
             waker,
             listener: None,
-            chunk_worker: Some(crate::server::chunk_worker::ChunkGenWorker::start(seed)),
+            chunk_worker: Some(crate::server::chunk_worker::ChunkGenWorker::start(world_seed)),
             pending_chunk_gens: HashSet::new(),
         })
     }
@@ -191,7 +193,18 @@ impl Server {
     }
 
     fn register_conn(&mut self, conn: Conn) -> Option<ConnId> {
+        // Global TCP cap (fd/memory bound). Deliberate addition — vanilla
+        // gates only at join (`max-players`), leaving the 30s login window
+        // open to fd exhaustion from distinct IPs.
+        if self.sessions.len() >= self.settings.max_connections.max(1) as usize {
+            log::info("Connection limit reached (server full at TCP level)");
+            return None;
+        }
         let ip = ip_of(&conn.remote).to_string();
+        if self.login_rate_limited(&ip) {
+            log::info(&format!("Login rate limit reached for IP {ip}"));
+            return None;
+        }
         let count = self.ip_count.get(&ip).copied().unwrap_or(0);
         if count >= MAX_CONNECTIONS_PER_IP {
             log::info(&format!("Connection limit reached for IP {ip}"));
@@ -200,17 +213,54 @@ impl Server {
         let id = self.next_conn;
         self.next_conn += 1;
         *self.ip_count.entry(ip).or_insert(0) += 1;
-        let _ = conn.with_stream_mut(|s| {
+        // A failed poll registration used to be swallowed (`let _`),
+        // leaving a ghost session that held its fd but was never polled.
+        // Drop the connection and roll the IP slot back instead.
+        let registered = conn.with_stream_mut(|s| {
             self.poll.registry().register(
                 s,
                 mio::Token(id as usize),
                 mio::Interest::READABLE | mio::Interest::WRITABLE,
             )
         });
+        if registered.is_err() {
+            log::warning(&format!("Failed to register connection {id} with mio; dropping"));
+            if let Some(n) = self.ip_count.get_mut(ip_of(&conn.remote)) {
+                *n -= 1;
+                if *n <= 0 {
+                    self.ip_count.remove(ip_of(&conn.remote));
+                }
+            }
+            return None;
+        }
         let login = LoginSession::new(self.settings.online_mode)
             .with_auth_url(self.settings.auth_server_url.clone());
         self.sessions.insert(id, Session { conn, state: SessionState::Login(login), idle: 0 });
         Some(id)
+    }
+
+    /// Per-IP login throttle: at most `LOGIN_ATTEMPTS_MAX` accepts per
+    /// `LOGIN_WINDOW_TICKS`. Sliding window on the tick clock; stale
+    /// entries are pruned in `tick` so the map can't grow via IP spoofing.
+    fn login_rate_limited(&mut self, ip: &str) -> bool {
+        use crate::server::{LOGIN_ATTEMPTS_MAX, LOGIN_WINDOW_TICKS};
+        let now = self.tick_count;
+        let entry = self.login_attempts.entry(ip.to_string()).or_insert((now, 0));
+        if now.wrapping_sub(entry.0) >= LOGIN_WINDOW_TICKS {
+            *entry = (now, 1);
+            return false;
+        }
+        entry.1 += 1;
+        entry.1 > LOGIN_ATTEMPTS_MAX
+    }
+
+    /// Drop throttle entries outside the current window (runs every window
+    /// from `tick`).
+    pub(crate) fn prune_login_attempts(&mut self) {
+        use crate::server::LOGIN_WINDOW_TICKS;
+        let now = self.tick_count;
+        self.login_attempts
+            .retain(|_, (start, _)| now.wrapping_sub(*start) < LOGIN_WINDOW_TICKS);
     }
 
     /// Bind a mio TcpListener to addr and register with the poll loop.
@@ -348,9 +398,14 @@ impl Server {
                 SessionBroadcast::Chat(msg) => {
                     let bytes = pkt_chat(&msg);
                     let cids: Vec<ConnId> = self.sessions.keys().copied().collect();
+                    // Play-only (mirrors vanilla `sendPacketToAllPlayers`:
+                    // login-phase sockets have no player row and must not
+                    // see game chat).
                     for cid in cids {
-                        if let Some(other) = self.sessions.get(&cid) {
-                            other.conn.send(bytes.clone());
+                        if self.is_play(cid) {
+                            if let Some(other) = self.sessions.get(&cid) {
+                                other.conn.send(bytes.clone());
+                            }
                         }
                     }
                     sess.conn.send(bytes);

@@ -20,6 +20,12 @@ pub struct Settings {
     pub auto_save_interval: i32,
     pub spawn_protection: i32,
     pub max_players: i32,
+    /// Hard cap on total TCP connections (authenticated or not). Vanilla
+    /// has no accept gate at all — `max-players` only fires at join — so
+    /// distinct IPs can pile unauthenticated sockets during the 30s login
+    /// window and exhaust fds/memory. Clamped to at least `max_players`
+    /// so the server can always fill up.
+    pub max_connections: i32,
     pub level_name: String,
     pub seed: i64,
     pub dimension: i8,
@@ -86,6 +92,10 @@ pub fn load_settings(cfg: &mut ServerConfig) -> Settings {
         auto_save_interval: cfg.get_int("auto-save-interval", AUTO_SAVE_INTERVAL_TICKS_DEFAULT),
         spawn_protection,
         max_players: cfg.get_int("max-players", 20),
+        max_connections: cfg
+            .get_int("max-connections", 256)
+            .max(cfg.get_int("max-players", 20))
+            .max(1),
         level_name: cfg.get_string("level-name", "world"),
         seed,
         dimension: if cfg.get_bool("hellworld", false) { -1 } else { 0 },

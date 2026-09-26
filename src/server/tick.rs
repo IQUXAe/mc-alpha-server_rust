@@ -24,12 +24,23 @@ impl Server {
                 None => false,
             })
             .collect();
-        // Retire dead/vanished entries with destroy packets (mirrors
-        // `EntityTrackerEntry.func_604_a`), so killed mobs stop hanging
-        // client-side. Runs before the tick loop on a shared outbox.
+        // Retire vanished entries (and dead players) with destroy packets
+        // (mirrors `EntityTrackerEntry.func_604_a`). Dead mobs/animals stay in
+        // `world.entities` for their 20-tick death animation (`death_time < 20`)
+        // before `purge_dead` removes them, so `DestroyEntity` is sent after
+        // the corpse animation rather than collapsing it on the death tick.
         let mut out = Vec::new();
-        let gone: Vec<EntityId> =
-            self.world.tracker.tracked_ids().into_iter().filter(|id| !live.contains(id)).collect();
+        let gone: Vec<EntityId> = self
+            .world
+            .tracker
+            .tracked_ids()
+            .into_iter()
+            .filter(|id| match self.world.entities.get(*id) {
+                None => true,
+                Some(Entity::Player(p)) => p.living.body.dead,
+                Some(_) => false,
+            })
+            .collect();
         for id in gone {
             self.world.tracker.remove(id, &mut out);
         }
@@ -213,6 +224,21 @@ impl Server {
         }
     }
 
+    /// Ship queued tile-entity updates (`Packet59ComplexEntity`) to chunk-loaded players.
+    fn drain_tile_updates(&mut self) {
+        for [x, y, z] in self.world.take_tile_updates() {
+            if let Some(tile) = self.world.tiles.get(&(x, y, z)).copied() {
+                let bytes = crate::session_packets::tile_packet(x, y, z, &tile);
+                let cids = self.conns_with_chunk(chunk_key(x.div_euclid(16), z.div_euclid(16)));
+                for cid in cids {
+                    if let Some(sess) = self.sessions.get(&cid) {
+                        sess.conn.send(bytes.clone());
+                    }
+                }
+            }
+        }
+    }
+
     /// One server tick (mirrors `serverTick`).
     pub fn tick(&mut self) {
         if !self.running {
@@ -220,6 +246,9 @@ impl Server {
         }
         self.poll_network(std::time::Duration::ZERO);
         self.tick_count += 1;
+        if self.tick_count.is_multiple_of(crate::server::LOGIN_WINDOW_TICKS) {
+            self.prune_login_attempts();
+        }
 
         // Process incoming client packets and session events first (mirrors MinecraftServer func_715_a).
         let cids: Vec<ConnId> = self.sessions.keys().copied().collect();
@@ -251,6 +280,7 @@ impl Server {
         }
         self.tracker_tick();
         self.drain_block_updates();
+        self.drain_tile_updates();
         self.poll_network(std::time::Duration::ZERO);
         let lines = std::mem::take(&mut self.console);
         for line in lines {

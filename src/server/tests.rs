@@ -921,3 +921,98 @@
         assert!(pids.contains(&38), "Packet38 (EntityStatus hurt) must arrive on the same tick, got: {pids:?}");
         assert!(pids.contains(&28), "Packet28 (EntityVelocity knockback) must arrive on the same tick, got: {pids:?}");
     }
+
+    /// Raw accept without unwrapping: keeps the client socket alive and
+    /// reports whether the server took the connection.
+    fn try_pair(srv: &mut Server) -> (TcpStream, Option<ConnId>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let client = TcpStream::connect(addr).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let (stream, _) = l.accept().unwrap();
+        let cid = srv.accept(stream);
+        (client, cid)
+    }
+
+    #[test]
+    fn max_connections_parses_and_clamps() {
+        let base = tmpdir("maxconn");
+        let props = format!("{base}/server.properties");
+        std::fs::write(&props, "max-players=3\nmax-connections=2\n").unwrap();
+        let mut cfg = ServerConfig::open(&props);
+        // Floor: the server must always be able to fill max-players.
+        assert_eq!(load_settings(&mut cfg).max_connections, 3);
+        std::fs::write(&props, "").unwrap();
+        let mut cfg = ServerConfig::open(&props);
+        assert_eq!(load_settings(&mut cfg).max_connections, 256);
+    }
+
+    #[test]
+    fn tcp_global_cap_and_login_throttle() {
+        // Global cap: with max-connections=3 the 4th TCP accept is
+        // refused even though nobody joined (max-players gate is later).
+        // (max-players=2 keeps the max-connections floor out of the way.)
+        let mut srv = mk_server("max-players=2\nmax-connections=3\n");
+        let (_c1, cid1) = try_pair(&mut srv);
+        let (_c2, cid2) = try_pair(&mut srv);
+        let (_c3, cid3) = try_pair(&mut srv);
+        assert!(cid1.is_some() && cid2.is_some() && cid3.is_some());
+        let (_c4, cid4) = try_pair(&mut srv);
+        assert!(cid4.is_none());
+        assert_eq!(srv.sessions.len(), 3);
+    }
+
+    #[test]
+    fn login_rate_limit_blocks_burst_then_recovers() {
+        // 5 rapid accepts pass; the 6th from the same IP is throttled
+        // even after the sockets are gone (per-IP count is free again,
+        // the window is not). A new window admits again.
+        let mut srv = mk_server("");
+        let mut held = Vec::new();
+        for _ in 0..5 {
+            let (c, cid) = try_pair(&mut srv);
+            assert!(cid.is_some());
+            held.push((c, cid.unwrap()));
+        }
+        // Free the IP slots without touching the throttle window.
+        for (_, cid) in held {
+            if let Some(sess) = srv.sessions.remove(&cid) {
+                srv.remove_session(cid, sess);
+            }
+        }
+        let (_c6, cid6) = try_pair(&mut srv);
+        assert!(cid6.is_none());
+        // Advance past the window and prune: admission recovers.
+        srv.tick_count += crate::server::LOGIN_WINDOW_TICKS;
+        srv.prune_login_attempts();
+        let (_c7, cid7) = try_pair(&mut srv);
+        assert!(cid7.is_some());
+    }
+
+    #[test]
+    fn chat_does_not_leak_to_login_sockets() {
+        // A connected-but-not-joined socket must not receive game chat
+        // (vanilla `sendPacketToAllPlayers` has no login-phase target).
+        let mut srv = mk_server("");
+        let (mut a, _a_cid) = pair(&mut srv);
+        join(&mut srv, &mut a, "Steve");
+        // Second socket: handshake only, still in login.
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let mut b = TcpStream::connect(addr).unwrap();
+        b.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let (stream, _) = l.accept().unwrap();
+        let b_cid = srv.accept(stream).unwrap();
+        assert!(!srv.is_play(b_cid));
+        b.write_all(&cli_handshake("Alex")).unwrap();
+        for _ in 0..5 {
+            srv.tick();
+        }
+        drain_all(&mut b);
+        // Steve chats; Alex-in-login must see nothing.
+        a.write_all(&cli_chat("hello world")).unwrap();
+        for _ in 0..10 {
+            srv.tick();
+        }
+        assert!(next_pkt_opt(&mut b, Duration::from_millis(200)).is_none());
+    }
