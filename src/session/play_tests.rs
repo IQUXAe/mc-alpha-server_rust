@@ -995,3 +995,195 @@
             _ => panic!("furnace tile missing"),
         }
     }
+
+    #[test]
+    fn test_furnace_tile_packet_scales_burn_time_for_client_gui() {
+        use crate::nbt::{NbtTag, read_root};
+        use std::io::Read as _;
+
+        // 1 coal (1600 ticks) consumed -> slot 1 is now empty (client uses 200 as max).
+        // At 800 ticks remaining (50%), wire BurnTime must be 100 so client computes 100*12/200 = 6.
+        let mut f = crate::tile_entity::furnace::furnace_create();
+        f.slots[0] = ItemStack::new(15, 1, 0);
+        f.burn_time = 800;
+        f.cook_time = 50;
+        f.current_item_burn_time = 1600;
+        let pkt = crate::session_packets::tile_packet(3, 64, 4, &TileData::Furnace(f));
+        assert_eq!(pkt[0], 59);
+        let gz_len = u16::from_be_bytes([pkt[11], pkt[12]]) as usize;
+        let mut dec = flate2::read::GzDecoder::new(&pkt[13..13 + gz_len]);
+        let mut raw = Vec::new();
+        dec.read_to_end(&mut raw).unwrap();
+        let (_, root) = read_root(&mut std::io::Cursor::new(raw)).unwrap();
+        assert_eq!(root.map.get("BurnTime"), Some(&NbtTag::Short(100)));
+        assert_eq!(root.map.get("CookTime"), Some(&NbtTag::Short(50)));
+
+        // Lava bucket (20000 ticks) at 1 tick left with empty fuel slot clamps to 1 (still burning).
+        f.burn_time = 1;
+        f.current_item_burn_time = 20000;
+        let pkt = crate::session_packets::tile_packet(3, 64, 4, &TileData::Furnace(f));
+        let gz_len = u16::from_be_bytes([pkt[11], pkt[12]]) as usize;
+        let mut dec = flate2::read::GzDecoder::new(&pkt[13..13 + gz_len]);
+        let mut raw = Vec::new();
+        dec.read_to_end(&mut raw).unwrap();
+        let (_, root) = read_root(&mut std::io::Cursor::new(raw)).unwrap();
+        assert_eq!(root.map.get("BurnTime"), Some(&NbtTag::Short(1)));
+
+        // Legacy/vanilla NBT furnace where current_item_burn_time == 0 and burn_time == 800
+        // (coal, 1600 ticks max) with empty fuel slot must infer server_max = 1600 and scale
+        // wire BurnTime to 100 instead of clamping at 200 (100%).
+        f.burn_time = 800;
+        f.current_item_burn_time = 0;
+        let pkt = crate::session_packets::tile_packet(3, 64, 4, &TileData::Furnace(f));
+        let gz_len = u16::from_be_bytes([pkt[11], pkt[12]]) as usize;
+        let mut dec = flate2::read::GzDecoder::new(&pkt[13..13 + gz_len]);
+        let mut raw = Vec::new();
+        dec.read_to_end(&mut raw).unwrap();
+        let (_, root) = read_root(&mut std::io::Cursor::new(raw)).unwrap();
+        assert_eq!(root.map.get("BurnTime"), Some(&NbtTag::Short(100)));
+    }
+
+    #[test]
+    fn test_active_furnace_slot_update_preserves_server_timers() {
+        use crate::nbt::{NbtCompound, NbtList, NbtTag, write_root};
+        use std::collections::BTreeMap;
+        use std::io::Write as _;
+
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        w.set_block_id(3, 64, 4, 62);
+        let mut f = crate::tile_entity::furnace::furnace_create();
+        f.burn_time = 1400;
+        f.cook_time = 120;
+        f.current_item_burn_time = 1600;
+        w.tiles.insert((3, 64, 4), TileData::Furnace(f));
+
+        // Client sends writeToNBT (no ItemBurnTime) with scaled BurnTime=175 and new input item.
+        let mut items = NbtList::with_type(10);
+        let mut im = BTreeMap::new();
+        im.insert("Slot".to_string(), NbtTag::Byte(0));
+        im.insert("id".to_string(), NbtTag::Short(15));
+        im.insert("Count".to_string(), NbtTag::Byte(4));
+        im.insert("Damage".to_string(), NbtTag::Short(0));
+        items.push(NbtTag::Compound(NbtCompound { map: im }));
+        let mut map = BTreeMap::new();
+        map.insert("x".to_string(), NbtTag::Int(3));
+        map.insert("y".to_string(), NbtTag::Int(64));
+        map.insert("z".to_string(), NbtTag::Int(4));
+        map.insert("BurnTime".to_string(), NbtTag::Short(175));
+        map.insert("CookTime".to_string(), NbtTag::Short(0));
+        map.insert("Items".to_string(), NbtTag::List(items));
+        let mut raw = Vec::new();
+        write_root(&mut raw, "", &NbtCompound { map }).unwrap();
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&raw).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::ComplexEntity { x: 3, y: 64, z: 4, nbt_data: gz },
+        );
+        match w.tiles.get(&(3, 64, 4)) {
+            Some(TileData::Furnace(s)) => {
+                assert_eq!(s.burn_time, 1400);
+                assert_eq!(s.cook_time, 120);
+                assert_eq!(s.current_item_burn_time, 1600);
+                assert_eq!(s.slots[0].item_id, 15);
+                assert_eq!(s.slots[0].count, 4);
+            }
+            _ => panic!("furnace tile missing"),
+        }
+    }
+
+    #[test]
+    fn test_chest_placement_rejects_triple_chest_and_furnace_preserves_yaw_facing() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 6.5);
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(54, 5, 0));
+            p.inventory.main[1] = Some(ItemStack::new(61, 4, 0));
+        }
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // Place first chest at (2, 64, 4) and second at (3, 64, 4) (double chest).
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::Place { item_id: 54, x: 2, y: 63, z: 4, direction: 1 },
+        );
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::Place { item_id: 54, x: 3, y: 63, z: 4, direction: 1 },
+        );
+        assert_eq!(w.get_block_id(2, 64, 4), 54);
+        assert_eq!(w.get_block_id(3, 64, 4), 54);
+
+        // Third adjacent chest at (4, 64, 4) must be rejected.
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::Place { item_id: 54, x: 4, y: 63, z: 4, direction: 1 },
+        );
+        assert_eq!(w.get_block_id(4, 64, 4), 0);
+
+        // Place furnaces with 4 different player yaws and verify facing metadata (2, 5, 3, 4).
+        for (fx, yaw, expected_meta) in [
+            (5, 0.0f32, 2u8),
+            (6, 90.0f32, 5u8),
+            (7, 180.0f32, 3u8),
+            (8, 270.0f32, 4u8),
+        ] {
+            if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+                p.living.body.set_position(fx as f64 + 0.5, 64.0, 6.5);
+                p.living.body.yaw = yaw;
+                p.inventory.current = 1;
+            }
+            sess.pump(
+                &mut ctx(&mut w, &ops, &mut bc),
+                PacketData::Place { item_id: 61, x: fx, y: 63, z: 4, direction: 1 },
+            );
+            assert_eq!(w.get_block_id(fx, 64, 4), 61);
+            assert_eq!(w.get_block_meta(fx, 64, 4), expected_meta);
+        }
+
+        // Right-clicking an existing furnace sends one Packet59 (not two duplicate Packet59s).
+        sess.outbox.clear();
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::Place { item_id: -1, x: 5, y: 64, z: 4, direction: 1 },
+        );
+        let tile_pkts = sess.outbox.iter().filter(|p| p.first() == Some(&59)).count();
+        assert_eq!(tile_pkts, 1, "activating a furnace must queue exactly one Packet59");
+    }
+
+    #[test]
+    fn test_pkt_subchunk_furnace_light_includes_propagated_blocklight() {
+        use std::io::Read as _;
+        let mut w = floor_world();
+        w.set_block_id(8, 64, 8, 62);
+        w.set_block_meta(8, 64, 8, 4);
+        w.refresh_light();
+
+        let subchunks = crate::session_packets::pkt_subchunk_furnace_light(&w, 8, 64, 8);
+        assert_eq!(subchunks.len(), 1);
+        let ((cx, cz), pkt) = &subchunks[0];
+        assert_eq!((*cx, *cz), (0, 0));
+        assert_eq!(pkt[0], 51);
+        let sx = pkt[11] as usize + 1;
+        let sy = pkt[12] as usize + 1;
+        let sz = pkt[13] as usize + 1;
+        let mut dec = flate2::read::ZlibDecoder::new(&pkt[18..]);
+        let mut raw = Vec::new();
+        dec.read_to_end(&mut raw).unwrap();
+        let vol = sx * sy * sz;
+        assert_eq!(raw.len(), vol * 5 / 2);
+        // Blocklight section starts at offset `vol + vol / 2` and has non-zero light around (8, 64, 8).
+        let bl_slice = &raw[vol + vol / 2..vol + vol];
+        assert!(
+            bl_slice.iter().any(|&b| (b & 0xF) == 12 || (b >> 4) == 12),
+            "subchunk blocklight must include neighbor light=12 around lit furnace"
+        );
+    }

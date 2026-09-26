@@ -145,6 +145,26 @@ impl World {
                 self.tiles.entry((x, y, z)).or_insert_with(|| {
                     TileData::Furnace(crate::tile_entity::furnace::furnace_create())
                 });
+                if self.get_block_meta(x, y, z) == 0 {
+                    let north = self.is_solid(x, y, z - 1);
+                    let south = self.is_solid(x, y, z + 1);
+                    let west = self.is_solid(x - 1, y, z);
+                    let east = self.is_solid(x + 1, y, z);
+                    let mut facing = 3u8;
+                    if north && !south {
+                        facing = 3;
+                    }
+                    if south && !north {
+                        facing = 2;
+                    }
+                    if west && !east {
+                        facing = 5;
+                    }
+                    if east && !west {
+                        facing = 4;
+                    }
+                    self.set_block_meta(x, y, z, facing);
+                }
             }
             63 | 68 => {
                 self.tiles
@@ -251,12 +271,10 @@ impl World {
                     self.recalculate_redstone_around(x, y, z);
                 }
             }
-            70 | 72 => {
-                if !self.attach_at(BlockPos::new(x, y - 1, z)) {
-                    self.drop_block_for(bid, 0, x, y, z);
-                    self.apply_set_notify(x, y, z, 0);
-                    self.recalculate_redstone_around(x, y, z);
-                }
+            70 | 72 if !self.attach_at(BlockPos::new(x, y - 1, z)) => {
+                self.drop_block_for(bid, 0, x, y, z);
+                self.apply_set_notify(x, y, z, 0);
+                self.recalculate_redstone_around(x, y, z);
             }
             78 => self.snow_neighbor(x, y, z),
             81 => {
@@ -910,10 +928,8 @@ impl World {
                     self.drop_block_for(80, 0, x, y, z);
                     self.apply_set_notify(x, y, z, 0);
                 }
-            70 | 72 => {
-                if self.get_block_meta(x, y, z) > 0 {
-                    self.update_pressure_plate(x, y, z, bid);
-                }
+            70 | 72 if self.get_block_meta(x, y, z) > 0 => {
+                self.update_pressure_plate(x, y, z, bid);
             }
             74 => {
                 // Glowing redstone cools back to idle (Java BlockRedstoneOre).

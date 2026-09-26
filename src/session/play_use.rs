@@ -81,11 +81,7 @@ impl PlaySession {
             self.send_block_change(ctx.world, x, y, z);
             return None;
         }
-        // Chest/furnace contents first (client opens the GUI early).
         let clicked = ctx.world.get_block_id(x, y, z);
-        if matches!(clicked, 54 | 61 | 62) {
-            self.send_tile(ctx.world, x, y, z);
-        }
         // Find the stack: selected if it matches, else first main match.
         let mut stack: Option<ItemStack> = None;
         let mut stack_slot: Option<usize> = None;
@@ -171,6 +167,9 @@ impl PlaySession {
             _ => (x, y, z),
         };
         self.send_block_change(ctx.world, nx, ny, nz);
+        if matches!(ctx.world.get_block_id(nx, ny, nz), 54 | 61 | 62) {
+            self.send_tile(ctx.world, nx, ny, nz);
+        }
         None
     }
 
@@ -207,6 +206,11 @@ impl PlaySession {
                     }
                 }
                 self.send_tile(ctx.world, x, y, z);
+                for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    if ctx.world.get_block_id(x + dx, y, z + dz) == 54 {
+                        self.send_tile(ctx.world, x + dx, y, z + dz);
+                    }
+                }
                 true
             }
             61 | 62 => {

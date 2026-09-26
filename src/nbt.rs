@@ -1473,9 +1473,7 @@ mod tests {
             deep.extend_from_slice(&1u16.to_be_bytes());
             deep.push(b'c');
         }
-        for _ in 0..=20 {
-            deep.push(0);
-        }
+        deep.extend(std::iter::repeat_n(0, 21));
         assert!(read_root(&mut std::io::Cursor::new(&deep)).is_err());
         let mut bb_deep = ByteBuffer::from_vec(deep);
         assert!(read_root_from_buffer(&mut bb_deep).is_err());

@@ -65,6 +65,7 @@ fn can_stay(u: &mut ItemUseWorld, id: u8, pos: BlockPos) -> bool {
         37 | 38 => crate::block::ticks::block_flower_can_stay(w, pos),
         39 | 40 => crate::block::ticks::block_mushroom_can_stay(w, pos),
         50 => crate::block::ticks::block_torch_can_stay(w, pos),
+        54 => crate::block::container::block_chest_can_place(w, 54, pos),
         81 => crate::block::ticks::block_cactus_can_stay(w, pos),
         83 => crate::block::ticks::block_reed_can_stay(w, pos),
         6 => crate::block::ticks::block_sapling_can_stay(w, pos),
@@ -414,6 +415,9 @@ pub fn item_block_use(w: &mut ItemUseWorld, place: BlockPlace, pos: BlockPos) ->
     if place.block_id == 61 || place.block_id == 62 {
         let meta = item_furnace_facing(place.yaw);
         w.world.set_meta_at(target, meta);
+        w.world.tile_updates.push([target.x, target.y, target.z]);
+    } else if place.block_id == 54 {
+        w.world.tile_updates.push([target.x, target.y, target.z]);
     }
     if let Some(m) = attach_meta {
         w.world.set_meta_at(target, m);

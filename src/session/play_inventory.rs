@@ -265,14 +265,22 @@ impl PlaySession {
                 // never exceeds the 200-tick recipe, burn timers never
                 // exceed the hottest fuel (lava bucket, 20000 ticks).
                 // Otherwise a hacked sign-update packet grants free smelts.
-                if let Some(NbtTag::Short(v)) = nbt.map.get("BurnTime") {
-                    s.burn_time = (*v).clamp(0, 20000);
-                }
-                if let Some(NbtTag::Short(v)) = nbt.map.get("CookTime") {
-                    s.cook_time = (*v).clamp(0, 200);
-                }
-                if let Some(NbtTag::Short(v)) = nbt.map.get("ItemBurnTime") {
-                    s.current_item_burn_time = (*v).clamp(0, 20000);
+                // When the furnace is already burning/cooking on the server
+                // and the client sends an inventory update (`writeToNBT`,
+                // which omits `"ItemBurnTime"` and echoes scaled/stale
+                // timers), keep the server's authoritative timers intact.
+                let server_active =
+                    s.burn_time > 0 || s.cook_time > 0 || s.current_item_burn_time > 0;
+                if !server_active || nbt.map.contains_key("ItemBurnTime") {
+                    if let Some(NbtTag::Short(v)) = nbt.map.get("BurnTime") {
+                        s.burn_time = (*v).clamp(0, 20000);
+                    }
+                    if let Some(NbtTag::Short(v)) = nbt.map.get("CookTime") {
+                        s.cook_time = (*v).clamp(0, 200);
+                    }
+                    if let Some(NbtTag::Short(v)) = nbt.map.get("ItemBurnTime") {
+                        s.current_item_burn_time = (*v).clamp(0, 20000);
+                    }
                 }
                 // Same replace-not-merge rule as chests (vanilla
                 // readFromNBT starts from a fresh bank).

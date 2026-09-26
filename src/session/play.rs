@@ -113,21 +113,37 @@ impl PlaySession {
     }
 
     /// Tile-entity packet for one cell, if a tile row exists.
+    /// For furnaces, follow `Packet59ComplexEntity` with a 1x2x1 subchunk
+    /// packet so if the client's `getBlockTileEntity` lazily triggered
+    /// `BlockFurnace.onBlockAdded` -> `func_284_h` (overwriting facing
+    /// metadata to 3 and queuing a `WorldBlockPositionType` rollback),
+    /// `handleMapChunk` clears the rollback and restores the server facing
+    /// without replacing the `TileEntityFurnace` in `chunkTileEntityMap`.
     pub fn send_tile(&mut self, world: &World, x: i32, y: i32, z: i32) {
         if let Some(tile) = world.tiles.get(&(x, y, z)) {
             self.outbox.push(tile_packet(x, y, z, tile));
+            if matches!(tile, crate::world::TileData::Furnace(_)) {
+                if let Some(sc) = crate::session_packets::pkt_subchunk_block(world, x, y, z) {
+                    self.outbox.push(sc);
+                }
+            }
         }
     }
 
     /// Block-change rollback packet with current cell state.
+    /// For furnaces (`61`/`62`), precede `Packet53BlockChange` with a 1x2x1
+    /// subchunk packet so `Chunk.setBlockIDWithMetadata` on the client sees
+    /// matching block ID and metadata and returns `false` instead of calling
+    /// `BlockFurnace.onBlockAdded` (which would replace `GuiFurnace.field_978_j`).
     pub fn send_block_change(&mut self, world: &World, x: i32, y: i32, z: i32) {
-        self.outbox.push(pkt_block_change(
-            x,
-            y,
-            z,
-            world.get_block_id(x, y, z),
-            world.get_block_meta(x, y, z),
-        ));
+        let id = world.get_block_id(x, y, z);
+        let meta = world.get_block_meta(x, y, z);
+        if matches!(id, 61 | 62) {
+            if let Some(sc) = crate::session_packets::pkt_subchunk_block(world, x, y, z) {
+                self.outbox.push(sc);
+            }
+        }
+        self.outbox.push(pkt_block_change(x, y, z, id, meta));
     }
 
     /// Held-item sync (mirrors `syncHeldItemSelection`).
