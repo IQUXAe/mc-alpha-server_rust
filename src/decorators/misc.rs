@@ -103,14 +103,18 @@ impl WorldGenLakes {
             }
         }
 
-        // Grass conversion
+        // Grass conversion (only when exposed to sky, matching WorldGenLakes.java:79)
         for bx in 0..16 {
             let ibx = bx as i32;
             for bz in 0..16 {
                 let ibz = bz as i32;
+                let height = accessor.get_height_value(x + ibx, z + ibz);
                 for by in 4..8 {
                     let iby = by as i32;
-                    if arr[(bx * 16 + bz) * 8 + by] && accessor.get_block_id(x + ibx, y + iby - 1, z + ibz) == 3 {
+                    if arr[(bx * 16 + bz) * 8 + by]
+                        && accessor.get_block_id(x + ibx, y + iby - 1, z + ibz) == 3
+                        && y + iby >= height
+                    {
                         accessor.set_block_id(x + ibx, y + iby - 1, z + ibz, 2); // grass
                     }
                 }
@@ -162,10 +166,26 @@ impl WorldGenFlowers {
 /// and reject. The canvas has no light yet, so shade is approximated by
 /// the heightmap: a cell at/above the top is sunlit (reject), below it is
 /// shaded (accept, like the 15-opacity-minus-layers vanilla outcome).
+fn column_sky_light(accessor: &mut dyn BlockAccess, x: i32, y: i32, z: i32) -> i32 {
+    let mut sky = 15;
+    for cy in (y..128).rev() {
+        let id = accessor.get_block_id(x, cy, z);
+        let op = block_properties_get(id as u32).light_opacity;
+        if op >= 15 {
+            return 0;
+        }
+        sky = (sky - op).max(0);
+    }
+    sky
+}
+
 fn flower_soil_ok(accessor: &mut dyn BlockAccess, plant_id: u8, x: i32, y: i32, z: i32) -> bool {
     let below = accessor.get_block_id(x, y - 1, z);
     match plant_id {
-        37 | 38 => below == 2 || below == 3 || below == 60,
+        37 | 38 => {
+            (below == 2 || below == 3 || below == 60)
+                && (y >= accessor.get_height_value(x, z) || column_sky_light(accessor, x, y, z) >= 8)
+        }
         39 | 40 => {
             if below == 0 || !block_properties_get(below as u32).allows_attachment {
                 return false;
@@ -349,8 +369,140 @@ impl WorldGenLiquids {
 
         if stone_count == 3 && air_count == 1 {
             accessor.set_block_id(x, y, z, self.liquid_block_id);
+            let mut budget = 256usize;
+            flow_liquid_instant(accessor, self.liquid_block_id, x, y, z, &mut budget);
         }
         true
+    }
+}
+
+fn liquid_is_same(id: u8, liquid_block_id: u8) -> bool {
+    id == liquid_block_id || id == liquid_block_id + 1
+}
+
+fn liquid_blocks_flow(id: u8) -> bool {
+    if matches!(id, 64 | 71 | 63 | 65 | 83) {
+        return true;
+    }
+    if id == 0 {
+        return false;
+    }
+    crate::world::material_of(block_properties_get(id as u32).material).blocks_movement()
+}
+
+fn liquid_can_displace(accessor: &mut dyn BlockAccess, liquid_block_id: u8, x: i32, y: i32, z: i32) -> bool {
+    if !(0..128).contains(&y) {
+        return false;
+    }
+    let id = accessor.get_block_id(x, y, z);
+    if liquid_is_same(id, liquid_block_id) || id == 10 || id == 11 {
+        return false;
+    }
+    !liquid_blocks_flow(id)
+}
+
+fn liquid_flow_cost(
+    accessor: &mut dyn BlockAccess,
+    liquid_block_id: u8,
+    x: i32,
+    y: i32,
+    z: i32,
+    dist: i32,
+    from_dir: usize,
+) -> i32 {
+    const DIRS: [(i32, i32, usize); 4] = [(-1, 0, 1), (1, 0, 0), (0, -1, 3), (0, 1, 2)];
+    let mut best = 1000;
+    for (dir, &(dx, dz, opp)) in DIRS.iter().enumerate() {
+        if dir == from_dir {
+            continue;
+        }
+        let (nx, nz) = (x + dx, z + dz);
+        let nid = accessor.get_block_id(nx, y, nz);
+        if !liquid_blocks_flow(nid)
+            && (!liquid_is_same(nid, liquid_block_id) || accessor.get_block_meta(nx, y, nz) != 0)
+        {
+            if y > 0 && !liquid_blocks_flow(accessor.get_block_id(nx, y - 1, nz)) {
+                return dist;
+            }
+            if dist < 4 {
+                let c = liquid_flow_cost(accessor, liquid_block_id, nx, y, nz, dist + 1, opp);
+                if c < best {
+                    best = c;
+                }
+            }
+        }
+    }
+    best
+}
+
+fn liquid_optimal_dirs(
+    accessor: &mut dyn BlockAccess,
+    liquid_block_id: u8,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> [bool; 4] {
+    const DIRS: [(i32, i32, usize); 4] = [(-1, 0, 1), (1, 0, 0), (0, -1, 3), (0, 1, 2)];
+    let mut costs = [1000i32; 4];
+    for (dir, &(dx, dz, opp)) in DIRS.iter().enumerate() {
+        let (nx, nz) = (x + dx, z + dz);
+        let nid = accessor.get_block_id(nx, y, nz);
+        if !liquid_blocks_flow(nid)
+            && (!liquid_is_same(nid, liquid_block_id) || accessor.get_block_meta(nx, y, nz) != 0)
+        {
+            if y > 0 && !liquid_blocks_flow(accessor.get_block_id(nx, y - 1, nz)) {
+                costs[dir] = 0;
+            } else {
+                costs[dir] = liquid_flow_cost(accessor, liquid_block_id, nx, y, nz, 1, opp);
+            }
+        }
+    }
+    let min_cost = *costs.iter().min().unwrap_or(&1000);
+    [
+        costs[0] == min_cost,
+        costs[1] == min_cost,
+        costs[2] == min_cost,
+        costs[3] == min_cost,
+    ]
+}
+
+fn flow_liquid_instant(
+    accessor: &mut dyn BlockAccess,
+    liquid_block_id: u8,
+    x: i32,
+    y: i32,
+    z: i32,
+    budget: &mut usize,
+) {
+    if *budget == 0 || !(0..128).contains(&y) {
+        return;
+    }
+    *budget -= 1;
+    let meta = accessor.get_block_meta(x, y, z) as i32;
+    // Stabilize current cell into stationary id (9 or 11) with current meta.
+    accessor.set_block_id(x, y, z, liquid_block_id + 1);
+    accessor.set_block_meta(x, y, z, meta as u8);
+
+    if y > 0 && liquid_can_displace(accessor, liquid_block_id, x, y - 1, z) {
+        let down_meta = if meta >= 8 { meta } else { meta + 8 };
+        accessor.set_block_id(x, y - 1, z, liquid_block_id);
+        accessor.set_block_meta(x, y - 1, z, down_meta as u8);
+        flow_liquid_instant(accessor, liquid_block_id, x, y - 1, z, budget);
+    } else if meta >= 0 && (meta == 0 || (y > 0 && liquid_blocks_flow(accessor.get_block_id(x, y - 1, z)))) {
+        let step = if liquid_block_id == 10 { 2 } else { 1 };
+        let next_meta = if meta >= 8 { 1 } else { meta + step };
+        if next_meta >= 8 {
+            return;
+        }
+        let dirs = liquid_optimal_dirs(accessor, liquid_block_id, x, y, z);
+        const OFFSETS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+        for (i, &(dx, dz)) in OFFSETS.iter().enumerate() {
+            if dirs[i] && liquid_can_displace(accessor, liquid_block_id, x + dx, y, z + dz) {
+                accessor.set_block_id(x + dx, y, z + dz, liquid_block_id);
+                accessor.set_block_meta(x + dx, y, z + dz, next_meta as u8);
+                flow_liquid_instant(accessor, liquid_block_id, x + dx, y, z + dz, budget);
+            }
+        }
     }
 }
 
@@ -403,9 +555,19 @@ impl WorldGenDungeons {
                         {
                             accessor.set_block_id(dx, dy, dz, 0); // air
                         } else {
+                            let below_id = if dy > 0 {
+                                accessor.get_block_id(dx, dy - 1, dz)
+                            } else {
+                                0
+                            };
+                            let below_solid = below_id != 0
+                                && below_id != 8
+                                && below_id != 9
+                                && below_id != 10
+                                && below_id != 11;
                             let bid = accessor.get_block_id(dx, dy, dz);
-                            let solid = bid != 0 && bid != 8 && bid != 9;
-                            if dy >= 0 && !solid {
+                            let solid = bid != 0 && bid != 8 && bid != 9 && bid != 10 && bid != 11;
+                            if dy >= 0 && !below_solid {
                                 accessor.set_block_id(dx, dy, dz, 0);
                             } else if solid {
                                 if dy == y - 1 && rand.next_int_bound(4) != 0 {
@@ -449,7 +611,8 @@ impl WorldGenDungeons {
 
             // Place spawner
             accessor.set_block_id(x, y, z, 52); // mob spawner
-            dungeon_spawner_kind(rand); // Choose spawner mob type (RNG burn; spawner tiles arrive later)
+            let kind = dungeon_spawner_kind(rand);
+            accessor.push_dungeon_loot(x, y, z, -1, kind, 0);
             true
         } else {
             false
@@ -511,14 +674,16 @@ mod tests {
 
     struct FakeAccess {
         cells: HashMap<(i32, i32, i32), u8>,
+        metas: HashMap<(i32, i32, i32), u8>,
     }
 
     impl FakeAccess {
         fn new() -> Self {
-            Self { cells: HashMap::new() }
+            Self { cells: HashMap::new(), metas: HashMap::new() }
         }
         fn flat_grass(&mut self) {
             self.cells.clear();
+            self.metas.clear();
             for x in -16..16 {
                 for z in -16..16 {
                     self.set(x, 63, z, 2); // grass
@@ -540,10 +705,12 @@ mod tests {
         fn set_block_id(&mut self, x: i32, y: i32, z: i32, id: u8) {
             self.cells.insert((x, y, z), id);
         }
-        fn get_block_meta(&mut self, _x: i32, _y: i32, _z: i32) -> u8 {
-            0
+        fn get_block_meta(&mut self, x: i32, y: i32, z: i32) -> u8 {
+            self.metas.get(&(x, y, z)).copied().unwrap_or(0)
         }
-        fn set_block_meta(&mut self, _x: i32, _y: i32, _z: i32, _m: u8) {}
+        fn set_block_meta(&mut self, x: i32, y: i32, z: i32, m: u8) {
+            self.metas.insert((x, y, z), m & 0xF);
+        }
         fn allows_attachment(&mut self, _x: i32, _y: i32, _z: i32) -> bool {
             false
         }
@@ -591,5 +758,36 @@ mod tests {
         WorldGenFlowers::new(38).generate(&mut acc, &mut rand, 0, 64, 0);
         assert!(acc.planted(37) > 0, "yellow flowers must plant on open grass");
         assert!(acc.planted(38) > 0, "red flowers must plant on open grass");
+
+        // Underground dark cave (opaque stone ceiling at y=70): flowers must NOT plant
+        let mut cave = FakeAccess::new();
+        cave.flat_grass();
+        for x in -16..16 {
+            for z in -16..16 {
+                cave.set(x, 70, z, 1); // stone ceiling
+            }
+        }
+        let mut rand = JavaRandom::new(42);
+        WorldGenFlowers::new(37).generate(&mut cave, &mut rand, 0, 64, 0);
+        WorldGenFlowers::new(38).generate(&mut cave, &mut rand, 0, 64, 0);
+        assert_eq!(cave.planted(37), 0, "yellow flowers must not plant in dark cave");
+        assert_eq!(cave.planted(38), 0, "red flowers must not plant in dark cave");
+    }
+
+    #[test]
+    fn test_world_gen_liquids_flows_immediately() {
+        let mut acc = FakeAccess::new();
+        // Stone floor and surround for spring at (0, 20, 0), open air at (1, 20, 0) with stone floor at (1, 19, 0)
+        acc.set(0, 21, 0, 1);
+        acc.set(0, 19, 0, 1);
+        acc.set(-1, 20, 0, 1);
+        acc.set(0, 20, -1, 1);
+        acc.set(0, 20, 1, 1);
+        acc.set(1, 19, 0, 1);
+        let mut rand = JavaRandom::new(7);
+        assert!(WorldGenLiquids::new(8).generate(&mut acc, &mut rand, 0, 20, 0));
+        // Source stabilized to stationary water (9) at (0, 20, 0) and flowed into (1, 20, 0)
+        assert_eq!(acc.get_block_id(0, 20, 0), 9);
+        assert!(matches!(acc.get_block_id(1, 20, 0), 8 | 9), "spring must flow into adjacent air");
     }
 }

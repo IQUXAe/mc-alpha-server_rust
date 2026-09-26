@@ -98,7 +98,7 @@ pub fn density_generate_field(
 
                 var34 -= var36;
                 if var33 > var6 - 4 {
-                    let var44 = (var33 - (var6 - 4)) as f64 / 3.0;
+                    let var44 = ((var33 - (var6 - 4)) as f32 / 3.0f32) as f64;
                     var34 = var34 * (1.0 - var44) + -10.0 * var44;
                 }
 
