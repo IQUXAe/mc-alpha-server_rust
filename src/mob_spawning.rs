@@ -88,7 +88,6 @@ pub trait SpawnerWorld {
 }
 
 const CHUNK_RADIUS: i32 = 8;
-const CHUNK_ROLL: i32 = 50;
 const GROUP_ATTEMPTS: i32 = 3;
 const PACK_ATTEMPTS: i32 = 4;
 const PACK_SPREAD: i32 = 6;
@@ -102,7 +101,8 @@ fn chunk_key(chunk_x: i32, chunk_z: i32) -> u64 {
 }
 
 /// One full spawn pass. Returns the number of primary spawns (jockey
-/// skeletons excluded). Preserves the old C++ check order and draw sequence.
+/// skeletons excluded). Mirrors `SpawnerAnimals.performSpawning` and
+/// `MobSpawnerBase.biomeMonsters` (`[Spider, Zombie, Zombie, Skeleton, Creeper]`).
 #[allow(clippy::too_many_arguments)]
 fn spawn_pass(
     world: &mut impl SpawnerWorld,
@@ -141,9 +141,6 @@ fn spawn_pass(
 
     let mut spawned = 0;
     for key in &eligible {
-        if world.spawn_next_int(CHUNK_ROLL) != 0 {
-            continue;
-        }
         let chunk_x = (key >> 32) as i32;
         let chunk_z = (key & 0xFFFF_FFFF) as i32;
         if !world.spawn_chunk_exists(chunk_x, chunk_z) {
@@ -152,7 +149,19 @@ fn spawn_pass(
 
         let base_x = chunk_x.wrapping_mul(16);
         let base_z = chunk_z.wrapping_mul(16);
-        let kind = world.spawn_next_int(4) as u8;
+        // Java MobSpawnerBase: biomeMonsters has 5 entries
+        // [Spider, Zombie, Zombie, Skeleton, Creeper] (Zombie 2x weight),
+        // biomeCreatures has 4 entries [Sheep, Pig, Chicken, Cow].
+        let kind = if hostile {
+            match world.spawn_next_int(5) {
+                0 => 0,
+                1 | 2 => 1,
+                3 => 2,
+                _ => 3,
+            }
+        } else {
+            world.spawn_next_int(4) as u8
+        };
         let origin_x = base_x + world.spawn_next_int(16);
         let origin_y = world.spawn_next_int(world_height);
         let origin_z = base_z + world.spawn_next_int(16);

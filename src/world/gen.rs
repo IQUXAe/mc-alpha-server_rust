@@ -100,9 +100,24 @@ impl World {
                 }
             }
         }
-        // 4. Dungeon-chest loot: the canvas holds no tiles, so materialize
-        // chest rows for placed chests and deal the buffered stacks.
+        // 4. Dungeon-chest loot & spawner tiles: the canvas holds no tiles, so
+        // materialize chest and mob-spawner rows on write-back.
         for (lx, ly, lz, slot, item, count) in dungeon_loot {
+            if slot == -1 {
+                if self.get_block_id(lx, ly, lz) == 52 {
+                    let entity_id = match item {
+                        51 => "Skeleton",
+                        52 => "Spider",
+                        54 => "Zombie",
+                        _ => "Pig",
+                    };
+                    self.tiles.insert(
+                        (lx, ly, lz),
+                        TileData::MobSpawner(crate::world::tiles::MobSpawnerState::new(entity_id)),
+                    );
+                }
+                continue;
+            }
             if self.get_block_id(lx, ly, lz) != 54 {
                 continue;
             }

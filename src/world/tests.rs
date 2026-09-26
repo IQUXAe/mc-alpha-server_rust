@@ -319,6 +319,96 @@
         assert_eq!(hp_before - hp_after, 2);
     }
 
+    #[test]
+    fn test_water_contact_deals_no_damage_and_no_fire() {
+        // Regression: `Material` compared flags, so water aliased lava and
+        // swimming dealt lava contact damage (without igniting, because
+        // the tick then extinguished the fire as "liquid").
+        let mut w = world_with_floor();
+        for y in 64..68 {
+            w.set_block_id(3, y, 4, 8);
+        }
+        assert!(w.is_water(3, 65, 4));
+        assert!(!w.is_lava(3, 65, 4));
+        let id = add_zombie(&mut w, 3.5, 65.0, 4.5);
+        let hp_before = match w.entities.get(id).unwrap() {
+            crate::entity::table::Entity::Mob(m) => m.living.health,
+            _ => unreachable!(),
+        };
+        w.move_body(id, 0.0, 0.0, 0.0);
+        w.tick_living(id);
+        let (hp_after, fire) = match w.entities.get(id).unwrap() {
+            crate::entity::table::Entity::Mob(m) => (m.living.health, m.living.body.fire),
+            _ => unreachable!(),
+        };
+        assert_eq!(hp_before, hp_after);
+        assert_eq!(fire, 0);
+    }
+
+    #[test]
+    fn test_lava_contact_damages_ignites_and_burns() {
+        // Vanilla `World.func_523_c`: lava deals 1 and ignites for 300
+        // ticks; the burn persists (lava must NOT extinguish like water).
+        let mut w = world_with_floor();
+        for y in 64..68 {
+            w.set_block_id(3, y, 4, 10);
+        }
+        assert!(w.is_lava(3, 65, 4));
+        assert!(!w.is_water(3, 65, 4));
+        let id = add_zombie(&mut w, 3.5, 65.0, 4.5);
+        let hp_before = match w.entities.get(id).unwrap() {
+            crate::entity::table::Entity::Mob(m) => m.living.health,
+            _ => unreachable!(),
+        };
+        w.move_body(id, 0.0, 0.0, 0.0);
+        let fire_after_contact = match w.entities.get(id).unwrap() {
+            crate::entity::table::Entity::Mob(m) => m.living.body.fire,
+            _ => unreachable!(),
+        };
+        assert_eq!(fire_after_contact, 300);
+        w.tick_living(id);
+        let (hp_after, fire) = match w.entities.get(id).unwrap() {
+            crate::entity::table::Entity::Mob(m) => (m.living.health, m.living.body.fire),
+            _ => unreachable!(),
+        };
+        assert_eq!(hp_before - hp_after, 1);
+        assert!(fire > 0, "lava must not extinguish the fire it sets");
+    }
+
+    #[test]
+    fn test_fire_block_contact_damages_and_ignites() {
+        // Vanilla `func_523_c` covers fire (51) too, not just lava.
+        let mut w = world_with_floor();
+        w.set_block_id(3, 64, 4, 51);
+        let id = add_zombie(&mut w, 3.5, 64.2, 4.5);
+        w.move_body(id, 0.0, 0.0, 0.0);
+        let (hp_after_contact, fire) = match w.entities.get(id).unwrap() {
+            crate::entity::table::Entity::Mob(m) => (m.living.health, m.living.body.fire),
+            _ => unreachable!(),
+        };
+        assert!(hp_after_contact < 20);
+        assert_eq!(fire, 300);
+    }
+
+    #[test]
+    fn test_water_extinguishes_burning() {
+        // Vanilla `Entity.onUpdate`: water kills the fire (with a fizz).
+        let mut w = world_with_floor();
+        for y in 64..68 {
+            w.set_block_id(3, y, 4, 8);
+        }
+        let id = add_zombie(&mut w, 3.5, 65.0, 4.5);
+        if let Some(crate::entity::table::Entity::Mob(m)) = w.entities.get_mut(id) {
+            m.living.body.fire = 100;
+        }
+        w.tick_living(id);
+        let fire = match w.entities.get(id).unwrap() {
+            crate::entity::table::Entity::Mob(m) => m.living.body.fire,
+            _ => unreachable!(),
+        };
+        assert_eq!(fire, 0);
+    }
+
     fn add_boat(w: &mut World, x: f64, y: f64, z: f64) -> EntityId {
         use crate::entity::table::BoatEnt;
         let id = w.entities.alloc_id();
@@ -1575,3 +1665,237 @@
         }
         assert_eq!(w.player_held(player), None);
     }
+
+    #[test]
+    fn test_skylight_subtracted_and_night_surface_spawning() {
+        let mut w = world_with_floor();
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 64..128 {
+                    set_sky(&mut w, x, y, z, 15);
+                }
+            }
+        }
+        let candidate = add_mob(&mut w, MobKind::Zombie, 8.5, 64.0, 8.5);
+        // Noon (time = 6000): skylight_subtracted == 0, block_light_value == 15 -> spawner_mob_ok false
+        w.time = 6000;
+        w.update_skylight_subtracted();
+        assert_eq!(w.skylight_subtracted, 0);
+        assert_eq!(w.block_light_value(8, 64, 8), 15);
+        assert!(!w.spawner_mob_ok(candidate));
+
+        // Midnight (time = 18000): skylight_subtracted == 11, block_light_value == 4 -> spawner_mob_ok true when roll >= 4
+        w.time = 18000;
+        w.update_skylight_subtracted();
+        assert_eq!(w.skylight_subtracted, 11);
+        assert_eq!(w.block_light_value(8, 64, 8), 4);
+        let mut spawned_ok = false;
+        for _ in 0..100 {
+            if w.spawner_mob_ok(candidate) {
+                spawned_ok = true;
+                break;
+            }
+        }
+        assert!(spawned_ok, "surface hostile mob must be able to spawn at midnight under skylight 15");
+
+        // Collision check: placing another living entity at (8.5, 64.0, 8.5) blocks spawning at (8, 64, 8)
+        let _blocker = add_mob(&mut w, MobKind::Zombie, 8.5, 64.0, 8.5);
+        for _ in 0..20 {
+            assert!(!w.spawner_mob_ok(candidate));
+        }
+    }
+
+    #[test]
+    fn test_pathfinder_uses_target_feet_min_y_and_explosion_resistance() {
+        let mut w = world_with_floor();
+        let mob = add_mob(&mut w, MobKind::Zombie, 2.5, 64.0, 2.5);
+        // Player on ground has pos[1] = 65.62 (eye level) and bounding_box.min_y = 64.0.
+        let player = add_player(&mut w, "steve", 6.5, 64.0, 2.5);
+        let pts = w.path_target_points(mob, player, 16.0);
+        assert!(!pts.is_empty());
+        assert_eq!(pts.last().unwrap()[1], 64, "pathfinder must target feet Y=64, not head Y=65");
+
+        // Explosion resistance: stone (1) and dirt (3) are destroyed, obsidian (49) and water (9) survive.
+        w.set_block_id(8, 64, 8, 1);
+        w.set_block_id(9, 64, 8, 3);
+        w.set_block_id(8, 64, 9, 49);
+        w.set_block_id(9, 64, 9, 9);
+        w.blast(8.5, 64.5, 8.5, 4.0, None);
+        assert_eq!(w.get_block_id(8, 64, 8), 0);
+        assert_eq!(w.get_block_id(9, 64, 8), 0);
+        assert_eq!(w.get_block_id(8, 64, 9), 49, "obsidian must resist explosion");
+        assert_eq!(w.get_block_id(9, 64, 9), 9, "water must resist explosion");
+
+        // Raycast explosion attenuation: a 2-block-thick stone wall shields dirt behind it from a creeper blast (radius 3.0).
+        let mut w2 = world_with_floor();
+        for dy in 64..=66 {
+            for dz in 7..=9 {
+                w2.set_block_id(9, dy, dz, 1); // first stone layer
+                w2.set_block_id(10, dy, dz, 1); // second stone layer
+            }
+        }
+        w2.set_block_id(11, 65, 8, 3); // dirt behind the stone wall (distance 2.5 < radius 3.0)
+        w2.blast(8.5, 65.5, 8.5, 3.0, None);
+        assert_eq!(w2.get_block_id(9, 65, 8), 0, "front stone layer should be destroyed");
+        assert_eq!(w2.get_block_id(11, 65, 8), 3, "dirt behind stone wall must be shielded by ray attenuation");
+    }
+
+    #[test]
+    fn test_skeleton_arrow_height_and_mob_single_burn_damage() {
+        let mut w = world_with_floor();
+        let skel = add_mob(&mut w, MobKind::Skeleton, 2.5, 64.0, 2.5);
+        let player = add_player(&mut w, "steve", 6.5, 64.0, 2.5);
+        w.spawn_skeleton_arrow(skel, player);
+        let arrow = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .find(|&id| matches!(w.entities.get(id), Some(crate::entity::table::Entity::Arrow(_))))
+            .unwrap();
+        let ay = w.entities.get(arrow).unwrap().body().pos[1];
+        // Skeleton eye is ~64.0 + 1.62 = 65.62, arrow spawns at eye - 0.1 (~65.52), NOT ~66.92
+        assert!(ay < 66.0 && ay > 65.0, "skeleton arrow y={ay} must be near eye height");
+
+        // Burning zombie with both burn_ticks and body.fire only takes 1 damage at the 20-tick mark
+        let zom = add_mob(&mut w, MobKind::Zombie, 4.5, 64.0, 4.5);
+        if let Some(crate::entity::table::Entity::Mob(m)) = w.entities.get_mut(zom) {
+            m.burn_ticks = 20;
+            m.living.body.fire = 20;
+        }
+        w.tick_mob(zom, &[zom]);
+        let hp = match w.entities.get(zom).unwrap() {
+            crate::entity::table::Entity::Mob(m) => m.living.health,
+            _ => unreachable!(),
+        };
+        assert_eq!(hp, 19, "burning mob must take 1 damage (not 2) on the 20-tick fire boundary");
+    }
+
+    #[test]
+    fn test_mob_spawner_ticks_and_spawns() {
+        let mut w = world_with_floor();
+        w.spawn = [100, 64, 100]; // keep spawn protection away from (8, 64, 8)
+        let _p = add_player(&mut w, "steve", 2.5, 64.0, 2.5);
+        w.set_block_id(8, 65, 8, 52);
+        let mut sp = crate::world::tiles::MobSpawnerState::new("Zombie");
+        sp.delay = 0;
+        w.tiles.insert((8, 65, 8), crate::world::TileData::MobSpawner(sp));
+        w.tick_mob_spawners();
+        let zombies = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .filter(|&id| matches!(w.entities.get(id), Some(crate::entity::table::Entity::Mob(m)) if m.kind == MobKind::Zombie))
+            .count();
+        assert!(zombies >= 1, "MobSpawner must spawn Zombie when delay expires near player");
+    }
+
+    #[test]
+    fn test_fluids_doors_redstone_slabs_soul_sand_portal_and_cross_chunk_light() {
+        let mut w = world_with_floor();
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                if cx != 0 || cz != 0 {
+                    add_floor_chunk(&mut w, cx, cz);
+                }
+            }
+        }
+
+        // 1. Infinite water source: two water sources at (4,64,5) and (6,64,5) convert flowing (5,64,5) to source (id=9, meta=0)
+        w.set_block_id(4, 64, 5, 9);
+        w.set_block_meta(4, 64, 5, 0);
+        w.set_block_id(6, 64, 5, 9);
+        w.set_block_meta(6, 64, 5, 0);
+        w.set_block_id(5, 64, 5, 8);
+        w.set_block_meta(5, 64, 5, 1);
+        crate::block::ticks::block_fluid_tick(&mut w, 8, false, crate::block::pos::BlockPos::new(5, 64, 5));
+        assert_eq!(w.get_block_id(5, 64, 5), 9);
+        assert_eq!(w.get_block_meta(5, 64, 5), 0);
+
+        // 2. Un-fed flowing water at (10,64,10) dries up to air
+        w.set_block_id(10, 64, 10, 8);
+        w.set_block_meta(10, 64, 10, 3);
+        crate::block::ticks::block_fluid_tick(&mut w, 8, false, crate::block::pos::BlockPos::new(10, 64, 10));
+        assert_eq!(w.get_block_id(10, 64, 10), 0);
+
+        // 3. Iron door (71) + Lever (69): toggling lever opens and closes adjacent iron door
+        w.set_block_id(2, 64, 2, 71);
+        w.set_block_meta(2, 64, 2, 0);
+        w.set_block_id(2, 65, 2, 71);
+        w.set_block_meta(2, 65, 2, 8);
+        w.set_block_id(3, 64, 2, 69);
+        w.set_block_meta(3, 64, 2, 5);
+        assert!(w.toggle_lever(3, 64, 2));
+        assert_eq!(w.get_block_meta(2, 64, 2) & 4, 4, "powered lever must open adjacent iron door");
+        assert!(w.toggle_lever(3, 64, 2));
+        assert_eq!(w.get_block_meta(2, 64, 2) & 4, 0, "unpowered lever must close adjacent iron door");
+
+        // 3b. Redstone wire (55) signal propagation + Redstone torch (76/75) inversion + Pressure plate (70)
+        w.apply_set_notify(3, 64, 3, 55);
+        w.apply_set_notify(4, 64, 3, 55);
+        w.apply_set_notify(5, 64, 3, 1); // support block for redstone torch
+        w.apply_set_meta_notify(5, 65, 3, 76, 5); // lit redstone torch on top of (5,64,3)
+        assert_eq!(w.get_block_meta(3, 64, 3), 0);
+        // Toggle lever at (3,64,2) ON -> wire (3,64,3) becomes 15, wire (4,64,3) becomes 14, powering (5,64,3)
+        assert!(w.toggle_lever(3, 64, 2));
+        assert_eq!(w.get_block_meta(3, 64, 3), 15);
+        assert_eq!(w.get_block_meta(4, 64, 3), 14);
+        for _ in 0..3 {
+            w.tick_world();
+        }
+        assert_eq!(w.get_block_id(5, 65, 3), 75, "powered support block must invert redstone torch 76 -> 75");
+        // Toggle lever OFF -> wire drops to 0 and redstone torch relights 75 -> 76
+        assert!(w.toggle_lever(3, 64, 2));
+        assert_eq!(w.get_block_meta(3, 64, 3), 0);
+        for _ in 0..3 {
+            w.tick_world();
+        }
+        assert_eq!(w.get_block_id(5, 65, 3), 76, "unpowered support block must relight redstone torch 75 -> 76");
+
+        // Stone pressure plate (70) at (8, 64, 2): stepping on it sets meta=1, moving off resets meta=0 after 20 ticks
+        w.apply_set_notify(8, 64, 2, 70);
+        let p_id = add_player(&mut w, "plate_tester", 8.5, 64.0, 2.5);
+        w.move_body(p_id, 0.0, -0.01, 0.0);
+        assert_eq!(w.get_block_meta(8, 64, 2), 1, "stepping on stone pressure plate must depress it");
+        if let Some(e) = w.entities.get_mut(p_id) {
+            e.body_mut().set_position(0.5, 64.0, 0.5);
+        }
+        for _ in 0..25 {
+            w.tick_world();
+        }
+        assert_eq!(w.get_block_meta(8, 64, 2), 0, "pressure plate must release after entity leaves");
+
+        // 4. Collision boxes: single slab (44 -> max_y 0.5), fence (85 -> max_y 1.5), soul sand (88 -> max_y 0.875)
+        w.set_block_id(5, 64, 8, 44);
+        w.set_block_id(6, 64, 8, 85);
+        w.set_block_id(7, 64, 8, 88);
+        assert_eq!(w.block_collision_box(5, 64, 8, 44).max_y, 64.5);
+        assert_eq!(w.block_collision_box(6, 64, 8, 85).max_y, 65.5);
+        assert_eq!(w.block_collision_box(7, 64, 8, 88).max_y, 64.875);
+
+        // 5. Nether portal ignition on 4x5 obsidian frame
+        for dx in 0..4 {
+            w.set_block_id(2 + dx, 70, 12, 49);
+            w.set_block_id(2 + dx, 74, 12, 49);
+        }
+        for dy in 0..5 {
+            w.set_block_id(2, 70 + dy, 12, 49);
+            w.set_block_id(5, 70 + dy, 12, 49);
+        }
+        w.apply_set_notify(3, 71, 12, 51);
+        assert_eq!(w.get_block_id(3, 71, 12), 90);
+        assert_eq!(w.get_block_id(4, 73, 12), 90);
+
+        // 6. Cross-chunk blocklight propagation AND removal (including diagonal chunk (1,1)):
+        w.set_block_id(15, 64, 15, 50);
+        w.refresh_light();
+        assert_eq!(w.saved_light_value(1, 15, 64, 15), 14);
+        assert_eq!(w.saved_light_value(1, 16, 64, 15), 13, "blocklight must propagate across +X chunk border");
+        assert_eq!(w.saved_light_value(1, 16, 64, 16), 12, "blocklight must propagate across diagonal (1,1) chunk border");
+        // Removing the torch must clear blocklight in both (0,0), (1,0), and (1,1):
+        w.set_block_id(15, 64, 15, 0);
+        w.refresh_light();
+        assert_eq!(w.saved_light_value(1, 15, 64, 15), 0, "broken torch cell must return to 0 blocklight");
+        assert_eq!(w.saved_light_value(1, 16, 64, 15), 0, "neighbor chunk (1,0) must clear stale blocklight");
+        assert_eq!(w.saved_light_value(1, 16, 64, 16), 0, "diagonal chunk (1,1) must clear stale blocklight");
+    }
+

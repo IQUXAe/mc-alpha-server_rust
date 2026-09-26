@@ -415,6 +415,7 @@ pub struct DecodedChunk {
     pub furnaces: Vec<((i32, i32, i32), crate::tile_entity::furnace::FurnaceState)>,
     pub chests: Vec<((i32, i32, i32), crate::tile_entity::chest::ChestState)>,
     pub signs: Vec<((i32, i32, i32), crate::tile_entity::sign::SignState)>,
+    pub spawners: Vec<((i32, i32, i32), crate::world::tiles::MobSpawnerState)>,
     pub items: Vec<PendingItem>,
     pub animals: Vec<PendingCreature>,
     pub monsters: Vec<PendingCreature>,
@@ -465,6 +466,11 @@ pub(crate) fn tile_nbt(x: i32, y: i32, z: i32, tile: &TileData) -> NbtCompound {
                 let text = String::from_utf8_lossy(&line[..len.min(15)]).to_string();
                 m.insert(format!("Text{}", i + 1), NbtTag::String(text));
             }
+        }
+        TileData::MobSpawner(s) => {
+            m.insert("id".to_string(), NbtTag::String("MobSpawner".to_string()));
+            m.insert("EntityId".to_string(), NbtTag::String(s.entity_id_str().to_string()));
+            m.insert("Delay".to_string(), NbtTag::Short(s.delay));
         }
     }
     NbtCompound { map: m }
@@ -520,6 +526,7 @@ pub fn decode_chunk_blob(bytes: &[u8], cx: i32, cz: i32) -> Option<DecodedChunk>
     let mut furnaces = Vec::new();
     let mut chests = Vec::new();
     let mut signs = Vec::new();
+    let mut spawners = Vec::new();
     if let Some(NbtTag::List(l)) = level.map.get("TileEntities") {
         for elem in &l.elements {
             let NbtTag::Compound(c) = elem else { continue };
@@ -545,6 +552,16 @@ pub fn decode_chunk_blob(bytes: &[u8], cx: i32, cz: i32) -> Option<DecodedChunk>
                         crate::tile_entity::sign::sign_set_line(&mut s, i as i32, &text);
                     }
                     signs.push(((x, y, z), s));
+                }
+                "MobSpawner" => {
+                    let entity_id = get_string(&c.map, "EntityId");
+                    let mut s = crate::world::tiles::MobSpawnerState::new(if entity_id.is_empty() {
+                        "Pig"
+                    } else {
+                        &entity_id
+                    });
+                    s.delay = get_short(&c.map, "Delay");
+                    spawners.push(((x, y, z), s));
                 }
                 _ => {}
             }
@@ -627,6 +644,7 @@ pub fn decode_chunk_blob(bytes: &[u8], cx: i32, cz: i32) -> Option<DecodedChunk>
         furnaces,
         chests,
         signs,
+        spawners,
         items,
         animals,
         monsters,
@@ -874,6 +892,9 @@ impl World {
         for ((x, y, z), s) in d.signs {
             self.tiles.insert((x, y, z), TileData::Sign(s));
         }
+        for ((x, y, z), s) in d.spawners {
+            self.tiles.insert((x, y, z), TileData::MobSpawner(s));
+        }
         self.restore_chunk_entities(cx, cz);
         true
     }
@@ -900,6 +921,7 @@ impl World {
         self.seed = seed;
         self.spawn = spawn;
         self.time = time;
+        self.update_skylight_subtracted();
         self.reseed();
         true
     }

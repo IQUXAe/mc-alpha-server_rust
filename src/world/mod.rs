@@ -121,6 +121,8 @@ pub fn material_of(material_id: u8) -> Material {
 pub struct World {
     pub seed: i64,
     pub time: i64,
+    /// Current skylight subtraction (0..=11, mirrors `World.skylightSubtracted`).
+    pub skylight_subtracted: u8,
     pub spawn: [i32; 3],
     /// Level name from `level-name` (used for `level.dat` LevelName).
     pub level_name: String,
@@ -155,6 +157,10 @@ pub struct World {
     /// tree growth via the world accessor); the server tick drains these
     /// and fans out block changes to chunk-loaded players.
     pub block_updates: Vec<[i32; 3]>,
+    /// Tile entities changed since the last server tick (e.g. furnace smelt
+    /// completion or burn change); drained by the server tick to broadcast
+    /// `Packet59ComplexEntity`.
+    pub tile_updates: Vec<[i32; 3]>,
     /// Full pickups since the last server tick as `(item, player)` pairs
     /// (mirrors the collect packet in `EntityPlayerMP.onUpdate`); the
     /// server tick drains these into `Packet22Collect` fan-out plus an
@@ -225,6 +231,7 @@ impl World {
         World {
             seed,
             time: 0,
+            skylight_subtracted: 0,
             spawn: [0, 64, 0],
             level_name: "world".to_string(),
             difficulty: 2,
@@ -237,6 +244,7 @@ impl World {
             unloaded: HashMap::new(),
             tiles: WorldTiles::new(),
             block_updates: Vec::new(),
+            tile_updates: Vec::new(),
             item_pickups: Vec::new(),
             death_events: Vec::new(),
             status_events: Vec::new(),
@@ -434,12 +442,143 @@ impl World {
         }
     }
 
-    /// Regenerate skylight once per dirty chunk. Runs at the end of the
-    /// world tick so chunk packets go out with fresh light.
+    /// Regenerate skylight once per dirty chunk and propagate light across
+    /// loaded chunk borders. Runs at the end of the world tick so chunk
+    /// packets go out with fresh light.
     pub(crate) fn refresh_light(&mut self) {
-        for (cx, cz) in std::mem::take(&mut self.light_dirty) {
+        let dirty = std::mem::take(&mut self.light_dirty);
+        if dirty.is_empty() {
+            return;
+        }
+        let mut regen_set = dirty.clone();
+        for &(cx, cz) in &dirty {
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    if self.chunks.contains_key(&(cx + dx, cz + dz)) {
+                        regen_set.insert((cx + dx, cz + dz));
+                    }
+                }
+            }
+        }
+        for &(cx, cz) in &regen_set {
             if let Some(c) = self.chunks.get_mut(&(cx, cz)) {
                 c.generate_skylight_map();
+            }
+        }
+        self.propagate_cross_chunk_light(&regen_set);
+    }
+
+    /// Propagate sky (0) and block (1) light across shared boundaries of
+    /// `chunks_to_check` and their loaded neighbors.
+    pub(crate) fn propagate_cross_chunk_light(&mut self, chunks_to_check: &HashSet<(i32, i32)>) {
+        use std::collections::VecDeque;
+        const OFFSETS: [(i32, i32, i32); 6] = [
+            (-1, 0, 0),
+            (1, 0, 0),
+            (0, -1, 0),
+            (0, 1, 0),
+            (0, 0, -1),
+            (0, 0, 1),
+        ];
+        for kind in [0u8, 1u8] {
+            let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::new();
+            for &(cx, cz) in chunks_to_check {
+                if !self.chunks.contains_key(&(cx, cz)) {
+                    continue;
+                }
+                if self.chunks.contains_key(&(cx + 1, cz)) {
+                    let xa = cx * 16 + 15;
+                    let xb = xa + 1;
+                    for z in (cz * 16)..(cz * 16 + 16) {
+                        for y in 0..WORLD_HEIGHT {
+                            let la = self.saved_light_value(kind, xa, y, z) as i32;
+                            let lb = self.saved_light_value(kind, xb, y, z) as i32;
+                            if la > lb + 1 {
+                                queue.push_back((xa, y, z));
+                            } else if lb > la + 1 {
+                                queue.push_back((xb, y, z));
+                            }
+                        }
+                    }
+                }
+                if self.chunks.contains_key(&(cx - 1, cz))
+                    && !chunks_to_check.contains(&(cx - 1, cz))
+                {
+                    let xa = cx * 16 - 1;
+                    let xb = xa + 1;
+                    for z in (cz * 16)..(cz * 16 + 16) {
+                        for y in 0..WORLD_HEIGHT {
+                            let la = self.saved_light_value(kind, xa, y, z) as i32;
+                            let lb = self.saved_light_value(kind, xb, y, z) as i32;
+                            if la > lb + 1 {
+                                queue.push_back((xa, y, z));
+                            } else if lb > la + 1 {
+                                queue.push_back((xb, y, z));
+                            }
+                        }
+                    }
+                }
+                if self.chunks.contains_key(&(cx, cz + 1)) {
+                    let za = cz * 16 + 15;
+                    let zb = za + 1;
+                    for x in (cx * 16)..(cx * 16 + 16) {
+                        for y in 0..WORLD_HEIGHT {
+                            let la = self.saved_light_value(kind, x, y, za) as i32;
+                            let lb = self.saved_light_value(kind, x, y, zb) as i32;
+                            if la > lb + 1 {
+                                queue.push_back((x, y, za));
+                            } else if lb > la + 1 {
+                                queue.push_back((x, y, zb));
+                            }
+                        }
+                    }
+                }
+                if self.chunks.contains_key(&(cx, cz - 1))
+                    && !chunks_to_check.contains(&(cx, cz - 1))
+                {
+                    let za = cz * 16 - 1;
+                    let zb = za + 1;
+                    for x in (cx * 16)..(cx * 16 + 16) {
+                        for y in 0..WORLD_HEIGHT {
+                            let la = self.saved_light_value(kind, x, y, za) as i32;
+                            let lb = self.saved_light_value(kind, x, y, zb) as i32;
+                            if la > lb + 1 {
+                                queue.push_back((x, y, za));
+                            } else if lb > la + 1 {
+                                queue.push_back((x, y, zb));
+                            }
+                        }
+                    }
+                }
+            }
+            while let Some((x, y, z)) = queue.pop_front() {
+                let cur = self.saved_light_value(kind, x, y, z) as i32;
+                if cur <= 1 {
+                    continue;
+                }
+                for (dx, dy, dz) in OFFSETS {
+                    let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+                    if !(0..WORLD_HEIGHT).contains(&ny) {
+                        continue;
+                    }
+                    let (ncx, ncz, lx, lz) = Self::chunk_of(nx, nz);
+                    if !self.chunks.contains_key(&(ncx, ncz)) {
+                        continue;
+                    }
+                    let id = self.get_block_id(nx, ny, nz);
+                    let op = block_properties_get(id as u32).light_opacity;
+                    if op >= 15 {
+                        continue;
+                    }
+                    let step = op.max(1);
+                    let new_light = cur - step;
+                    if new_light > self.saved_light_value(kind, nx, ny, nz) as i32 {
+                        if let Some(c) = self.chunks.get_mut(&(ncx, ncz)) {
+                            c.set_light_value(kind as i32, lx, ny, lz, new_light as u8);
+                        }
+                        queue.push_back((nx, ny, nz));
+                    }
+                }
             }
         }
     }
@@ -460,6 +599,40 @@ impl World {
         out.sort_unstable();
         out.dedup();
         out
+    }
+
+    /// Drain queued tile entity changes, deduplicated.
+    pub(crate) fn take_tile_updates(&mut self) -> Vec<[i32; 3]> {
+        let mut out = std::mem::take(&mut self.tile_updates);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Calculate skylight subtracted for `self.time` (`0..=11`), mirroring
+    /// `World::calculateSkylightSubtracted(1.0F)` and `WorldProvider::func_4089_a`.
+    pub fn calculate_skylight_subtracted(&self) -> u8 {
+        let t = self.time.rem_euclid(24000) as f32;
+        let mut angle = (t + 1.0) / 24000.0 - 0.25;
+        if angle < 0.0 {
+            angle += 1.0;
+        }
+        if angle > 1.0 {
+            angle -= 1.0;
+        }
+        let prev = angle;
+        angle = 1.0 - (((angle as f64 * std::f64::consts::PI).cos() + 1.0) / 2.0) as f32;
+        angle = prev + (angle - prev) / 3.0;
+        let mut sub = 1.0
+            - (crate::math_helper::cos(angle * std::f32::consts::PI * 2.0) * 2.0 + 0.5);
+        sub = sub.clamp(0.0, 1.0);
+        (sub * 11.0) as u8
+    }
+
+    /// Update `self.skylight_subtracted` from `self.time` (mirrors
+    /// `World::calculateInitialSkylight` and the per-tick update in `World::tick`).
+    pub fn update_skylight_subtracted(&mut self) {
+        self.skylight_subtracted = self.calculate_skylight_subtracted();
     }
 
     pub fn material_at(&self, x: i32, y: i32, z: i32) -> Material {
@@ -515,17 +688,68 @@ impl World {
             .unwrap_or(0)
     }
 
-    /// Combined light (mirrors `World::getBlockLightValue`).
+    /// Combined light (mirrors `World::getBlockLightValue` with `skylightSubtracted`).
     pub fn block_light_value(&self, x: i32, y: i32, z: i32) -> u8 {
-        Self::block_light_in(&self.chunks, x, y, z)
+        Self::block_light_sub_in(&self.chunks, self.skylight_subtracted, x, y, z)
     }
 
-    /// Chunk-map half of [`World::block_light_value`] (see `block_id_in`).
+    /// Chunk-map half of [`World::block_light_value`] without skylight subtraction.
+    #[allow(dead_code)]
     pub(crate) fn block_light_in(chunks: &HashMap<(i32, i32), Chunk>, x: i32, y: i32, z: i32) -> u8 {
+        Self::block_light_sub_in(chunks, 0, x, y, z)
+    }
+
+    /// Chunk-map half of [`World::block_light_value`] with `sky_sub` subtracted from sky light.
+    pub(crate) fn block_light_sub_in(
+        chunks: &HashMap<(i32, i32), Chunk>,
+        sky_sub: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> u8 {
         if !(0..WORLD_HEIGHT).contains(&y) {
             return 0;
         }
-        Self::saved_light_in(chunks, 0, x, y, z).max(Self::saved_light_in(chunks, 1, x, y, z))
+        Self::saved_light_in(chunks, 0, x, y, z)
+            .saturating_sub(sky_sub)
+            .max(Self::saved_light_in(chunks, 1, x, y, z))
+    }
+
+    /// Compute the collision bounding box for block `id` at `(x, y, z)`,
+    /// handling metadata-dependent door rotation (`BlockDoor.func_273_b`).
+    pub(crate) fn block_collision_box(&self, x: i32, y: i32, z: i32, id: u8) -> AxisAlignedBB {
+        if id == 64 || id == 71 {
+            let meta = self.get_block_meta(x, y, z) as i32;
+            let state = if (meta & 4) == 0 {
+                (meta - 1) & 3
+            } else {
+                meta & 3
+            };
+            let t = 3.0 / 16.0;
+            let (min_x, min_z, max_x, max_z) = match state {
+                0 => (0.0, 0.0, 1.0, t),
+                1 => (1.0 - t, 0.0, 1.0, 1.0),
+                2 => (0.0, 1.0 - t, 1.0, 1.0),
+                _ => (0.0, 0.0, t, 1.0),
+            };
+            return AxisAlignedBB::get_bounding_box(
+                x as f64 + min_x,
+                y as f64,
+                z as f64 + min_z,
+                x as f64 + max_x,
+                y as f64 + 1.0,
+                z as f64 + max_z,
+            );
+        }
+        let props = block_properties_get(id as u32);
+        AxisAlignedBB::get_bounding_box(
+            x as f64 + props.min_x as f64,
+            y as f64 + props.min_y as f64,
+            z as f64 + props.min_z as f64,
+            x as f64 + props.max_x as f64,
+            y as f64 + props.max_y as f64,
+            z as f64 + props.max_z as f64,
+        )
     }
 
     /// Collision boxes of blocks overlapping `mask` (mirrors
@@ -563,14 +787,7 @@ impl World {
                     if !has_collision_box(props.block_type) || !has_collision_id(id) {
                         continue;
                     }
-                    let bb = AxisAlignedBB::get_bounding_box(
-                        x as f64 + props.min_x as f64,
-                        y as f64 + props.min_y as f64,
-                        z as f64 + props.min_z as f64,
-                        x as f64 + props.max_x as f64,
-                        y as f64 + props.max_y as f64,
-                        z as f64 + props.max_z as f64,
-                    );
+                    let bb = self.block_collision_box(x, y, z, id);
                     if mask.intersects_with(&bb) {
                         out.push(bb);
                     }

@@ -92,15 +92,30 @@ impl World {
     }
 
     /// Removal hook (mirrors `Block.onBlockRemoval` for containers): scatter
-    /// chest/furnace contents, drop the tile row. Safe to call when no tile
-    /// exists (scatter is a no-op then).
+    /// chest/furnace contents, drop the tile row, and eject any jukebox record.
     fn block_removed(&mut self, x: i32, y: i32, z: i32, old: u8) {
         if matches!(old, 54 | 61 | 62 | 63 | 68) {
             self.scatter_container_tile(x, y, z);
             self.tiles.remove(&(x, y, z));
+        } else if old == 84 {
+            self.eject_jukebox_record(x, y, z);
+            self.tiles.remove(&(x, y, z));
         } else {
             self.tiles.remove(&(x, y, z));
         }
+    }
+
+    /// Eject a record from a jukebox at `(x, y, z)` if `meta > 0`
+    /// (`BlockJukeBox.ejectRecord`).
+    pub fn eject_jukebox_record(&mut self, x: i32, y: i32, z: i32) -> bool {
+        let meta = self.get_block_meta(x, y, z);
+        if meta == 0 {
+            return false;
+        }
+        self.set_block_meta(x, y, z, 0);
+        let item_id = 2255 + meta as i32;
+        block_base_drop(&mut *self, DropSpec::new(item_id, 1, 0), BlockPos::new(x, y, z), 1.0);
+        true
     }
 
     /// Neighbor fan-out (mirrors `notifyBlocksOfNeighborChange`).
@@ -116,6 +131,11 @@ impl World {
     /// container tile creation).
     fn block_added(&mut self, x: i32, y: i32, z: i32, bid: u8) {
         match bid {
+            52 => {
+                self.tiles.entry((x, y, z)).or_insert_with(|| {
+                    TileData::MobSpawner(crate::world::tiles::MobSpawnerState::new("Pig"))
+                });
+            }
             54 => {
                 self.tiles
                     .entry((x, y, z))
@@ -152,6 +172,22 @@ impl World {
             59 => block_crops_added(&mut *self, bid, BlockPos::new(x, y, z)),
             60 => block_soil_added(&mut *self, bid, BlockPos::new(x, y, z)),
             51 => block_fire_added(&mut *self, bid, 10, BlockPos::new(x, y, z)),
+            46 if self.is_block_powered(x, y, z) => {
+                self.ignite_at(BlockPos::new(x, y, z), 80);
+                self.apply_set_notify(x, y, z, 0);
+            }
+            55 => {
+                self.recalculate_redstone_around(x, y, z);
+                self.notify_neighbors_of(x, y, z);
+            }
+            75 | 76 => {
+                if self.get_block_meta(x, y, z) == 0 {
+                    block_torch_added(&mut *self, bid, BlockPos::new(x, y, z));
+                }
+                self.redstone_torch_check(x, y, z, bid);
+                self.recalculate_redstone_around(x, y, z);
+                self.notify_neighbors_of(x, y, z);
+            }
             _ => {}
         }
     }
@@ -196,6 +232,32 @@ impl World {
                     BlockPos::new(x, y, z),
                 );
             }
+            75 | 76 => {
+                block_torch_neighbor(
+                    &mut *self,
+                    DropSpec::new(76, 1, 0),
+                    BlockPos::new(x, y, z),
+                );
+                if self.get_block_id(x, y, z) == bid {
+                    self.redstone_torch_check(x, y, z, bid);
+                }
+            }
+            55 => {
+                if !self.attach_at(BlockPos::new(x, y - 1, z)) {
+                    self.drop_block_for(55, 0, x, y, z);
+                    self.apply_set_notify(x, y, z, 0);
+                    self.recalculate_redstone_around(x, y, z);
+                } else {
+                    self.recalculate_redstone_around(x, y, z);
+                }
+            }
+            70 | 72 => {
+                if !self.attach_at(BlockPos::new(x, y - 1, z)) {
+                    self.drop_block_for(bid, 0, x, y, z);
+                    self.apply_set_notify(x, y, z, 0);
+                    self.recalculate_redstone_around(x, y, z);
+                }
+            }
             78 => self.snow_neighbor(x, y, z),
             81 => {
                 block_cactus_neighbor(
@@ -229,11 +291,379 @@ impl World {
             59 => block_crops_neighbor(&mut *self, Self::crop_ids(bid), BlockPos::new(x, y, z)),
             60 => block_soil_neighbor(&mut *self, bid, BlockPos::new(x, y, z)),
             51 => block_fire_neighbor(&mut *self, BlockPos::new(x, y, z)),
+            46 if self.is_block_powered(x, y, z) => {
+                self.ignite_at(BlockPos::new(x, y, z), 80);
+                self.apply_set_notify(x, y, z, 0);
+            }
+            64 | 71 => self.door_neighbor(x, y, z, bid),
+            69 | 77 => self.lever_or_button_neighbor(x, y, z, bid),
             63 | 68 => {}
             _ => {}
         }
         if bid == 63 || bid == 68 {
             self.sign_neighbor(x, y, z, bid);
+        }
+    }
+
+    /// True if `(x, y, z)` receives direct or indirect redstone power from
+    /// an adjacent redstone torch (`76`), lever (`69` with bit 8), button
+    /// (`77` with bit 8), pressure plate (`70 | 72` with meta > 0), or
+    /// powered redstone wire (`55` with meta > 0).
+    pub fn is_block_powered(&self, x: i32, y: i32, z: i32) -> bool {
+        const OFF: [(i32, i32, i32); 6] = [
+            (-1, 0, 0),
+            (1, 0, 0),
+            (0, -1, 0),
+            (0, 1, 0),
+            (0, 0, -1),
+            (0, 0, 1),
+        ];
+        for (dx, dy, dz) in OFF {
+            let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+            let nid = self.get_block_id(nx, ny, nz);
+            let nmeta = self.get_block_meta(nx, ny, nz);
+            match nid {
+                76 => return true,
+                69 | 77 if (nmeta & 8) != 0 => return true,
+                70 | 72 | 55 if nmeta > 0 => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Check whether the support block of a redstone torch at `(x, y, z)` is receiving power.
+    pub fn is_redstone_torch_input_powered(&self, x: i32, y: i32, z: i32) -> bool {
+        let meta = self.get_block_meta(x, y, z);
+        let (sx, sy, sz) = match meta {
+            1 => (x - 1, y, z),
+            2 => (x + 1, y, z),
+            3 => (x, y, z - 1),
+            4 => (x, y, z + 1),
+            _ => (x, y - 1, z),
+        };
+        const OFF: [(i32, i32, i32); 6] = [
+            (-1, 0, 0),
+            (1, 0, 0),
+            (0, -1, 0),
+            (0, 1, 0),
+            (0, 0, -1),
+            (0, 0, 1),
+        ];
+        for (dx, dy, dz) in OFF {
+            let (nx, ny, nz) = (sx + dx, sy + dy, sz + dz);
+            if nx == x && ny == y && nz == z {
+                continue;
+            }
+            let nid = self.get_block_id(nx, ny, nz);
+            let nmeta = self.get_block_meta(nx, ny, nz);
+            match nid {
+                76 if dy == -1 => return true,
+                69 | 77 if (nmeta & 8) != 0 => return true,
+                70 | 72 if nmeta > 0 && dy == 1 => return true,
+                55 if nmeta > 0 => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn redstone_torch_check(&mut self, x: i32, y: i32, z: i32, bid: u8) {
+        let powered = self.is_redstone_torch_input_powered(x, y, z);
+        if (bid == 76 && powered) || (bid == 75 && !powered) {
+            self.schedule_block_update(x, y, z, bid, 2);
+        }
+    }
+
+    /// Recompute redstone wire (`55`) signal levels in the connected component around `(cx, cy, cz)`.
+    pub fn recalculate_redstone_around(&mut self, cx: i32, cy: i32, cz: i32) {
+        use std::collections::{BTreeMap, VecDeque};
+        let mut wires: BTreeMap<(i32, i32, i32), u8> = BTreeMap::new();
+        let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::new();
+
+        for dx in -2..=2 {
+            for dy in -2..=2 {
+                for dz in -2..=2 {
+                    let (wx, wy, wz) = (cx + dx, cy + dy, cz + dz);
+                    if self.get_block_id(wx, wy, wz) == 55 && !wires.contains_key(&(wx, wy, wz)) {
+                        wires.insert((wx, wy, wz), 0);
+                        queue.push_back((wx, wy, wz));
+                    }
+                }
+            }
+        }
+        while let Some((wx, wy, wz)) = queue.pop_front() {
+            if wires.len() >= 256 {
+                break;
+            }
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                for dy in -1..=1 {
+                    let p = (wx + dx, wy + dy, wz + dz);
+                    if self.get_block_id(p.0, p.1, p.2) == 55 && !wires.contains_key(&p) {
+                        wires.insert(p, 0);
+                        queue.push_back(p);
+                    }
+                }
+            }
+        }
+        if wires.is_empty() {
+            return;
+        }
+        // Seed direct power (15) from active non-wire sources adjacent to each wire cell.
+        let mut prop_q: VecDeque<(i32, i32, i32)> = VecDeque::new();
+        let wire_coords: Vec<(i32, i32, i32)> = wires.keys().copied().collect();
+        for &(wx, wy, wz) in &wire_coords {
+            let mut direct = false;
+            for (dx, dy, dz) in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
+                let (nx, ny, nz) = (wx + dx, wy + dy, wz + dz);
+                let nid = self.get_block_id(nx, ny, nz);
+                let nmeta = self.get_block_meta(nx, ny, nz);
+                match nid {
+                    76 => {
+                        direct = true;
+                        break;
+                    }
+                    69 | 77 if (nmeta & 8) != 0 => {
+                        direct = true;
+                        break;
+                    }
+                    70 | 72 if nmeta > 0 => {
+                        direct = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if direct {
+                wires.insert((wx, wy, wz), 15);
+                prop_q.push_back((wx, wy, wz));
+            }
+        }
+        while let Some((wx, wy, wz)) = prop_q.pop_front() {
+            let cur = *wires.get(&(wx, wy, wz)).unwrap_or(&0);
+            if cur <= 1 {
+                continue;
+            }
+            let next_lvl = cur - 1;
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                for dy in -1..=1 {
+                    let p = (wx + dx, wy + dy, wz + dz);
+                    if let Some(slot) = wires.get_mut(&p) {
+                        if next_lvl > *slot {
+                            *slot = next_lvl;
+                            prop_q.push_back(p);
+                        }
+                    }
+                }
+            }
+        }
+        let mut changed: Vec<(i32, i32, i32)> = Vec::new();
+        for ((wx, wy, wz), new_meta) in wires {
+            if self.get_block_meta(wx, wy, wz) != new_meta {
+                self.set_block_meta(wx, wy, wz, new_meta);
+                changed.push((wx, wy, wz));
+            }
+        }
+        for (wx, wy, wz) in changed {
+            for (dx, dy, dz) in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
+                let (nx, ny, nz) = (wx + dx, wy + dy, wz + dz);
+                let nid = self.get_block_id(nx, ny, nz);
+                if nid != 55 && nid != 0 {
+                    self.neighbor_changed(nx, ny, nz);
+                    for (tx, ty, tz) in [(-1, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
+                        let (rx, ry, rz) = (nx + tx, ny + ty, nz + tz);
+                        let rid = self.get_block_id(rx, ry, rz);
+                        if matches!(rid, 75 | 76 | 64 | 71 | 46) {
+                            self.neighbor_changed(rx, ry, rz);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Update stone (`70`) or wooden (`72`) pressure plate state based on colliding entities.
+    pub fn update_pressure_plate(&mut self, x: i32, y: i32, z: i32, bid: u8) {
+        if self.get_block_id(x, y, z) != bid {
+            return;
+        }
+        let old_meta = self.get_block_meta(x, y, z);
+        let box_min = [x as f64 + 0.125, y as f64, z as f64 + 0.125];
+        let box_max = [x as f64 + 0.875, y as f64 + 0.25, z as f64 + 0.875];
+        let mut pressed = false;
+        for oid in self.entities.alive_ids() {
+            if let Some(e) = self.entities.get(oid) {
+                if e.body().dead {
+                    continue;
+                }
+                if bid == 70
+                    && !matches!(
+                        e,
+                        crate::entity::table::Entity::Mob(_)
+                            | crate::entity::table::Entity::Animal(_)
+                            | crate::entity::table::Entity::Player(_)
+                    )
+                {
+                    continue;
+                }
+                let bb = e.body().bounding_box;
+                if bb.max_x > box_min[0]
+                    && bb.min_x < box_max[0]
+                    && bb.max_y >= box_min[1]
+                    && bb.min_y <= box_max[1]
+                    && bb.max_z > box_min[2]
+                    && bb.min_z < box_max[2]
+                {
+                    pressed = true;
+                    break;
+                }
+            }
+        }
+        let new_meta = if pressed { 1 } else { 0 };
+        if new_meta != old_meta {
+            self.set_block_meta(x, y, z, new_meta);
+            self.recalculate_redstone_around(x, y, z);
+            self.notify_neighbors_of(x, y, z);
+            self.notify_neighbors_of(x, y - 1, z);
+        }
+        if pressed {
+            self.schedule_block_update(x, y, z, bid, 20);
+        }
+    }
+
+    /// Toggle a wooden door (`64`) open/closed (`BlockDoor.blockActivated`).
+    pub fn toggle_door(&mut self, x: i32, y: i32, z: i32) -> bool {
+        let bid = self.get_block_id(x, y, z);
+        if bid != 64 {
+            return bid == 71;
+        }
+        let meta = self.get_block_meta(x, y, z);
+        if (meta & 8) != 0 {
+            if self.get_block_id(x, y - 1, z) == bid {
+                return self.toggle_door(x, y - 1, z);
+            }
+            return true;
+        }
+        let toggled = meta ^ 4;
+        self.set_block_meta(x, y, z, toggled);
+        if self.get_block_id(x, y + 1, z) == bid {
+            self.set_block_meta(x, y + 1, z, toggled | 8);
+        }
+        true
+    }
+
+    /// Set a wooden or iron door (`64 | 71`) open state (`BlockDoor.func_272_a`).
+    pub fn set_door_open(&mut self, x: i32, y: i32, z: i32, open: bool) {
+        let bid = self.get_block_id(x, y, z);
+        if bid != 64 && bid != 71 {
+            return;
+        }
+        let meta = self.get_block_meta(x, y, z);
+        if (meta & 8) != 0 {
+            if self.get_block_id(x, y - 1, z) == bid {
+                self.set_door_open(x, y - 1, z, open);
+            }
+            return;
+        }
+        let is_open = (meta & 4) != 0;
+        if is_open != open {
+            let next = meta ^ 4;
+            self.set_block_meta(x, y, z, next);
+            if self.get_block_id(x, y + 1, z) == bid {
+                self.set_block_meta(x, y + 1, z, next | 8);
+            }
+        }
+    }
+
+    fn door_neighbor(&mut self, x: i32, y: i32, z: i32, bid: u8) {
+        let meta = self.get_block_meta(x, y, z);
+        if (meta & 8) != 0 {
+            if self.get_block_id(x, y - 1, z) != bid {
+                self.apply_set_notify(x, y, z, 0);
+            } else {
+                self.door_neighbor(x, y - 1, z, bid);
+            }
+            return;
+        }
+        let mut broken = false;
+        if self.get_block_id(x, y + 1, z) != bid {
+            self.apply_set_notify(x, y, z, 0);
+            broken = true;
+        }
+        if !self.attach_at(BlockPos::new(x, y - 1, z)) {
+            self.apply_set_notify(x, y, z, 0);
+            broken = true;
+            if self.get_block_id(x, y + 1, z) == bid {
+                self.apply_set_notify(x, y + 1, z, 0);
+            }
+        }
+        if broken {
+            self.drop_block_for(bid, meta, x, y, z);
+        } else {
+            let powered = self.is_block_powered(x, y, z) || self.is_block_powered(x, y + 1, z);
+            self.set_door_open(x, y, z, powered);
+        }
+    }
+
+    /// Toggle a lever (`69`) and notify its neighbors + support block (`BlockLever.blockActivated`).
+    pub fn toggle_lever(&mut self, x: i32, y: i32, z: i32) -> bool {
+        if self.get_block_id(x, y, z) != 69 {
+            return false;
+        }
+        let meta = self.get_block_meta(x, y, z);
+        let dir = meta & 7;
+        let power = 8 - (meta & 8);
+        self.set_block_meta(x, y, z, dir | power);
+        self.recalculate_redstone_around(x, y, z);
+        self.notify_neighbors_of(x, y, z);
+        self.notify_lever_support(x, y, z, dir);
+        true
+    }
+
+    /// Press a stone button (`77`) (`BlockButton.blockActivated`).
+    pub fn press_button(&mut self, x: i32, y: i32, z: i32) -> bool {
+        if self.get_block_id(x, y, z) != 77 {
+            return false;
+        }
+        let meta = self.get_block_meta(x, y, z);
+        if (meta & 8) != 0 {
+            return true;
+        }
+        let dir = meta & 7;
+        self.set_block_meta(x, y, z, dir | 8);
+        self.recalculate_redstone_around(x, y, z);
+        self.notify_neighbors_of(x, y, z);
+        self.notify_lever_support(x, y, z, dir);
+        self.schedule_block_update(x, y, z, 77, 20);
+        true
+    }
+
+    fn notify_lever_support(&mut self, x: i32, y: i32, z: i32, dir: u8) {
+        let (sx, sy, sz) = match dir {
+            1 => (x - 1, y, z),
+            2 => (x + 1, y, z),
+            3 => (x, y, z - 1),
+            4 => (x, y, z + 1),
+            _ => (x, y - 1, z),
+        };
+        self.notify_neighbors_of(sx, sy, sz);
+    }
+
+    fn lever_or_button_neighbor(&mut self, x: i32, y: i32, z: i32, bid: u8) {
+        let meta = self.get_block_meta(x, y, z);
+        let dir = meta & 7;
+        let supported = match dir {
+            1 => self.attach_at(BlockPos::new(x - 1, y, z)),
+            2 => self.attach_at(BlockPos::new(x + 1, y, z)),
+            3 => self.attach_at(BlockPos::new(x, y, z - 1)),
+            4 => self.attach_at(BlockPos::new(x, y, z + 1)),
+            5 | 6 if bid == 69 => self.attach_at(BlockPos::new(x, y - 1, z)),
+            _ => false,
+        };
+        if !supported {
+            self.drop_block_for(bid, meta, x, y, z);
+            self.apply_set_notify(x, y, z, 0);
+            self.recalculate_redstone_around(x, y, z);
         }
     }
 
@@ -376,7 +806,7 @@ impl World {
                     }
                 }
             }
-            TileData::Sign(_) => {}
+            TileData::Sign(_) | TileData::MobSpawner(_) => {}
         }
         self.tiles.remove(&(x, y, z));
     }
@@ -480,9 +910,36 @@ impl World {
                     self.drop_block_for(80, 0, x, y, z);
                     self.apply_set_notify(x, y, z, 0);
                 }
+            70 | 72 => {
+                if self.get_block_meta(x, y, z) > 0 {
+                    self.update_pressure_plate(x, y, z, bid);
+                }
+            }
             74 => {
                 // Glowing redstone cools back to idle (Java BlockRedstoneOre).
                 self.apply_set_notify(x, y, z, 73);
+            }
+            75 | 76 => {
+                let powered = self.is_redstone_torch_input_powered(x, y, z);
+                let meta = self.get_block_meta(x, y, z);
+                if bid == 76 && powered {
+                    self.apply_set_meta_notify(x, y, z, 75, meta);
+                    self.recalculate_redstone_around(x, y, z);
+                } else if bid == 75 && !powered {
+                    self.apply_set_meta_notify(x, y, z, 76, meta);
+                    self.recalculate_redstone_around(x, y, z);
+                }
+            }
+            77 => {
+                // Stone button pops back out after 20 ticks (Java BlockButton.updateTick).
+                let meta = self.get_block_meta(x, y, z);
+                if (meta & 8) != 0 {
+                    let dir = meta & 7;
+                    self.set_block_meta(x, y, z, dir);
+                    self.recalculate_redstone_around(x, y, z);
+                    self.notify_neighbors_of(x, y, z);
+                    self.notify_lever_support(x, y, z, dir);
+                }
             }
             _ => {}
         }

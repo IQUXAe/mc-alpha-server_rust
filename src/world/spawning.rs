@@ -100,10 +100,34 @@ impl crate::mob_spawning::SpawnerWorld for World {
 }
 
 impl World {
-    /// Mob spawn fitness (mirrors `EntityMob::getCanSpawnHere`): dark
-    /// enough (two unconditional RNG draws like C++), collision-free, and
-    /// dry.
-    fn spawner_mob_ok(&mut self, id: EntityId) -> bool {
+    /// Check that `bbox` does not intersect any other live living entity
+    /// (mirrors `World::checkIfAABBIsClear` / `func_522_a` where `field_329_e`
+    /// is true on `EntityLiving` subclasses).
+    pub(crate) fn check_no_living_collision(
+        &self,
+        bbox: &crate::aabb::AxisAlignedBB,
+        exclude: Option<EntityId>,
+    ) -> bool {
+        for oid in self.entities.alive_ids() {
+            if Some(oid) == exclude {
+                continue;
+            }
+            if let Some(e) = self.entities.get(oid) {
+                if matches!(e, Entity::Mob(_) | Entity::Animal(_) | Entity::Player(_))
+                    && e.body().bounding_box.intersects_with(bbox)
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Mob spawn fitness (mirrors `EntityMobs::getCanSpawnHere` +
+    /// `EntityCreature::getCanSpawnHere` + `EntityLiving::getCanSpawnHere`):
+    /// dark enough (two RNG draws), path-weight >= 0.0, entity-collision-free,
+    /// block-collision-free, and dry.
+    pub(crate) fn spawner_mob_ok(&mut self, id: EntityId) -> bool {
         let (px, min_y, pz, bbox) = match self.entities.get(id) {
             Some(e) => (e.body().pos[0], e.body().bounding_box.min_y, e.body().pos[2], e.body().bounding_box),
             None => return false,
@@ -115,12 +139,18 @@ impl World {
         if self.block_light_value(x, y, z) as i32 > self.rng.next_int_bound(8) {
             return false;
         }
-        self.colliding_boxes(&bbox).is_empty() && !self.touching_liquid(id)
+        if 0.5 - self.brightness(x, y, z) < 0.0 {
+            return false;
+        }
+        self.check_no_living_collision(&bbox, Some(id))
+            && self.colliding_boxes(&bbox).is_empty()
+            && !self.touching_liquid(id)
     }
 
-    /// Animal spawn fitness (mirrors `EntityAnimals::getCanSpawnHere`):
-    /// grass below, bright, collision-free, and dry. No RNG draws.
-    fn spawner_animal_ok(&mut self, id: EntityId) -> bool {
+    /// Animal spawn fitness (mirrors `EntityAnimals::getCanSpawnHere` +
+    /// `EntityCreature::getCanSpawnHere` + `EntityLiving::getCanSpawnHere`):
+    /// grass below, bright, entity-collision-free, block-collision-free, and dry.
+    pub(crate) fn spawner_animal_ok(&mut self, id: EntityId) -> bool {
         let (px, min_y, pz, bbox) = match self.entities.get(id) {
             Some(e) => (e.body().pos[0], e.body().bounding_box.min_y, e.body().pos[2], e.body().bounding_box),
             None => return false,
@@ -132,7 +162,9 @@ impl World {
         if self.block_light_value(x, y, z) <= 8 {
             return false;
         }
-        self.colliding_boxes(&bbox).is_empty() && !self.touching_liquid(id)
+        self.check_no_living_collision(&bbox, Some(id))
+            && self.colliding_boxes(&bbox).is_empty()
+            && !self.touching_liquid(id)
     }
 
     /// Player anchor positions for the spawn passes (mirrors
@@ -161,6 +193,7 @@ impl World {
         if !self.spawn_monsters {
             return 0;
         }
+        self.update_skylight_subtracted();
         let (px, py, pz) = self.spawn_anchors();
         let count = self.entities.count_mobs() as i32;
         crate::mob_spawning::spawn_hostile(self, &px, &py, &pz, count, self.spawn, WORLD_HEIGHT)
@@ -171,6 +204,7 @@ impl World {
         if !self.spawn_animals {
             return 0;
         }
+        self.update_skylight_subtracted();
         let (px, py, pz) = self.spawn_anchors();
         let count = self.entities.count_animals() as i32;
         crate::mob_spawning::spawn_passive(self, &px, &py, &pz, count, self.spawn, WORLD_HEIGHT)
@@ -257,7 +291,9 @@ impl World {
     pub fn tick_world(&mut self) {
         use std::time::Instant;
         let total = Instant::now();
+        self.update_skylight_subtracted();
         self.time += 1;
+        self.update_skylight_subtracted();
         let t = Instant::now();
         if self.spawn_monsters {
             self.spawn_hostile_mobs();
@@ -268,6 +304,7 @@ impl World {
         let spawners = t.elapsed();
         let t = Instant::now();
         self.tick_furnaces();
+        self.tick_mob_spawners();
         self.tick_primed_tnt();
         let furnaces = t.elapsed();
         let t = Instant::now();
@@ -322,13 +359,16 @@ impl World {
     /// `updateFurnaceBlockState`, whose no-notify set keeps the tile
     /// alive — here tiles live outside chunks, so any plain set is safe).
     /// The id/meta writes queue the cell in `block_updates` for the
-    /// server tick to broadcast.
+    /// server tick to broadcast, and inventory/burn changes queue
+    /// `tile_updates` (`Packet59ComplexEntity`) and mark the chunk dirty.
     pub fn tick_furnaces(&mut self) {
-        let cells: Vec<(i32, i32, i32)> = self.tiles.keys().copied().collect();
+        let mut cells: Vec<(i32, i32, i32)> = self.tiles.keys().copied().collect();
+        cells.sort_unstable();
         for (x, y, z) in cells {
             // Vanilla only ticks loaded tile entities; unloaded staged
             // chunks wait for recall (also saves CPU on big tile maps).
-            if !self.has_chunk(x.div_euclid(16), z.div_euclid(16)) {
+            let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+            if !self.has_chunk(cx, cz) {
                 continue;
             }
             let ticked = match self.tiles.get_mut(&(x, y, z)) {
@@ -337,6 +377,12 @@ impl World {
                 }
                 _ => continue,
             };
+            if ticked.changed {
+                if let Some(c) = self.chunks.get_mut(&(cx, cz)) {
+                    c.is_modified = true;
+                }
+                self.tile_updates.push([x, y, z]);
+            }
             if !ticked.needs_block_update {
                 continue;
             }
@@ -348,6 +394,112 @@ impl World {
             let new_id = if burning { 62 } else { 61 };
             if self.set_block_id(x, y, z, new_id) {
                 self.set_block_meta(x, y, z, meta);
+            }
+        }
+    }
+
+    /// Tick dungeon mob spawners (`TileEntityMobSpawner::updateEntity`).
+    pub fn tick_mob_spawners(&mut self) {
+        let mut cells: Vec<(i32, i32, i32)> = self.tiles.keys().copied().collect();
+        cells.sort_unstable();
+        for (x, y, z) in cells {
+            let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+            if !self.has_chunk(cx, cz) {
+                continue;
+            }
+            let (entity_id, delay) = match self.tiles.get(&(x, y, z)) {
+                Some(TileData::MobSpawner(s)) => (s.entity_id_str().to_string(), s.delay),
+                _ => continue,
+            };
+            if self.closest_player(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5, 16.0).is_none() {
+                continue;
+            }
+            if delay == -1 {
+                let new_delay = (200 + self.rng.next_int_bound(600)) as i16;
+                if let Some(TileData::MobSpawner(s)) = self.tiles.get_mut(&(x, y, z)) {
+                    s.delay = new_delay;
+                }
+            }
+            let cur_delay = match self.tiles.get(&(x, y, z)) {
+                Some(TileData::MobSpawner(s)) => s.delay,
+                _ => continue,
+            };
+            if cur_delay > 0 {
+                if let Some(TileData::MobSpawner(s)) = self.tiles.get_mut(&(x, y, z)) {
+                    s.delay -= 1;
+                }
+                continue;
+            }
+            for _ in 0..4 {
+                let mkind = match entity_id.as_str() {
+                    "Skeleton" => Some((true, 2u8)),
+                    "Zombie" => Some((true, 1u8)),
+                    "Spider" => Some((true, 0u8)),
+                    "Creeper" => Some((true, 3u8)),
+                    "Sheep" => Some((false, 0u8)),
+                    "Pig" => Some((false, 1u8)),
+                    "Chicken" => Some((false, 2u8)),
+                    "Cow" => Some((false, 3u8)),
+                    _ => None,
+                };
+                let Some((hostile, kind_idx)) = mkind else {
+                    break;
+                };
+                let area = crate::aabb::AxisAlignedBB::get_bounding_box(
+                    x as f64,
+                    y as f64,
+                    z as f64,
+                    (x + 1) as f64,
+                    (y + 1) as f64,
+                    (z + 1) as f64,
+                )
+                .expand(8.0, 4.0, 8.0);
+                let mut nearby = 0;
+                for oid in self.entities.alive_ids() {
+                    if let Some(e) = self.entities.get(oid) {
+                        let same = match (hostile, kind_idx, e) {
+                            (true, 0, Entity::Mob(m)) => m.kind == MobKind::Spider,
+                            (true, 1, Entity::Mob(m)) => m.kind == MobKind::Zombie,
+                            (true, 2, Entity::Mob(m)) => m.kind == MobKind::Skeleton,
+                            (true, 3, Entity::Mob(m)) => m.kind == MobKind::Creeper,
+                            (false, 0, Entity::Animal(a)) => a.kind == AnimalKind::Sheep,
+                            (false, 1, Entity::Animal(a)) => a.kind == AnimalKind::Pig,
+                            (false, 2, Entity::Animal(a)) => a.kind == AnimalKind::Chicken,
+                            (false, 3, Entity::Animal(a)) => a.kind == AnimalKind::Cow,
+                            _ => false,
+                        };
+                        if same && e.body().bounding_box.intersects_with(&area) {
+                            nearby += 1;
+                        }
+                    }
+                }
+                if nearby >= 6 {
+                    let new_delay = (200 + self.rng.next_int_bound(600)) as i16;
+                    if let Some(TileData::MobSpawner(s)) = self.tiles.get_mut(&(x, y, z)) {
+                        s.delay = new_delay;
+                    }
+                    break;
+                }
+                let sx = x as f64 + (self.rng.next_double() - self.rng.next_double()) * 4.0;
+                let sy = (y + self.rng.next_int_bound(3) - 1) as f64;
+                let sz = z as f64 + (self.rng.next_double() - self.rng.next_double()) * 4.0;
+                let yaw = self.rng.next_float() * 360.0;
+                if crate::mob_spawning::SpawnerWorld::spawn_try_spawn(
+                    self,
+                    hostile,
+                    kind_idx,
+                    sx as f32,
+                    sy as f32,
+                    sz as f32,
+                    yaw,
+                )
+                .is_some()
+                {
+                    let new_delay = (200 + self.rng.next_int_bound(600)) as i16;
+                    if let Some(TileData::MobSpawner(s)) = self.tiles.get_mut(&(x, y, z)) {
+                        s.delay = new_delay;
+                    }
+                }
             }
         }
     }

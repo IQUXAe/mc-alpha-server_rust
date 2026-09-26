@@ -3,6 +3,40 @@
 
 use crate::entity::table::{AnimalKind, LivingBody, MobKind};
 
+/// Mob spawner tile-entity state (`TileEntityMobSpawner.java`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MobSpawnerState {
+    pub entity_id: [u8; 16],
+    pub delay: i16,
+}
+
+impl MobSpawnerState {
+    pub fn new(entity_id: &str) -> Self {
+        let mut state = Self {
+            entity_id: [0u8; 16],
+            delay: 20,
+        };
+        state.set_entity_id(entity_id);
+        state
+    }
+
+    pub fn set_entity_id(&mut self, id: &str) {
+        self.entity_id = [0u8; 16];
+        let bytes = id.as_bytes();
+        let len = bytes.len().min(16);
+        self.entity_id[..len].copy_from_slice(&bytes[..len]);
+    }
+
+    pub fn entity_id_str(&self) -> &str {
+        let len = self
+            .entity_id
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(self.entity_id.len());
+        std::str::from_utf8(&self.entity_id[..len]).unwrap_or("Pig")
+    }
+}
+
 /// Block-entity data by cell (mirrors the C++ per-chunk `TileEntity`
 /// objects, stored flat until the tile tick slice needs behavior).
 #[derive(Clone, Copy, Debug)]
@@ -13,6 +47,7 @@ pub enum TileData {
     Furnace(crate::tile_entity::furnace::FurnaceState),
     Chest(crate::tile_entity::chest::ChestState),
     Sign(crate::tile_entity::sign::SignState),
+    MobSpawner(MobSpawnerState),
 }
 
 type ChunkTileMap = std::collections::HashMap<(i32, i32), Vec<(i32, i32, i32)>>;

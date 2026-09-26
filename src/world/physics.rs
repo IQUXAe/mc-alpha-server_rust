@@ -147,9 +147,11 @@ impl World {
             // sweep at the tail of `Entity.moveEntity`): any cactus in
             // the post-move box deals 1 through the pipeline.
             self.cactus_contact(id);
-            // Lava touch (Entity.java:395-411): lava in the box deals 1 and
-            // ignites for 300 ticks. Water-like swimming without this made
-            // lava harmless.
+            self.soul_sand_contact(id);
+            self.pressure_plate_contact(id);
+            // Lava/fire touch (`World.func_523_c` via `Entity.moveEntity`,
+            // Entity.java:395-411): fire/lava in the box deals 1 and
+            // ignites for 300 ticks.
             self.lava_contact(id);
             if !suppress {
                 let (nd, ev) =
@@ -165,11 +167,71 @@ impl World {
         None
     }
 
-    /// Cactus prickles for one living body (mirrors
-    /// `BlockCactus.onEntityCollidedWithBlock` as fired from
-    /// `Entity.moveEntity`): any cactus cell intersecting the box deals
-    /// 1 damage through the attack pipeline (resist window included,
-    /// like vanilla). Only mobs, animals and players qualify.
+    /// Soul sand (`88`) horizontal speed damping (`BlockSlowSand.onEntityCollidedWithBlock`).
+    fn soul_sand_contact(&mut self, id: EntityId) {
+        let bbox = match self.entities.get(id) {
+            Some(e) => e.body().bounding_box,
+            None => return,
+        };
+        let (x0, y0, z0) = (
+            floor_double(bbox.min_x),
+            floor_double(bbox.min_y),
+            floor_double(bbox.min_z),
+        );
+        let (x1, y1, z1) = (
+            floor_double(bbox.max_x),
+            floor_double(bbox.max_y),
+            floor_double(bbox.max_z),
+        );
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                for z in z0..=z1 {
+                    if self.get_block_id(x, y, z) == 88 {
+                        if let Some(e) = self.entities.get_mut(id) {
+                            let b = e.body_mut();
+                            b.motion[0] *= 0.4;
+                            b.motion[2] *= 0.4;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stone (`70`) and wooden (`72`) pressure plate contact (`BlockPressurePlate.onEntityCollidedWithBlock`).
+    fn pressure_plate_contact(&mut self, id: EntityId) {
+        let bbox = match self.entities.get(id) {
+            Some(e) => e.body().bounding_box,
+            None => return,
+        };
+        let (x0, y0, z0) = (
+            floor_double(bbox.min_x),
+            floor_double(bbox.min_y),
+            floor_double(bbox.min_z),
+        );
+        let (x1, y1, z1) = (
+            floor_double(bbox.max_x),
+            floor_double(bbox.max_y),
+            floor_double(bbox.max_z),
+        );
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                for z in z0..=z1 {
+                    let bid = self.get_block_id(x, y, z);
+                    if (bid == 70 || bid == 72) && self.get_block_meta(x, y, z) == 0 {
+                        self.update_pressure_plate(x, y, z, bid);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Lava/fire touch for one living body (mirrors `World.func_523_c` as
+    /// fired from the tail of `Entity.moveEntity`, Entity.java:395-411:
+    /// any fire (51), still lava (11) or flowing lava (10) cell
+    /// intersecting the box deals 1 damage and ignites for 300 ticks.
+    /// Water must NOT trigger this — it only extinguishes (see
+    /// `tick_living`). Only mobs, animals and players qualify.
     fn lava_contact(&mut self, id: EntityId) {
         let bbox = match self.entities.get(id) {
             Some(Entity::Mob(m)) => m.living.body.bounding_box,
@@ -190,7 +252,10 @@ impl World {
         for x in x0..=x1 {
             for y in y0..=y1 {
                 for z in z0..=z1 {
-                    if self.is_lava(x, y, z) {
+                    // Vanilla `func_523_c`: fire, still lava, flowing lava.
+                    // (`is_lava` is lava-only now that `Material` carries
+                    // singleton identity; fire is a block id, not lava.)
+                    if self.is_lava(x, y, z) || self.get_block_id(x, y, z) == 51 {
                         self.attack_living(id, 1, None);
                         match self.entities.get_mut(id) {
                             Some(Entity::Mob(m)) => {
