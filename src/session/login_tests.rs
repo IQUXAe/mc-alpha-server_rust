@@ -55,6 +55,8 @@
     #[test]
     fn test_protocol_mismatch_kicks() {
         let mut s = LoginSession::new(false);
+        s.on_packet(PacketData::Handshake { username: "Steve".to_string() });
+        s.outbox.clear();
         s.on_packet(login_packet(5, "Steve"));
         assert_eq!(s.outbox.len(), 1);
         assert_eq!(s.outbox[0][0], 255);
@@ -63,6 +65,8 @@
             _ => panic!("expected done"),
         }
         let mut s = LoginSession::new(false);
+        s.on_packet(PacketData::Handshake { username: "Steve".to_string() });
+        s.outbox.clear();
         s.on_packet(login_packet(7, "Steve"));
         assert_eq!(s.outbox[0][0], 255);
     }
@@ -104,6 +108,7 @@
 
         let no: VerifyFn = Box::new(|_, _| Ok("NO".to_string()));
         let mut s = LoginSession::new(true).with_verify(no);
+        s.on_packet(PacketData::Handshake { username: "Steve".to_string() });
         s.on_packet(login_packet(6, "Steve"));
         let mut ev = None;
         for _ in 0..100 {
@@ -127,6 +132,7 @@
             Ok("YES".to_string())
         });
         let mut s = LoginSession::new(true).with_verify(slow);
+        s.on_packet(PacketData::Handshake { username: "Steve".to_string() });
         s.on_packet(login_packet(6, "Steve"));
         s.on_packet(login_packet(6, "Steve"));
         match s.poll() {
@@ -240,12 +246,14 @@
     #[test]
     fn test_login_rejects_malformed_usernames_before_verify() {
         let mut s = LoginSession::new(true);
+        s.on_packet(PacketData::Handshake { username: "-".to_string() });
         // Invalid length (> 16)
         s.on_packet(login_packet(6, "VeryLongUsernameExceedingLimit"));
         assert!(s.poll().is_some());
         assert_eq!(s.outbox.last().unwrap()[0], 255);
 
         let mut s2 = LoginSession::new(true);
+        s2.on_packet(PacketData::Handshake { username: "-".to_string() });
         // Invalid characters (slashes / spaces)
         s2.on_packet(login_packet(6, "../badname"));
         assert!(s2.poll().is_some());
@@ -257,5 +265,27 @@
         let url_template = "http://127.0.0.1:9999/check?user={user}&serverId={serverId}".to_string();
         let s = LoginSession::new(true).with_auth_url(url_template);
         assert!(s.verify.is_some());
+    }
+
+    #[test]
+    fn rejects_duplicate_handshake_and_unexpected_packets() {
+        // 1. Login before Handshake must be rejected with Protocol error.
+        let mut s = LoginSession::new(true);
+        s.on_packet(login_packet(6, "Steve"));
+        assert!(matches!(s.poll(), Some(LoginEvent::Done)));
+        assert_eq!(s.outbox.last().unwrap(), &pkt_kick("Protocol error"));
+
+        // 2. Duplicate Handshake packet kicks with Protocol error.
+        let mut s2 = LoginSession::new(false);
+        s2.on_packet(PacketData::Handshake { username: "Steve".to_string() });
+        s2.on_packet(PacketData::Handshake { username: "Steve".to_string() });
+        assert!(matches!(s2.poll(), Some(LoginEvent::Done)));
+        assert_eq!(s2.outbox.last().unwrap(), &pkt_kick("Protocol error"));
+
+        // 3. Unexpected non-login packet (e.g. Chat) during login kicks with Protocol error.
+        let mut s3 = LoginSession::new(false);
+        s3.on_packet(PacketData::Chat { message: "hi".to_string() });
+        assert!(matches!(s3.poll(), Some(LoginEvent::Done)));
+        assert_eq!(s3.outbox.last().unwrap(), &pkt_kick("Protocol error"));
     }
 

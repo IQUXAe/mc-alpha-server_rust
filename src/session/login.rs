@@ -103,9 +103,14 @@ pub struct LoginSession {
 
 impl LoginSession {
     pub fn new(online_mode: bool) -> Self {
+        let server_id = if online_mode {
+            format!("{:x}", nonce_i64() as u64)
+        } else {
+            "-".to_string()
+        };
         Self {
             online_mode,
-            server_id: String::new(),
+            server_id,
             username: String::new(),
             ticks: 0,
             state: LoginState::WaitHandshake,
@@ -118,7 +123,6 @@ impl LoginSession {
         }
     }
 
-    /// Test hook: replace the HTTP verifier.
     /// Test hook: replace the HTTP verifier.
     pub fn with_verify(mut self, f: VerifyFn) -> Self {
         self.verify = Some(f);
@@ -140,14 +144,18 @@ impl LoginSession {
         self.state = LoginState::Finished;
     }
 
-    /// Feed one inbound packet (unexpected packets are ignored like the
-    /// C++ handler set, which only overrides handshake/login/error).
+    /// Feed one inbound packet (unexpected packets kick with "Protocol error"
+    /// like `NetLoginHandler.func_6001_a`).
     pub fn on_packet(&mut self, pkt: PacketData) {
         if self.finished {
             return;
         }
         match pkt {
             PacketData::Handshake { username: _ } => {
+                if self.state != LoginState::WaitHandshake {
+                    self.kick("Protocol error");
+                    return;
+                }
                 if self.online_mode {
                     // Nonce like C++ (hex of a uniform i64).
                     let rand_val = nonce_i64();
@@ -156,11 +164,17 @@ impl LoginSession {
                 } else {
                     self.outbox.push(pkt_handshake("-"));
                 }
-                if self.state == LoginState::WaitHandshake {
-                    self.state = LoginState::WaitLogin;
-                }
+                self.state = LoginState::WaitLogin;
             }
             PacketData::Login { protocol_version, mut username, .. } => {
+                if self.verifying || self.state == LoginState::Verifying || self.state == LoginState::Finished {
+                    self.kick("Duplicate login packet");
+                    return;
+                }
+                if self.state != LoginState::WaitLogin {
+                    self.kick("Protocol error");
+                    return;
+                }
                 while username.ends_with(['\0', '\r', '\n', ' ']) {
                     username.pop();
                 }
@@ -185,9 +199,8 @@ impl LoginSession {
                     self.finished = true;
                     return;
                 }
-                if self.verifying {
-                    self.kick("Duplicate login packet");
-                    return;
+                if self.server_id.is_empty() || self.server_id == "-" {
+                    self.server_id = format!("{:x}", nonce_i64() as u64);
                 }
                 if ACTIVE_VERIFICATIONS.load(Ordering::Relaxed) >= MAX_CONCURRENT_VERIFICATIONS {
                     self.kick("Too many login attempts, please try again shortly");
@@ -227,7 +240,13 @@ impl LoginSession {
                     self.kick("Login service unavailable, try again shortly");
                 }
             }
-            _ => {}
+            PacketData::KeepAlive => {}
+            PacketData::KickDisconnect { .. } => {
+                self.on_drop();
+            }
+            _ => {
+                self.kick("Protocol error");
+            }
         }
     }
 
