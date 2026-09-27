@@ -80,17 +80,39 @@ impl PlaySession {
                     self.harvest(ctx, x, y, z);
                 }
             }
-        } else if status == 3
-            && dist_sq < 256.0 {
-                self.send_block_change(ctx.world, x, y, z);
+        } else if status == 3 && dist_sq < 256.0 {
+            if !protected || self.is_op(ctx) {
+                let same_target = self.dig.has_target
+                    && self.dig.target_x == x
+                    && self.dig.target_y == y
+                    && self.dig.target_z == z;
+                let bid = ctx.world.get_block_id(x, y, z);
+                if same_target && bid > 0 {
+                    let input = self.dig_input(ctx, bid as i32);
+                    let hardness_tick = crate::player::mining::mining_check_hardness(
+                        input.block_id,
+                        input.held_item_id,
+                        input.in_water,
+                        input.on_ground,
+                    );
+                    if hardness_tick > 0.0
+                        && (self.dig.cur_damage >= 0.70
+                            || self.dig.cur_damage + hardness_tick >= 0.99)
+                    {
+                        self.harvest(ctx, x, y, z);
+                    }
+                }
             }
+            self.send_block_change(ctx.world, x, y, z);
+            crate::player::digging::dig_cancel(&mut self.dig);
+        }
         None
     }
 
     fn dig_input(&self, ctx: &SessionCtx, block_id: i32) -> DigInput {
         let held = self.selected_stack(ctx.world).map(|s| s.item_id).unwrap_or(0);
         let (in_water, on_ground) = match ctx.world.entities.get(self.player) {
-            Some(e) => (Self::in_water(ctx.world, self.player), e.body().on_ground),
+            Some(e) => (Self::is_inside_water(ctx.world, self.player), e.body().on_ground),
             None => (false, false),
         };
         DigInput { block_id, held_item_id: held, in_water, on_ground }

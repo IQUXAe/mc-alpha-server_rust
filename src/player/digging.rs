@@ -122,7 +122,7 @@ pub fn dig_on_tick(
         return false;
     }
     s.cur_damage += hardness_tick;
-    if s.cur_damage >= 1.0 {
+    if s.cur_damage >= 1.0 - 1e-4 {
         s.cur_damage = 0.0;
         s.initial_cooldown = 5;
         return true;

@@ -1670,3 +1670,94 @@
         assert!(sess.outbox.iter().any(|p| p.first() == Some(&5)), "must send Packet5 to restore bucket");
     }
 
+    #[test]
+    fn test_dig_in_water_eye_level_check() {
+        let mut w = floor_world();
+        let player = spawn_player(&mut w, "Steve", 4.5, 64.0, 4.5);
+        // Only feet level has water:
+        w.set_block_id(4, 64, 4, 8); // water
+        w.set_block_id(4, 65, 4, 0); // air at eye level (65.62)
+        assert!(
+            !PlaySession::is_inside_water(&w, player),
+            "wading in 1-block water must NOT count as inside water for digging"
+        );
+        assert!(
+            PlaySession::in_water(&w, player),
+            "in_water for movement drag must still detect feet in water"
+        );
+
+        // Submerged: head is in water:
+        w.set_block_id(4, 65, 4, 8);
+        assert!(
+            PlaySession::is_inside_water(&w, player),
+            "head in water must count as inside water for digging"
+        );
+    }
+
+    #[test]
+    fn test_dig_jump_status_3_completion() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        w.set_block_id(3, 64, 4, 3); // dirt
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(277, 1, 0)); // diamond shovel
+            p.inventory.current = 0;
+            p.living.body.on_ground = false; // jumping / airborne
+        }
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 277;
+        let mut bc = Vec::new();
+
+        // Status 0: start digging
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        // Send status 1 ticks while in air until progress exceeds 0.70 (dirt with diamond shovel is 5.33/tick, airborne / 5 = 1.06/tick)
+        // First tick latches, second tick accumulates
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 1, x: 3, y: 64, z: 4, face: 1 },
+        );
+        // Let's set cur_damage to 0.75 directly to simulate jump tick desync before completion:
+        sess.dig.cur_damage = 0.75;
+        sess.dig.has_target = true;
+        sess.dig.target_x = 3;
+        sess.dig.target_y = 64;
+        sess.dig.target_z = 4;
+
+        // Status 3: client sends finished digging
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        assert_eq!(w.get_block_id(3, 64, 4), 0, "status 3 with >= 0.70 progress must complete block harvest");
+        // Verify block update queued:
+        assert!(w.take_block_updates().contains(&[3, 64, 4]));
+    }
+
+    #[test]
+    fn test_dig_status_3_early_rejection() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        w.set_block_id(3, 64, 4, 1); // stone
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // Status 0: start digging stone with bare hands
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+        // Progress is 0.0:
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
+        );
+        assert_eq!(w.get_block_id(3, 64, 4), 1, "premature status 3 must not break block");
+    }
+

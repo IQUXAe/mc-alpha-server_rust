@@ -212,6 +212,30 @@ impl PlaySession {
         false
     }
 
+    /// Eye-in-water probe (mirrors vanilla `Entity::isInsideOfMaterial(Material.water)`).
+    /// Used for digging speed penalty where head/eye submersion determines the 5x slowdown.
+    pub(crate) fn is_inside_water(world: &World, id: EntityId) -> bool {
+        let (pos, y_offset) = match world.entities.get(id) {
+            Some(e) => (e.body().pos, e.body().y_offset as f64),
+            None => return false,
+        };
+        // Eye height: Java EntityPlayerMP.func_104_p() = 1.62.
+        // Server Entity.posY is feet; eye is posY + 1.62 - y_offset.
+        let eye_y = pos[1] + 1.62 - y_offset;
+        let bx = floor_double(pos[0]);
+        let by = floor_double(eye_y);
+        let bz = floor_double(pos[2]);
+        if world.material_at(bx, by, bz) == crate::material::Material::WATER {
+            let meta = world.get_block_meta(bx, by, bz);
+            let var0 = if meta >= 8 { 0 } else { meta };
+            let var8 = var0 as f32 / 9.0;
+            let surface_y = (by + 1) as f64 - var8 as f64;
+            eye_y < surface_y
+        } else {
+            false
+        }
+    }
+
     /// Per-tick upkeep (mirrors the handler `tick` minus chunk streaming:
     /// keep-alive every 20 ticks).
     pub fn tick(&mut self, _ctx: &mut SessionCtx) -> Option<SessionOutcome> {
