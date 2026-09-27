@@ -95,6 +95,9 @@ impl PlaySession {
                 self.send_block_change(ctx.world, x, y - 1, z);
                 self.send_block_change(ctx.world, x, y + 1, z);
             }
+            if item_id == 324 || item_id == 330 {
+                self.send_block_change(ctx.world, nx, ny + 1, nz);
+            }
             self.send_inventory(ctx.world);
             return None;
         }
@@ -190,7 +193,7 @@ impl PlaySession {
         };
         self.send_block_change(ctx.world, nx, ny, nz);
         let placed_id = ctx.world.get_block_id(nx, ny, nz);
-        if placed_id == 64 || placed_id == 71 {
+        if placed_id == 64 || placed_id == 71 || item_id == 324 || item_id == 330 {
             self.send_block_change(ctx.world, nx, ny + 1, nz);
         }
         if matches!(placed_id, 54 | 61 | 62) {
@@ -498,8 +501,9 @@ impl PlaySession {
                 cur: ppos,
                 y_offset: pyoff,
             });
-            let Some([hx, hy, hz]) =
-                ctx.world.ray_trace_hit_liquids([aim.sx, aim.sy, aim.sz], [aim.ex, aim.ey, aim.ez])
+            let include_liquids = s.item_id == 325;
+            let Some(([hx, hy, hz], side)) =
+                ctx.world.ray_trace_face([aim.sx, aim.sy, aim.sz], [aim.ex, aim.ey, aim.ez], include_liquids)
             else {
                 self.send_inventory(ctx.world);
                 return false;
@@ -531,21 +535,17 @@ impl PlaySession {
                 self.send_inventory(ctx.world);
                 return false;
             }
-            // Place fluid at the last air/non-solid cell before the hit cell along the ray
+            // Place fluid based on exact hit side (matching Java ItemBucket sideHit)
             let fluid_id = if s.item_id == 326 { 8 } else { 10 };
-            let (mut tx, mut ty, mut tz) = (hx, hy, hz);
-            if ctx.world.material_at(hx, hy, hz).is_solid() {
-                let dx = aim.sx - (hx as f64 + 0.5);
-                let dy = aim.sy - (hy as f64 + 0.5);
-                let dz = aim.sz - (hz as f64 + 0.5);
-                if dy.abs() >= dx.abs() && dy.abs() >= dz.abs() {
-                    ty += if dy >= 0.0 { 1 } else { -1 };
-                } else if dx.abs() >= dz.abs() {
-                    tx += if dx >= 0.0 { 1 } else { -1 };
-                } else {
-                    tz += if dz >= 0.0 { 1 } else { -1 };
-                }
-            }
+            let (tx, ty, tz) = match side {
+                0 => (hx, hy - 1, hz),
+                1 => (hx, hy + 1, hz),
+                2 => (hx, hy, hz - 1),
+                3 => (hx, hy, hz + 1),
+                4 => (hx - 1, hy, hz),
+                5 => (hx + 1, hy, hz),
+                _ => (hx, hy, hz),
+            };
             let protected = crate::session::is_spawn_protected(tx, tz, ctx.world.spawn, ctx.spawn_protection)
                 || crate::session::is_spawn_protected(hx, hz, ctx.world.spawn, ctx.spawn_protection);
             if protected && !self.is_op(ctx) {

@@ -109,6 +109,19 @@ impl World {
     /// returning the first collidable cell. Still fluids block the ray
     /// (flowing water 1..7 lets it through like `canCollideCheck`).
     pub fn ray_trace_hit_liquids(&self, from: [f64; 3], to: [f64; 3]) -> Option<[i32; 3]> {
+        self.ray_trace_face(from, to, true).map(|(pos, _)| pos)
+    }
+
+    /// First-hit ray trace with liquids included and face hit (mirrors Java `rayTraceBlocks`
+    /// returning `MovingObjectPosition` with `sideHit`). Still fluids block the ray
+    /// (flowing water 1..7 lets it through like `canCollideCheck`).
+    pub fn ray_trace_hit_liquids_face(&self, from: [f64; 3], to: [f64; 3]) -> Option<([i32; 3], i8)> {
+        self.ray_trace_face(from, to, true)
+    }
+
+    /// General first-hit ray trace with face hit and optional liquid collision
+    /// (mirrors Java `World.rayTraceBlocks(Vec3D, Vec3D, boolean)` returning `MovingObjectPosition`).
+    pub fn ray_trace_face(&self, from: [f64; 3], to: [f64; 3], include_liquids: bool) -> Option<([i32; 3], i8)> {
         if ![from[0], from[1], from[2], to[0], to[1], to[2]].iter().all(|v| v.is_finite()) {
             return None;
         }
@@ -186,6 +199,9 @@ impl World {
                 continue;
             }
             if block_properties_get(bid as u32).block_type == BlockType::Fluid as u8 {
+                if !include_liquids {
+                    continue;
+                }
                 // canCollideCheck(meta, true): falling (8+) reads as still,
                 // still (0) blocks, flowing (1..7) lets the ray through.
                 let mut meta = self.get_block_meta(ccx, ccy, ccz);
@@ -196,7 +212,7 @@ impl World {
                     continue;
                 }
             }
-            return Some([ccx, ccy, ccz]);
+            return Some(([ccx, ccy, ccz], side));
         }
         None
     }

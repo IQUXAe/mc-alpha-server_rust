@@ -71,7 +71,11 @@ pub fn load_settings(cfg: &mut ServerConfig) -> Settings {
     let difficulty = cfg.get_int("difficulty", 2).clamp(0, 3);
     let view_distance = cfg.get_int("view-distance", VIEW_DISTANCE_DEFAULT)
         .clamp(VIEW_DISTANCE_MIN, VIEW_DISTANCE_MAX);
-    let spawn_protection = cfg.get_int("spawn-protection-radius", 16).max(0);
+    let spawn_protection = if let Some(v) = cfg.get("spawn-protection").and_then(|s| s.trim().parse::<i32>().ok()) {
+        v.max(0)
+    } else {
+        cfg.get_int("spawn-protection-radius", 16).max(0)
+    };
     let level_seed = cfg.get_string("level-seed", "");
     let seed = if level_seed.is_empty() {
         0

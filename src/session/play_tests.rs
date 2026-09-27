@@ -1761,3 +1761,143 @@
         assert_eq!(w.get_block_id(3, 64, 4), 1, "premature status 3 must not break block");
     }
 
+    #[test]
+    fn test_spawn_protection_door_placement_syncs_both_halves() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 0.5, 64.0, 0.5);
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(324, 1, 0)); // wooden door item
+            p.inventory.current = 0;
+        }
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 324;
+        let mut bc = Vec::new();
+
+        {
+            let mut c = ctx(&mut w, &ops, &mut bc);
+            c.spawn_protection = 16;
+            sess.pump(
+                &mut c,
+                PacketData::Place { item_id: 324, x: 0, y: 63, z: 0, direction: 1 },
+            );
+        }
+        assert_eq!(w.get_block_id(0, 64, 0), 0, "door bottom must not be placed");
+        assert_eq!(w.get_block_id(0, 65, 0), 0, "door top must not be placed");
+
+        let pkt53: Vec<(i32, i8, i32)> = sess
+            .outbox
+            .iter()
+            .filter(|p| p.first() == Some(&53))
+            .map(|p| {
+                let x = i32::from_be_bytes([p[1], p[2], p[3], p[4]]);
+                let y = p[5] as i8;
+                let z = i32::from_be_bytes([p[6], p[7], p[8], p[9]]);
+                (x, y, z)
+            })
+            .collect();
+        assert!(pkt53.contains(&(0, 63, 0)), "must sync clicked block");
+        assert!(pkt53.contains(&(0, 64, 0)), "must sync door bottom");
+        assert!(pkt53.contains(&(0, 65, 0)), "must sync door top");
+        assert!(sess.outbox.iter().any(|p| p.first() == Some(&5)), "must sync inventory");
+    }
+
+    #[test]
+    fn test_spawn_protection_status_0_sends_packet53() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 0.5, 64.0, 0.5);
+        w.set_block_id(0, 64, 0, 37); // yellow flower (instant break)
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        {
+            let mut c = ctx(&mut w, &ops, &mut bc);
+            c.spawn_protection = 16;
+            sess.pump(
+                &mut c,
+                PacketData::BlockDig { status: 0, x: 0, y: 64, z: 0, face: 1 },
+            );
+        }
+        assert_eq!(w.get_block_id(0, 64, 0), 37, "flower must remain intact on spawn");
+        let pkt53: Vec<(i32, i8, i32)> = sess
+            .outbox
+            .iter()
+            .filter(|p| p.first() == Some(&53))
+            .map(|p| {
+                let x = i32::from_be_bytes([p[1], p[2], p[3], p[4]]);
+                let y = p[5] as i8;
+                let z = i32::from_be_bytes([p[6], p[7], p[8], p[9]]);
+                (x, y, z)
+            })
+            .collect();
+        assert!(pkt53.contains(&(0, 64, 0)), "status 0 on spawn must send Packet53");
+    }
+
+    #[test]
+    fn test_dig_status_0_latches_target_for_first_tick_damage() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        w.set_block_id(3, 64, 4, 1); // stone
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // Status 0: start digging stone
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+        assert!(sess.dig.has_target, "status 0 must latch target");
+        assert_eq!(sess.dig.target_x, 3);
+        assert_eq!(sess.dig.target_y, 64);
+        assert_eq!(sess.dig.target_z, 4);
+
+        // First status 1 tick must immediately accumulate damage
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 1, x: 3, y: 64, z: 4, face: 1 },
+        );
+        assert!(sess.dig.cur_damage > 0.0, "tick 1 must immediately accumulate damage");
+    }
+
+    #[test]
+    fn test_bucket_ray_trace_liquid_filtering_and_side_hit() {
+        let mut w = floor_world();
+        w.set_block_id(2, 63, 2, 1); // stone
+        w.set_block_id(2, 64, 2, 8); // water (still)
+        w.set_block_meta(2, 64, 2, 0);
+
+        // Ray from (2.5, 66.0, 2.5) down to (2.5, 60.0, 2.5)
+        // With include_liquids = true (empty bucket): hits water at (2, 64, 2) with side = 1 (top)
+        let hit_liquid = w.ray_trace_face([2.5, 66.0, 2.5], [2.5, 60.0, 2.5], true);
+        assert_eq!(hit_liquid, Some(([2, 64, 2], 1)));
+
+        // With include_liquids = false (water bucket): passes through water, hits stone at (2, 63, 2) with side = 1 (top)
+        let hit_solid = w.ray_trace_face([2.5, 66.0, 2.5], [2.5, 60.0, 2.5], false);
+        assert_eq!(hit_solid, Some(([2, 63, 2], 1)));
+    }
+
+    #[test]
+    fn test_spawn_protection_property_fallback() {
+        use crate::server_config::ServerConfig;
+        use crate::server::settings::load_settings;
+
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("alpha_test_sp1_{pid}.properties"));
+        std::fs::write(&path, "spawn-protection=32\n").unwrap();
+        let mut cfg = ServerConfig::open(&path);
+        let s = load_settings(&mut cfg);
+        assert_eq!(s.spawn_protection, 32);
+        let _ = std::fs::remove_file(&path);
+
+        // spawn-protection-radius fallback when spawn-protection is not specified:
+        let path2 = std::env::temp_dir().join(format!("alpha_test_sp2_{pid}.properties"));
+        std::fs::write(&path2, "spawn-protection-radius=24\n").unwrap();
+        let mut cfg2 = ServerConfig::open(&path2);
+        let s2 = load_settings(&mut cfg2);
+        assert_eq!(s2.spawn_protection, 24);
+        let _ = std::fs::remove_file(&path2);
+    }
+
+

@@ -43,31 +43,39 @@ impl PlaySession {
             crate::session::is_spawn_protected(x, z, sp, ctx.spawn_protection)
         };
         if status == 0 {
-            if !protected || self.is_op(ctx) {
-                // Clear client-side chest prediction before digging starts.
-                if ctx.world.get_block_id(x, y, z) == 54 {
-                    if let Some(TileData::Chest(_)) = ctx.world.tiles.get(&(x, y, z)) {
-                        use crate::tile_entity::chest::chest_create;
-                        self.outbox.push(tile_packet(x, y, z, &TileData::Chest(chest_create())));
-                    }
+            if protected && !self.is_op(ctx) {
+                self.send_block_change(ctx.world, x, y, z);
+                return None;
+            }
+            // Clear client-side chest prediction before digging starts.
+            if ctx.world.get_block_id(x, y, z) == 54 {
+                if let Some(TileData::Chest(_)) = ctx.world.tiles.get(&(x, y, z)) {
+                    use crate::tile_entity::chest::chest_create;
+                    self.outbox.push(tile_packet(x, y, z, &TileData::Chest(chest_create())));
                 }
-                let bid = ctx.world.get_block_id(x, y, z);
-                if bid == 0 {
-                    return None;
-                }
-                if bid == 64 {
-                    ctx.world.toggle_door(x, y, z);
-                } else if bid == 69 {
-                    ctx.world.toggle_lever(x, y, z);
-                } else if bid == 77 {
-                    ctx.world.press_button(x, y, z);
-                } else if bid == 73 {
-                    ctx.world.apply_set_notify(x, y, z, 74);
-                }
-                let input = self.dig_input(ctx, bid as i32);
-                if dig_on_click(input) {
-                    self.harvest(ctx, x, y, z);
-                }
+            }
+            let bid = ctx.world.get_block_id(x, y, z);
+            if bid == 0 {
+                return None;
+            }
+            if bid == 64 {
+                ctx.world.toggle_door(x, y, z);
+            } else if bid == 69 {
+                ctx.world.toggle_lever(x, y, z);
+            } else if bid == 77 {
+                ctx.world.press_button(x, y, z);
+            } else if bid == 73 {
+                ctx.world.apply_set_notify(x, y, z, 74);
+            }
+            let input = self.dig_input(ctx, bid as i32);
+            if dig_on_click(input) {
+                self.harvest(ctx, x, y, z);
+            } else {
+                self.dig.cur_damage = 0.0;
+                self.dig.target_x = x;
+                self.dig.target_y = y;
+                self.dig.target_z = z;
+                self.dig.has_target = true;
             }
         } else if status == 2 {
             crate::player::digging::dig_cancel(&mut self.dig);
@@ -95,9 +103,16 @@ impl PlaySession {
                         input.in_water,
                         input.on_ground,
                     );
+                    let ground_hardness_tick = crate::player::mining::mining_check_hardness(
+                        input.block_id,
+                        input.held_item_id,
+                        false,
+                        true,
+                    );
                     if hardness_tick > 0.0
                         && (self.dig.cur_damage >= 0.70
-                            || self.dig.cur_damage + hardness_tick >= 0.99)
+                            || self.dig.cur_damage + hardness_tick >= 0.99
+                            || self.dig.cur_damage + ground_hardness_tick >= 0.70)
                     {
                         self.harvest(ctx, x, y, z);
                     }
