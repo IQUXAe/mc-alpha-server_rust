@@ -64,10 +64,19 @@ fn can_stay(u: &mut ItemUseWorld, id: u8, pos: BlockPos) -> bool {
     match id {
         37 | 38 => crate::block::ticks::block_flower_can_stay(w, pos),
         39 | 40 => crate::block::ticks::block_mushroom_can_stay(w, pos),
-        50 => crate::block::ticks::block_torch_can_stay(w, pos),
+        50 | 75 | 76 => crate::block::ticks::block_torch_can_stay(w, pos),
         54 => crate::block::container::block_chest_can_place(w, 54, pos),
+        65 => {
+            w.attach_at(pos.offset(-1, 0, 0))
+                || w.attach_at(pos.offset(1, 0, 0))
+                || w.attach_at(pos.offset(0, 0, -1))
+                || w.attach_at(pos.offset(0, 0, 1))
+        }
+        70 | 72 => w.attach_at(pos.below()),
         81 => crate::block::ticks::block_cactus_can_stay(w, pos),
         83 => crate::block::ticks::block_reed_can_stay(w, pos),
+        85 => w.id_at(pos.below()) != 85 && w.material_at_pos(pos.below()).is_solid(),
+        86 | 91 => w.attach_at(pos.below()),
         6 => crate::block::ticks::block_sapling_can_stay(w, pos),
         59 => crate::block::ticks::block_crops_can_stay(w, id, pos),
         _ => true,
@@ -111,7 +120,7 @@ fn placement_clear(u: &mut ItemUseWorld, id: u8, pos: BlockPos) -> bool {
 /// Torch facing like `onBlockPlaced` (the only `block_placed` override).
 /// The attach metadata reads straight from the live world.
 fn torch_placed(u: &mut ItemUseWorld, id: u8, pos: BlockPos, side: i32) {
-    if id != 50 {
+    if id != 50 && id != 75 && id != 76 {
         return;
     }
     let w = &mut *u.world;
@@ -364,6 +373,32 @@ fn lever_or_button_meta(w: &World, pos: BlockPos, side: i32, is_lever: bool) -> 
     }
 }
 
+fn ladder_meta(w: &World, target: BlockPos, side: i32) -> Option<u8> {
+    if side == 2 && w.attach_at(target.offset(0, 0, 1)) {
+        return Some(2);
+    }
+    if side == 3 && w.attach_at(target.offset(0, 0, -1)) {
+        return Some(3);
+    }
+    if side == 4 && w.attach_at(target.offset(1, 0, 0)) {
+        return Some(4);
+    }
+    if side == 5 && w.attach_at(target.offset(-1, 0, 0)) {
+        return Some(5);
+    }
+    if w.attach_at(target.offset(0, 0, 1)) {
+        Some(2)
+    } else if w.attach_at(target.offset(0, 0, -1)) {
+        Some(3)
+    } else if w.attach_at(target.offset(1, 0, 0)) {
+        Some(4)
+    } else if w.attach_at(target.offset(-1, 0, 0)) {
+        Some(5)
+    } else {
+        None
+    }
+}
+
 /// Block placement (mirrors `ItemBlock::onItemUse`). True means the caller should
 /// decrement the stack.
 pub fn item_block_use(w: &mut ItemUseWorld, place: BlockPlace, pos: BlockPos) -> bool {
@@ -403,6 +438,11 @@ pub fn item_block_use(w: &mut ItemUseWorld, place: BlockPlace, pos: BlockPos) ->
             return false;
         };
         Some(m)
+    } else if place.block_id == 65 {
+        let Some(m) = ladder_meta(w.world, target, place.side) else {
+            return false;
+        };
+        Some(m)
     } else {
         None
     };
@@ -418,6 +458,13 @@ pub fn item_block_use(w: &mut ItemUseWorld, place: BlockPlace, pos: BlockPos) ->
         w.world.tile_updates.push([target.x, target.y, target.z]);
     } else if place.block_id == 54 {
         w.world.tile_updates.push([target.x, target.y, target.z]);
+    } else if place.block_id == 53 || place.block_id == 67 {
+        const STAIRS_META: [u8; 4] = [2, 1, 3, 0];
+        let meta = STAIRS_META[((place.yaw * 4.0 / 360.0 + 0.5).floor() as i32 & 3) as usize];
+        w.world.set_meta_at(target, meta);
+    } else if place.block_id == 86 || place.block_id == 91 {
+        let meta = ((place.yaw * 4.0 / 360.0 + 0.5).floor() as i32 & 3) as u8;
+        w.world.set_meta_at(target, meta);
     }
     if let Some(m) = attach_meta {
         w.world.set_meta_at(target, m);

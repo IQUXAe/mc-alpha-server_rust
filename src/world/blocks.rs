@@ -192,6 +192,9 @@ impl World {
                 self.recalculate_redstone_around(x, y, z);
                 self.notify_neighbors_of(x, y, z);
             }
+            74 => {
+                self.schedule_block_update(x, y, z, 74, 30);
+            }
             75 | 76 => {
                 if self.get_block_meta(x, y, z) == 0 {
                     block_torch_added(&mut *self, bid, BlockPos::new(x, y, z));
@@ -261,6 +264,20 @@ impl World {
                     self.recalculate_redstone_around(x, y, z);
                 } else {
                     self.recalculate_redstone_around(x, y, z);
+                }
+            }
+            65 => {
+                let meta = self.get_block_meta(x, y, z);
+                let supported = match meta {
+                    2 => self.attach_at(BlockPos::new(x, y, z + 1)),
+                    3 => self.attach_at(BlockPos::new(x, y, z - 1)),
+                    4 => self.attach_at(BlockPos::new(x + 1, y, z)),
+                    5 => self.attach_at(BlockPos::new(x - 1, y, z)),
+                    _ => false,
+                };
+                if !supported {
+                    self.drop_block_for(65, meta, x, y, z);
+                    self.apply_set_notify(x, y, z, 0);
                 }
             }
             70 | 72 if !self.attach_at(BlockPos::new(x, y - 1, z)) => {
@@ -1260,6 +1277,7 @@ impl World {
                 !anchors.iter().any(|&(px, pz)| (cx - px).abs() <= r && (cz - pz).abs() <= r)
             })
             .copied()
+            .take(100)
             .collect();
         for (cx, cz) in drop {
             self.spill_chunk(cx, cz);
