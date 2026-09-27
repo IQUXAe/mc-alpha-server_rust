@@ -166,7 +166,12 @@ impl Server {
                     if deferred {
                         break 'nb;
                     }
+                    if generated >= CHUNK_GEN_PER_TICK {
+                        deferred = true;
+                        break 'nb;
+                    }
                     self.world.ensure_chunk(bx, bz);
+                    generated += 1;
                 }
             }
             if deferred {

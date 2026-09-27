@@ -88,10 +88,14 @@ impl Server {
     /// A failed encode/put keeps the chunk staged (vanilla retries via
     /// `isModified`) instead of silently dropping player builds.
     pub(crate) fn flush_unloaded_chunks(&mut self) {
+        self.flush_unloaded_chunks_limit(32);
+    }
+
+    pub(crate) fn flush_unloaded_chunks_limit(&mut self, limit: usize) {
         if self.world.unloaded.is_empty() {
             return;
         }
-        let keys: Vec<(i32, i32)> = self.world.unloaded.keys().copied().collect();
+        let keys: Vec<(i32, i32)> = self.world.unloaded.keys().copied().take(limit).collect();
         for (cx, cz) in keys {
             let dirty = self
                 .world
@@ -207,6 +211,15 @@ impl Server {
                 }
                 self.remove_session(cid, sess);
             }
+        }
+        let mut attempts = 0;
+        while !self.world.unloaded.is_empty() && attempts < 5 {
+            let before = self.world.unloaded.len();
+            self.flush_unloaded_chunks_limit(usize::MAX);
+            if self.world.unloaded.len() >= before {
+                break;
+            }
+            attempts += 1;
         }
         self.save_world();
         if let Err(e) = self.store.flush() {
