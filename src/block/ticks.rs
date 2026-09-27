@@ -60,12 +60,7 @@ fn q_attach_world(w: &World, pos: BlockPos) -> bool {
     w.attach_at(pos)
 }
 fn q_attach_torch(w: &World, pos: BlockPos) -> bool {
-    // Solid material plus collidable (everything but fluids).
-    if w.id_at(pos) == 0 {
-        return false;
-    }
-    let m = w.material_at_pos(pos);
-    m.is_solid() && !m.is_liquid()
+    w.attach_at(pos)
 }
 fn q_solid(w: &World, pos: BlockPos) -> bool {
     // Material-solid like blockTickIsSolid (NOT the id list).

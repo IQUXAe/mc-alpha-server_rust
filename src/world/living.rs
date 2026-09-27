@@ -440,9 +440,10 @@ impl World {
         let ex = l.body.pos[0].floor() as i32;
         let ey = eye.floor() as i32;
         let ez = l.body.pos[2].floor() as i32;
+        let inside_opaque = self.block_allows_attachment(ex, ey, ez);
         (
             !l.body.dead,
-            self.is_solid(ex, ey, ez),
+            inside_opaque,
             self.material_at(ex, ey, ez) == Material::WATER,
             l.body.air,
             l.hurt_time,

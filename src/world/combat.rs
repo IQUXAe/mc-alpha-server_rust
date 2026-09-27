@@ -6,7 +6,7 @@ use crate::block::table::{BlockType, block_properties_get};
 use crate::entity::table::{Body, Entity, EntityId, MobKind};
 use crate::material::Material;
 use crate::math_helper::{floor_double, sqrt_float};
-use crate::world::{World, has_collision_box, has_collision_id, material_of};
+use crate::world::{World, has_collision_box, has_collision_id};
 use crate::world::ai::CreatureSnap;
 
 /// Creeper blast radius (mirrors the Alpha inline `explode`).
@@ -257,13 +257,16 @@ impl World {
                     if !has_collision_box(props.block_type) || !has_collision_id(bid) {
                         continue;
                     }
-                    let bb = self.block_collision_box(x, y, z, bid);
-                    if let Some(hit) = bb.clip(from, to) {
-                        let d = (from.x_coord - hit.hit_vec.x_coord).powi(2)
-                            + (from.y_coord - hit.hit_vec.y_coord).powi(2)
-                            + (from.z_coord - hit.hit_vec.z_coord).powi(2);
-                        if d + 1.0e-6 < target_sq {
-                            return true;
+                    let mut boxes = Vec::with_capacity(2);
+                    self.block_collision_boxes(x, y, z, bid, &mut boxes);
+                    for bb in boxes {
+                        if let Some(hit) = bb.clip(from, to) {
+                            let d = (from.x_coord - hit.hit_vec.x_coord).powi(2)
+                                + (from.y_coord - hit.hit_vec.y_coord).powi(2)
+                                + (from.z_coord - hit.hit_vec.z_coord).powi(2);
+                            if d + 1.0e-6 < target_sq {
+                                return true;
+                            }
                         }
                     }
                 }
@@ -776,12 +779,12 @@ impl World {
 
     /// Soil check for fire (mirrors `doesBlockAllowAttachment`: solid and
     /// movement-blocking material).
-    pub(crate) fn block_allows_attachment(&self, x: i32, y: i32, z: i32) -> bool {        let bid = self.get_block_id(x, y, z);
+    pub(crate) fn block_allows_attachment(&self, x: i32, y: i32, z: i32) -> bool {
+        let bid = self.get_block_id(x, y, z);
         if bid == 0 {
             return false;
         }
-        let mat = material_of(block_properties_get(bid as u32).material);
-        mat.is_solid() && mat.blocks_movement()
+        block_properties_get(bid as u32).allows_attachment
     }
 
     /// Arrow tick (mirrors `EntityArrow::tick`): face init, shake decay,

@@ -118,7 +118,7 @@ const AIR: AlphaBlockProperties = AlphaBlockProperties {
     hardness: 0.0, resistance: 0.0,
     material: BlockMaterial::Air as u8,
     light_opacity: 0, light_value: 0,
-    tick_on_load: false, is_block_container: false, allows_attachment: true,
+    tick_on_load: false, is_block_container: false, allows_attachment: false,
     block_type: BlockType::Normal as u8,
     id_dropped: 0, quantity_dropped: 0, can_harvest_block: true,
     min_x: 0.0, min_y: 0.0, min_z: 0.0,
@@ -170,8 +170,8 @@ static BLOCK_PROPS: [AlphaBlockProperties; 256] = {
     props[49] = b!(10.0, 6000.0, Rock, 255, 0, false, false, true, Normal, 49, 1, true); // hardness 10, resistance 2000*3
     props[50] = b!(0.0, 0.0, Circuits, 0, 14, true, false, false, Torch, 50, 1, true);
     props[51] = b!(0.0, 0.0, Fire, 0, 15, true, false, false, Fire, 0, 0, true);
-    props[52] = b!(5.0, 30.0, Rock, 255, 0, false, true, true, Normal, 52, 0, true); // spawner drops nothing
-    props[53] = b!(2.0, 30.0, Wood, 255, 0, false, false, true, Normal, 53, 1, true);
+    props[52] = b!(5.0, 30.0, Rock, 0, 0, false, true, false, Normal, 52, 0, true); // spawner drops nothing
+    props[53] = b!(2.0, 30.0, Wood, 0, 0, false, false, false, Normal, 53, 1, true);
     props[54] = b!(2.5, 12.5, Wood, 255, 0, false, true, true, Normal, 54, 1, true);
     props[55] = b!(0.0, 0.0, Circuits, 0, 0, false, false, false, Normal, 331, 1, true);
     props[56] = b!(3.0, 15.0, Rock, 255, 0, false, false, true, Ore, 264, 1, true);
@@ -198,14 +198,14 @@ static BLOCK_PROPS: [AlphaBlockProperties; 256] = {
     props[76] = b!(0.0, 0.0, Circuits, 0, 7, false, false, false, Normal, 76, 1, true);
     props[77] = b!(0.5, 2.5, Circuits, 0, 0, true, false, false, Normal, 77, 1, true);
     props[78] = b!(0.1, 0.5, Snow, 0, 0, true, false, false, Normal, 332, 1, true); // snow layer drops 1 snowball via harvest
-    props[79] = b!(0.5, 2.5, Ice, 3, 0, true, false, true, Normal, 79, 0, true); // ice drops nothing
+    props[79] = b!(0.5, 2.5, Ice, 3, 0, true, false, false, Normal, 79, 0, true); // ice drops nothing
     props[80] = b!(0.2, 1.0, BuiltSnow, 255, 0, true, false, true, Normal, 332, 4, true); // snow block drops 4 snowballs
     props[81] = b!(0.4, 2.0, Cactus, 0, 0, true, false, false, Cactus, 81, 1, true,
-        0.0625, 0.0, 0.0625, 0.9375, 1.0, 0.9375);
+        0.0625, 0.0, 0.0625, 0.9375, 0.9375, 0.9375);
     props[82] = b!(0.6, 3.0, Clay, 255, 0, false, false, true, Normal, 337, 4, true); // clay drops 4 clay balls
     props[83] = b!(0.0, 0.0, Plants, 0, 0, true, false, false, Reed, 338, 1, true); // reed drops itself (Item.reed=338)
     props[84] = b!(2.0, 30.0, Wood, 255, 0, false, false, true, Normal, 84, 1, true);
-    props[85] = b!(2.0, 15.0, Wood, 255, 0, false, false, true, Normal, 85, 1, true,
+    props[85] = b!(2.0, 15.0, Wood, 0, 0, false, false, false, Normal, 85, 1, true,
         0.0, 0.0, 0.0, 1.0, 1.5, 1.0);
     props[86] = b!(1.0, 5.0, Pumpkin, 255, 0, true, false, true, Normal, 86, 1, true);
     props[87] = b!(0.4, 2.0, Rock, 255, 0, false, false, true, Normal, 87, 1, true);
