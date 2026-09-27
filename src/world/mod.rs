@@ -81,7 +81,7 @@ pub(crate) fn has_collision_box(block_type: u8) -> bool {
 
 /// Id-level no-collision extras (Java `null` boxes our table types as Normal).
 pub(crate) fn has_collision_id(bid: u8) -> bool {
-    !matches!(bid, 55 | 63 | 65 | 66 | 68 | 69 | 70 | 72 | 75 | 76 | 77 | 78 | 83 | 90)
+    !matches!(bid, 55 | 63 | 66 | 68 | 69 | 70 | 72 | 75 | 76 | 77 | 78 | 83 | 90)
 }
 
 /// True when a block id has air material (mirrors the `== &Material::air`
@@ -749,8 +749,38 @@ impl World {
     }
 
     /// Compute the collision bounding box for block `id` at `(x, y, z)`,
-    /// handling metadata-dependent door rotation (`BlockDoor.func_273_b`).
+    /// handling metadata-dependent door rotation (`BlockDoor.func_273_b`),
+    /// farmland full height, and ladder wall orientation (`BlockLadder`).
     pub(crate) fn block_collision_box(&self, x: i32, y: i32, z: i32, id: u8) -> AxisAlignedBB {
+        if id == 60 {
+            return AxisAlignedBB::get_bounding_box(
+                x as f64,
+                y as f64,
+                z as f64,
+                x as f64 + 1.0,
+                y as f64 + 1.0,
+                z as f64 + 1.0,
+            );
+        }
+        if id == 65 {
+            let meta = self.get_block_meta(x, y, z);
+            let f = 0.125;
+            let (min_x, min_z, max_x, max_z) = match meta {
+                2 => (0.0, 1.0 - f, 1.0, 1.0),
+                3 => (0.0, 0.0, 1.0, f),
+                4 => (1.0 - f, 0.0, 1.0, 1.0),
+                5 => (0.0, 0.0, f, 1.0),
+                _ => (0.0, 0.0, 1.0, 1.0),
+            };
+            return AxisAlignedBB::get_bounding_box(
+                x as f64 + min_x,
+                y as f64,
+                z as f64 + min_z,
+                x as f64 + max_x,
+                y as f64 + 1.0,
+                z as f64 + max_z,
+            );
+        }
         if id == 64 || id == 71 {
             let meta = self.get_block_meta(x, y, z) as i32;
             let state = if (meta & 4) == 0 {
@@ -785,6 +815,44 @@ impl World {
         )
     }
 
+    /// Compute one or two collision bounding boxes for block `id` at `(x, y, z)`,
+    /// matching `BlockStairs.getCollidingBoundingBoxes` for stairs (53, 67).
+    pub(crate) fn block_collision_boxes(&self, x: i32, y: i32, z: i32, id: u8, out: &mut Vec<AxisAlignedBB>) {
+        if id == 53 || id == 67 {
+            let meta = self.get_block_meta(x, y, z) as i32;
+            let fx = x as f64;
+            let fy = y as f64;
+            let fz = z as f64;
+            match meta {
+                0 => {
+                    // Ascending East
+                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 0.5, fy + 0.5, fz + 1.0));
+                    out.push(AxisAlignedBB::get_bounding_box(fx + 0.5, fy, fz, fx + 1.0, fy + 1.0, fz + 1.0));
+                }
+                1 => {
+                    // Ascending West
+                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 0.5, fy + 1.0, fz + 1.0));
+                    out.push(AxisAlignedBB::get_bounding_box(fx + 0.5, fy, fz, fx + 1.0, fy + 0.5, fz + 1.0));
+                }
+                2 => {
+                    // Ascending South
+                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 1.0, fy + 0.5, fz + 0.5));
+                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz + 0.5, fx + 1.0, fy + 1.0, fz + 1.0));
+                }
+                3 => {
+                    // Ascending North
+                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 1.0, fy + 1.0, fz + 0.5));
+                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz + 0.5, fx + 1.0, fy + 0.5, fz + 1.0));
+                }
+                _ => {
+                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 1.0, fy + 1.0, fz + 1.0));
+                }
+            }
+            return;
+        }
+        out.push(self.block_collision_box(x, y, z, id));
+    }
+
     /// Collision boxes of blocks overlapping `mask` (mirrors
     /// `World::getCollidingBoundingBoxes` over loaded chunks only).
     pub fn colliding_boxes(&self, mask: &AxisAlignedBB) -> Vec<AxisAlignedBB> {
@@ -798,7 +866,9 @@ impl World {
         {
             return out;
         }
-        let min_by = (mask.min_y.floor() as i32).max(0);
+        // min_by starts at floor(min_y) - 1 so blocks with max_y > 1.0 (such as fences with 1.5)
+        // below the player are checked, as in World.java:799.
+        let min_by = (mask.min_y.floor() as i32 - 1).max(0);
         let max_by = (mask.max_y.floor() as i32).min(WORLD_HEIGHT - 1);
         if min_by > max_by {
             return out;
@@ -820,9 +890,19 @@ impl World {
                     if !has_collision_box(props.block_type) || !has_collision_id(id) {
                         continue;
                     }
-                    let bb = self.block_collision_box(x, y, z, id);
-                    if mask.intersects_with(&bb) {
-                        out.push(bb);
+                    if id == 53 || id == 67 {
+                        let mut stairs_boxes = Vec::with_capacity(2);
+                        self.block_collision_boxes(x, y, z, id, &mut stairs_boxes);
+                        for bb in stairs_boxes {
+                            if mask.intersects_with(&bb) {
+                                out.push(bb);
+                            }
+                        }
+                    } else {
+                        let bb = self.block_collision_box(x, y, z, id);
+                        if mask.intersects_with(&bb) {
+                            out.push(bb);
+                        }
                     }
                 }
             }

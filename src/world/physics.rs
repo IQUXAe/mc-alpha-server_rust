@@ -169,6 +169,7 @@ impl World {
             self.cactus_contact(id);
             self.soul_sand_contact(id);
             self.pressure_plate_contact(id);
+            self.entity_walking_contact(id);
             // Lava/fire touch (`World.func_523_c` via `Entity.moveEntity`,
             // Entity.java:395-411): fire/lava in the box deals 1 and
             // ignites for 300 ticks.
@@ -322,6 +323,30 @@ impl World {
                     }
                 }
             }
+        }
+    }
+
+    /// OnEntityWalking hook for walking across blocks (BlockFarmland trampling and BlockRedstoneOre activation).
+    fn entity_walking_contact(&mut self, id: EntityId) {
+        let (pos, on_ground, y_offset) = match self.entities.get(id) {
+            Some(Entity::Player(p)) => (p.living.body.pos, p.living.body.on_ground, p.living.body.y_offset),
+            Some(Entity::Mob(m)) => (m.living.body.pos, m.living.body.on_ground, m.living.body.y_offset),
+            Some(Entity::Animal(a)) => (a.living.body.pos, a.living.body.on_ground, a.living.body.y_offset),
+            _ => return,
+        };
+        if !on_ground {
+            return;
+        }
+        let wx = floor_double(pos[0]);
+        let wy = floor_double(pos[1] - 0.20000000298023224 - y_offset as f64);
+        let wz = floor_double(pos[2]);
+        let bid = self.get_block_id(wx, wy, wz);
+        if bid == 60 {
+            if self.rng.next_int_bound(4) == 0 {
+                self.apply_set_notify(wx, wy, wz, 3);
+            }
+        } else if bid == 73 {
+            self.apply_set_notify(wx, wy, wz, 74);
         }
     }
 
