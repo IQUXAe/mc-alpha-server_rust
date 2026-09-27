@@ -14,6 +14,31 @@ use crate::world::World;
 const ATTACK_REACH_SQ: f64 = 25.0;
 
 impl PlaySession {
+    fn consume_one_selected(&mut self, world: &mut World, me: i32) {
+        let Some(mut s) = self.selected_stack(world) else {
+            return;
+        };
+        s.count -= 1;
+        let cur = match world.entities.get(me) {
+            Some(Entity::Player(p)) => p.inventory.current,
+            _ => -1,
+        };
+        if s.count <= 0 {
+            self.held_id = 0;
+            if (0..36).contains(&cur) {
+                if let Some(Entity::Player(p)) = world.entities.get_mut(me) {
+                    p.inventory.main[cur as usize] = None;
+                }
+            }
+            self.send_inventory(world);
+        } else if (0..36).contains(&cur) {
+            if let Some(Entity::Player(p)) = world.entities.get_mut(me) {
+                p.inventory.main[cur as usize] = Some(s);
+            }
+            self.send_inventory(world);
+        }
+    }
+
     // ---- entity interaction (mirrors handleUseEntity) ----
 
     pub(crate) fn use_entity(
@@ -65,34 +90,47 @@ impl PlaySession {
         if !is_left_click {
             // Cow milking with a held bucket.
             if let Some(Entity::Animal(a)) = ctx.world.entities.get(target) {
-                if a.kind == AnimalKind::Cow {
+                if a.kind == AnimalKind::Cow
+                    && self.selected_stack(ctx.world).map(|s| s.item_id == 325).unwrap_or(false)
+                {
                     let cur = match ctx.world.entities.get(me) {
                         Some(Entity::Player(p)) => p.inventory.current,
                         _ => -1,
                     };
-                    let bucket = (0..36).contains(&cur)
-                        && matches!(
-                            ctx.world.entities.get(me),
-                            Some(Entity::Player(p)) if p.inventory.main[cur as usize]
-                                .map(|s| s.item_id == 325)
-                                .unwrap_or(false)
-                        );
-                    if bucket {
+                    if (0..36).contains(&cur) {
                         if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
                             p.inventory.main[cur as usize] = Some(ItemStack::new(335, 1, 0));
+                        }
+                        if self.held_id > 0 {
+                            self.held_id = 335;
                         }
                         self.send_inventory(ctx.world);
                         return None;
                     }
                 }
             }
-            // Saddled-pig mount (mirrors Java EntityPig.interact: riding
-            // pigs board on right-click; unsaddled pigs ignore it).
+            // Saddled-pig mount or saddle application (mirrors Java EntityPig.interact
+            // and ItemSaddle.saddleEntity: riding pigs board on right-click; holding a
+            // saddle (329) on an unsaddled pig saddles it and consumes the saddle).
             if let Some(Entity::Animal(a)) = ctx.world.entities.get(target) {
-                if a.kind == AnimalKind::Pig && a.saddled {
-                    ctx.world.entities.mount(me, Some(target));
-                    ctx.world.entities.update_rider_position(target);
-                    return None;
+                if a.kind == AnimalKind::Pig {
+                    if a.saddled {
+                        ctx.world.entities.mount(me, Some(target));
+                        ctx.world.entities.update_rider_position(target);
+                        return None;
+                    }
+                    if self.selected_stack(ctx.world).map(|s| s.item_id == 329).unwrap_or(false) {
+                        let pig_chunk = (
+                            (a.living.body.pos[0].floor() as i32) >> 4,
+                            (a.living.body.pos[2].floor() as i32) >> 4,
+                        );
+                        if let Some(Entity::Animal(pig)) = ctx.world.entities.get_mut(target) {
+                            pig.saddled = true;
+                        }
+                        ctx.world.mark_chunk_modified(pig_chunk.0, pig_chunk.1);
+                        self.consume_one_selected(ctx.world, me);
+                        return None;
+                    }
                 }
             }
             // Boat mount toggle with rider rules.
@@ -133,13 +171,28 @@ impl PlaySession {
             return None;
         }
         ctx.world.attack_living(target, damage, Some(me));
-        // Tool wear only against living targets.
+        // Tool wear and ItemSaddle.hitEntity against living targets.
         let living_target = matches!(
             ctx.world.entities.get(target),
             Some(Entity::Mob(_)) | Some(Entity::Animal(_)) | Some(Entity::Player(_))
         );
         if let Some(mut s) = held {
             if living_target {
+                if s.item_id == 329 {
+                    if let Some(Entity::Animal(a)) = ctx.world.entities.get(target) {
+                        if a.kind == AnimalKind::Pig && !a.saddled {
+                            let pig_chunk = (
+                                (a.living.body.pos[0].floor() as i32) >> 4,
+                                (a.living.body.pos[2].floor() as i32) >> 4,
+                            );
+                            if let Some(Entity::Animal(pig)) = ctx.world.entities.get_mut(target) {
+                                pig.saddled = true;
+                            }
+                            ctx.world.mark_chunk_modified(pig_chunk.0, pig_chunk.1);
+                            self.consume_one_selected(ctx.world, me);
+                        }
+                    }
+                }
                 let kind = item_tool_kind(s.item_id);
                 let wear = if kind == crate::item_data::ItemToolKind::Pickaxe as i32
                     || kind == crate::item_data::ItemToolKind::Spade as i32
@@ -154,44 +207,21 @@ impl PlaySession {
                 if wear > 0 {
                     let max = item_max_damage(s.item_id);
                     crate::inventory::item_stack_damage(&mut s, wear, max);
+                    let cur = match ctx.world.entities.get(me) {
+                        Some(Entity::Player(p)) => p.inventory.current,
+                        _ => -1,
+                    };
                     if s.count <= 0 {
-                        // A spent ghost clears the fallback (and the held
-                        // id); a spent real stack clears its own slot.
-                        if self.held_fallback.is_some() {
-                            self.held_fallback = None;
-                            self.held_id = 0;
+                        self.held_id = 0;
+                        if (0..36).contains(&cur) {
                             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
-                                p.inventory.current = 0;
-                            }
-                        } else {
-                            let cur = match ctx.world.entities.get(me) {
-                                Some(Entity::Player(p)) => p.inventory.current,
-                                _ => -1,
-                            };
-                            if (0..36).contains(&cur) {
-                                if let Some(Entity::Player(p)) =
-                                    ctx.world.entities.get_mut(me)
-                                {
-                                    p.inventory.main[cur as usize] = None;
-                                }
+                                p.inventory.main[cur as usize] = None;
                             }
                         }
                         self.send_inventory(ctx.world);
-                    } else {
-                        // Worn ghost stays in the fallback; a worn real
-                        // stack returns to its own slot, 35 included.
-                        if self.held_fallback.is_some() {
-                            self.held_fallback = Some(s);
-                        } else {
-                            let cur = match ctx.world.entities.get(me) {
-                                Some(Entity::Player(p)) => p.inventory.current,
-                                _ => -1,
-                            };
-                            if (0..36).contains(&cur) {
-                                if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
-                                    p.inventory.main[cur as usize] = Some(s);
-                                }
-                            }
+                    } else if (0..36).contains(&cur) {
+                        if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
+                            p.inventory.main[cur as usize] = Some(s);
                         }
                     }
                 }
@@ -267,11 +297,9 @@ const CHAT_ALLOWED: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQR
 
     pub(crate) fn held_switch(&mut self, ctx: &mut SessionCtx, item_id: i16) {
         // Strict like `apply_inventory` (vanilla stores the id verbatim):
-        // unknown ids clear the selection instead of arming a ghost stack
-        // for an item that can never exist server-side.
+        // unknown ids clear the selection.
         if item_id <= 0 || !crate::item_data::item_is_valid(item_id as i32) {
             self.held_id = 0;
-            self.held_fallback = None;
             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(self.player) {
                 p.inventory.current = 0;
             }

@@ -25,7 +25,6 @@ pub struct PlaySession {
     pub has_moved: bool,
     pub last: [f64; 3],
     pub held_id: i32,
-    pub held_fallback: Option<ItemStack>,
     pub keepalive_tick: u32,
     pub gone: bool,
     /// Last health byte sent as 0x08 (mirrors the `Packet8` diff-check in
@@ -47,7 +46,6 @@ impl PlaySession {
             has_moved: false,
             last: [0.0; 3],
             held_id: 0,
-            held_fallback: None,
             keepalive_tick: 0,
             gone: false,
             last_health: 20,
@@ -149,38 +147,26 @@ impl PlaySession {
     /// Held-item sync (mirrors `syncHeldItemSelection`).
     pub(crate) fn sync_held(&mut self, world: &mut World) {
         if self.held_id <= 0 {
-            self.held_fallback = None;
             return;
         }
-        let mut found = false;
         if let Some(Entity::Player(p)) = world.entities.get_mut(self.player) {
             for i in 0..36 {
                 if let Some(s) = p.inventory.main[i] {
                     if s.item_id == self.held_id {
                         p.inventory.current = i as i32;
-                        found = true;
                         break;
                     }
                 }
             }
-            if !found {
-                // Genuine desync (or creative): park the ghost fallback
-                // without touching real slot contents, slot 35 included.
-                p.inventory.current = 35;
-            }
-        }
-        if found {
-            self.held_fallback = None;
-        } else if self.held_fallback.map(|s| s.item_id) != Some(self.held_id) {
-            self.held_fallback = Some(Self::ghost_stack(self.held_id));
         }
     }
 
     /// Login-path held restore (mirrors `restoreHeldItem`, called only
     /// with the saved id when positive): point `current` at the slot
-    /// holding that item, else stage the fallback copy in the last slot.
+    /// holding that item.
     pub fn restore_held(&mut self, world: &mut World, item_id: i32) {
         if item_id <= 0 {
+            self.held_id = 0;
             if let Some(Entity::Player(p)) = world.entities.get_mut(self.player) {
                 p.inventory.current = 0;
             }
@@ -190,20 +176,17 @@ impl PlaySession {
         self.sync_held(world);
     }
 
-    /// Selected stack (mirrors `getSelectedItemStack`): ghost fallback
-    /// first while active (its slot-35 shadow holds real content that must
-    /// not be consumed as the held item), else the real current slot.
+    /// Selected stack (mirrors `getSelectedItemStack`): returns only a real
+    /// non-empty stack in `p.inventory.main[current]` (matching `self.held_id`
+    /// when a held id is active), never a fabricated ghost stack.
     pub(crate) fn selected_stack(&self, world: &World) -> Option<ItemStack> {
-        if let Some(s) = self.held_fallback {
-            if self.held_id > 0 && s.item_id == self.held_id {
-                return Some(s);
-            }
-        }
         if let Some(Entity::Player(p)) = world.entities.get(self.player) {
             let cur = p.inventory.current;
             if cur >= 0 && (cur as usize) < p.inventory.main.len() {
                 if let Some(s) = p.inventory.main[cur as usize] {
-                    return Some(s);
+                    if !s.is_empty() && (self.held_id <= 0 || s.item_id == self.held_id) {
+                        return Some(s);
+                    }
                 }
             }
         }

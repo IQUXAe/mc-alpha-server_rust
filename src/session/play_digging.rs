@@ -104,7 +104,10 @@ impl PlaySession {
             ctx.world.tiles.remove(&(x, y, z));
         }
         let removed = ctx.world.apply_set_notify(x, y, z, 0);
-        // Tool wear on the real held slot (pick/spade/axe only).
+        // Capture harvest tool id before tool wear (a tool breaking on its
+        // last use still harvests the block it just broke).
+        let harvest_held_id = self.selected_stack(ctx.world).map(|s| s.item_id).unwrap_or(0);
+        // Tool wear on the real held slot (pick/spade/axe/sword).
         let cur = match ctx.world.entities.get(self.player) {
             Some(Entity::Player(p)) => p.inventory.current,
             _ => -1,
@@ -114,8 +117,9 @@ impl PlaySession {
                 Some(Entity::Player(p)) => p.inventory.main[cur as usize],
                 _ => None,
             };
+            let mut broke_tool = false;
             if let Some(mut s) = slot {
-                if s.item_id > 0 && s.item_id < 32000 {
+                if s.item_id > 0 && s.item_id < 32000 && (self.held_id <= 0 || s.item_id == self.held_id) {
                     let kind = item_tool_kind(s.item_id);
                     // Java ItemTool.hitBlock 1, ItemSword.hitBlock 2.
                     let wear = if kind == crate::item_data::ItemToolKind::Pickaxe as i32
@@ -133,6 +137,7 @@ impl PlaySession {
                         crate::inventory::item_stack_damage(&mut s, wear, max);
                         if s.count <= 0 || s.damage > max {
                             slot = None;
+                            broke_tool = true;
                         } else {
                             slot = Some(s);
                         }
@@ -141,6 +146,10 @@ impl PlaySession {
             }
             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(self.player) {
                 p.inventory.main[cur as usize] = slot;
+            }
+            if broke_tool {
+                self.held_id = 0;
+                self.send_inventory(ctx.world);
             }
         }
         // Block drop when harvestable (uses the pre-removal id like C++).
@@ -164,8 +173,7 @@ impl PlaySession {
                     return;
                 }
             }
-            let held_id = self.selected_stack(ctx.world).map(|s| s.item_id).unwrap_or(0);
-            if mining_can_harvest(bid as i32, held_id) {
+            if mining_can_harvest(bid as i32, harvest_held_id) {
                 ctx.world.drop_block_for(bid, meta, x, y, z);
             }
         }

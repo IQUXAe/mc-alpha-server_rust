@@ -18,10 +18,10 @@ impl PlaySession {
     /// Write a mutated stack into the real current slot (air-use path).
     fn write_back_current(&mut self, ctx: &mut SessionCtx, s: ItemStack) {
         let live = !s.is_empty();
-        // Ghost fallback shadows the current slot while active.
-        if self.held_fallback.is_some() {
-            self.held_fallback = if live { Some(s) } else { None };
-            return;
+        if !live {
+            self.held_id = 0;
+        } else {
+            self.held_id = s.item_id;
         }
         let cur = match ctx.world.entities.get(self.player) {
             Some(Entity::Player(p)) => p.inventory.current,
@@ -31,8 +31,7 @@ impl PlaySession {
             return;
         }
         if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(self.player) {
-            p.inventory.main[cur as usize] =
-                if !s.is_empty() { Some(s) } else { None };
+            p.inventory.main[cur as usize] = if live { Some(s) } else { None };
         }
     }
 }
@@ -51,10 +50,12 @@ impl PlaySession {
     ) -> Option<SessionOutcome> {
         let me = self.player;
         if direction == -1 {
-            // Right-click in air: use the held item.
+            // Right-click in air: use the held item (must match packet item_id if specified).
             let held = self.selected_stack(ctx.world);
             if let Some(s) = held {
-                self.use_item_air(ctx, s);
+                if item_id < 0 || s.item_id == item_id as i32 {
+                    self.use_item_air(ctx, s);
+                }
             }
             return None;
         }
@@ -125,6 +126,7 @@ impl PlaySession {
                     damage_taken: 0,
                     forward_dir: 1,
                 }));
+                ctx.world.mark_chunk_modified(x >> 4, z >> 4);
                 if s.count > 0 {
                     s.count -= 1;
                 }
@@ -155,8 +157,12 @@ impl PlaySession {
             }
         }
         self.send_inventory(ctx.world);
-        // Rollback views at both cells.
+        // Rollback views at both cells (plus upper/lower door half when a door was clicked).
         self.send_block_change(ctx.world, x, y, z);
+        if clicked == 64 || clicked == 71 {
+            self.send_block_change(ctx.world, x, y - 1, z);
+            self.send_block_change(ctx.world, x, y + 1, z);
+        }
         let (nx, ny, nz) = match dir {
             0 => (x, y - 1, z),
             1 => (x, y + 1, z),
@@ -167,19 +173,23 @@ impl PlaySession {
             _ => (x, y, z),
         };
         self.send_block_change(ctx.world, nx, ny, nz);
-        if matches!(ctx.world.get_block_id(nx, ny, nz), 54 | 61 | 62) {
+        let placed_id = ctx.world.get_block_id(nx, ny, nz);
+        if placed_id == 64 || placed_id == 71 {
+            self.send_block_change(ctx.world, nx, ny + 1, nz);
+        }
+        if matches!(placed_id, 54 | 61 | 62) {
             self.send_tile(ctx.world, nx, ny, nz);
         }
         None
     }
 
-    /// Write a mutated held stack back to its slot (or the fallback copy
-    /// while a ghost is active, so real slot contents are never shadowed).
+    /// Write a mutated held stack back to its real inventory slot.
     fn write_stack_slot(&mut self, ctx: &mut SessionCtx, slot: Option<usize>, s: ItemStack) {
         let live = !s.is_empty();
-        if self.held_fallback.is_some() {
-            self.held_fallback = if live { Some(s) } else { None };
-            return;
+        if !live {
+            self.held_id = 0;
+        } else {
+            self.held_id = s.item_id;
         }
         if let Some(i) = slot {
             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(self.player) {
@@ -549,6 +559,7 @@ impl PlaySession {
                 damage_taken: 0,
                 forward_dir: 1,
             }));
+            ctx.world.mark_chunk_modified(hx >> 4, hz >> 4);
             if s.count > 0 {
                 s.count -= 1;
             }

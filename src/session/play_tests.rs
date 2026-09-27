@@ -659,20 +659,21 @@
         // Saved id present: point at its slot.
         sess.restore_held(&mut w, 3);
         assert_eq!(sess.held_id, 3);
-        assert!(sess.held_fallback.is_none());
         match w.entities.get(player).unwrap() {
             Entity::Player(p) => assert_eq!(p.inventory.current, 2),
             _ => unreachable!(),
         }
-        // Saved id gone: fallback copy in the last slot.
+        // Saved id gone: current is unchanged (never forced to 35) and selected_stack is None.
         sess.restore_held(&mut w, 9999);
+        assert_eq!(sess.held_id, 9999);
+        assert!(sess.selected_stack(&w).is_none());
         match w.entities.get(player).unwrap() {
-            Entity::Player(p) => assert_eq!(p.inventory.current, 35),
+            Entity::Player(p) => assert_eq!(p.inventory.current, 2),
             _ => unreachable!(),
         }
-        assert_eq!(sess.held_fallback.map(|s| s.item_id), Some(9999));
         // Non-positive id resets to the first slot.
         sess.restore_held(&mut w, 0);
+        assert_eq!(sess.held_id, 0);
         match w.entities.get(player).unwrap() {
             Entity::Player(p) => assert_eq!(p.inventory.current, 0),
             _ => unreachable!(),
@@ -932,8 +933,7 @@
 
     #[test]
     fn test_strict_held_switch_rejects_unknown_id() {
-        // Unknown held ids clear the selection instead of arming a ghost
-        // for an item that can never exist server-side.
+        // Unknown held ids clear the selection.
         let mut w = floor_world();
         let ops = no_ops();
         let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
@@ -944,7 +944,7 @@
             PacketData::BlockItemSwitch { entity_id: player, item_id: 31000 },
         );
         assert_eq!(sess.held_id, 0);
-        assert!(sess.held_fallback.is_none());
+        assert!(sess.selected_stack(&w).is_none());
     }
 
     #[test]
@@ -1187,3 +1187,252 @@
             "subchunk blocklight must include neighbor light=12 around lit furnace"
         );
     }
+
+    #[test]
+    fn test_ghost_fallback_cannot_place_blocks_or_use_items_and_unobtainables_blocked() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // 1. Forged BlockItemSwitch for cobblestone (id=4) when inventory is empty:
+        // held_id is tracked for visuals, but selected_stack() must be None!
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockItemSwitch { entity_id: player, item_id: 4 },
+        );
+        assert_eq!(sess.held_id, 4);
+        assert!(sess.selected_stack(&w).is_none());
+
+        // Attempting to place cobblestone with empty inventory must NOT place anything:
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::Place { item_id: 4, x: 3, y: 63, z: 3, direction: 1 },
+        );
+        assert_eq!(w.get_block_id(3, 64, 3), 0, "ghost fallback must not allow placing blocks");
+
+        // Attempting to use lava bucket (327) with empty inventory must NOT place lava:
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockItemSwitch { entity_id: player, item_id: 327 },
+        );
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::Place { item_id: 327, x: 3, y: 63, z: 3, direction: 1 },
+        );
+        assert_eq!(w.get_block_id(3, 64, 3), 0, "ghost fallback must not allow placing lava from bucket");
+
+        // 2. Packet5PlayerInventory with unobtainable blocks (7 bedrock, 52 spawner, 9 water, 51 fire, 90 portal):
+        let mut slots = vec![crate::network::SlotData { item_id: -1, count: 0, damage: 0 }; 36];
+        slots[0] = crate::network::SlotData { item_id: 7, count: 64, damage: 0 };
+        slots[1] = crate::network::SlotData { item_id: 52, count: 64, damage: 0 };
+        slots[2] = crate::network::SlotData { item_id: 9, count: 64, damage: 0 };
+        slots[3] = crate::network::SlotData { item_id: 51, count: 64, damage: 0 };
+        slots[4] = crate::network::SlotData { item_id: 90, count: 64, damage: 0 };
+        slots[5] = crate::network::SlotData { item_id: 2256, count: 1, damage: 0 }; // gold record (obtainable)
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::PlayerInventory { inventory_type: -1, slots },
+        );
+        if let Some(Entity::Player(p)) = w.entities.get(player) {
+            for i in 0..5 {
+                assert!(p.inventory.main[i].is_none(), "unobtainable slot {i} must be rejected");
+            }
+            assert_eq!(p.inventory.main[5].map(|s| s.item_id), Some(2256), "record 2256 must be accepted");
+        }
+
+        // 3. Bucket block-place (326 -> 325), cow milking (325 -> 335), and dropping last stack
+        // must keep held_id synchronized with the real slot:
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(326, 1, 0)); // water bucket
+            p.inventory.current = 0;
+        }
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockItemSwitch { entity_id: player, item_id: 326 },
+        );
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::Place { item_id: 326, x: 3, y: 63, z: 3, direction: 1 },
+        );
+        assert_eq!(w.get_block_id(3, 64, 3), 8, "water bucket must place water");
+        assert_eq!(sess.held_id, 325, "emptying water bucket on block must update held_id to 325");
+        assert_eq!(sess.selected_stack(&w).map(|s| s.item_id), Some(325));
+
+        // Milking a cow with held_id = 325 updates held_id to 335:
+        let cid = w.entities.alloc_id();
+        let mut cow = AnimalEnt::new(cid, AnimalKind::Cow);
+        cow.living.body.set_position(4.5, 64.0, 4.5);
+        w.entities.insert(Entity::Animal(cow));
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::UseEntity {
+                player_entity_id: player,
+                target_entity_id: cid,
+                is_left_click: false,
+            },
+        );
+        assert_eq!(sess.held_id, 335, "milking cow must update held_id to 335");
+        assert_eq!(sess.selected_stack(&w).map(|s| s.item_id), Some(335));
+
+        // Dropping the milk bucket via PickupSpawn clears held_id to 0 when no more 335 remain:
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::PickupSpawn {
+                entity_id: -1,
+                item_id: 335,
+                count: 1,
+                x: (3.5 * 32.0) as i32,
+                y: (64.0 * 32.0) as i32,
+                z: (4.5 * 32.0) as i32,
+                rotation: 0,
+                pitch: 0,
+                roll: 0,
+            },
+        );
+        assert_eq!(sess.held_id, 0, "dropping last held item must clear held_id to 0");
+        assert!(sess.selected_stack(&w).is_none());
+    }
+
+    #[test]
+    fn test_movement_rejects_nan_in_teleport_wait_and_clamps_riding_motion() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        sess.teleport_wait = Some([3.5, 64.0, 4.5]);
+        let mut bc = Vec::new();
+
+        // NaN position during teleport_wait must kick immediately with "Illegal position":
+        let out = sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::PlayerPosition {
+                x: f64::NAN,
+                y: 64.0,
+                stance: 65.62,
+                z: 4.5,
+                on_ground: true,
+            },
+        );
+        assert!(matches!(out, Some(SessionOutcome::Kick(msg)) if msg == "Illegal position"));
+
+        // Riding motion is clamped to [-1.0, 1.0]:
+        let mut sess2 = PlaySession::new(player);
+        let boat = w.entities.alloc_id();
+        let mut b = crate::entity::table::Body::new(boat, 1.5, 0.6, 0.3);
+        b.set_position(3.5, 64.0, 4.5);
+        w.entities.insert(Entity::Boat(crate::entity::table::BoatEnt {
+            body: b,
+            time_since_hit: 0,
+            damage_taken: 0,
+            forward_dir: 1,
+        }));
+        w.entities.mount(player, Some(boat));
+        let out2 = sess2.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::PlayerPosition {
+                x: 500.0,
+                y: -999.0,
+                stance: -999.0,
+                z: -500.0,
+                on_ground: false,
+            },
+        );
+        assert!(out2.is_none());
+        let pmotion = w.entities.get(player).unwrap().body().motion;
+        assert_eq!(pmotion[0], 1.0);
+        assert_eq!(pmotion[2], -1.0);
+    }
+
+    #[test]
+    fn test_door_placement_sends_both_halves_and_tool_break_clears_held_id() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(crate::inventory::ItemStack::new(324, 1, 0)); // wooden door
+            p.inventory.main[1] = Some(crate::inventory::ItemStack::new(270, 1, 32)); // wooden pickaxe at max damage (32)
+            p.inventory.current = 0;
+        }
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 324;
+        let mut bc = Vec::new();
+
+        sess.outbox.clear();
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::Place { item_id: 324, x: 3, y: 63, z: 3, direction: 1 },
+        );
+        assert_eq!(w.get_block_id(3, 64, 3), 64);
+        assert_eq!(w.get_block_id(3, 65, 3), 64);
+        let pkt53_ys: Vec<u8> = sess
+            .outbox
+            .iter()
+            .filter(|p| p.first() == Some(&53))
+            .map(|p| p[5])
+            .collect();
+        assert!(pkt53_ys.contains(&64) && pkt53_ys.contains(&65), "door placement must send Packet53 for both y=64 and y=65");
+
+        // Select wooden pickaxe in slot 1 at max damage and harvest stone at (2, 64, 4):
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.current = 1;
+        }
+        sess.held_id = 270;
+        w.set_block_id(2, 64, 4, 1);
+        for _ in 0..3000 {
+            sess.pump(
+                &mut ctx(&mut w, &ops, &mut bc),
+                PacketData::BlockDig { status: 1, x: 2, y: 64, z: 4, face: 1 },
+            );
+            if w.get_block_id(2, 64, 4) == 0 {
+                break;
+            }
+        }
+        assert_eq!(w.get_block_id(2, 64, 4), 0);
+        assert_eq!(sess.held_id, 0, "broken tool must clear session held_id");
+        assert!(sess.selected_stack(&w).is_none());
+    }
+
+    #[test]
+    fn test_pig_saddle_consumes_item_and_marks_chunk_modified() {
+        use crate::entity::table::{AnimalEnt, AnimalKind};
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 4.5, 64.0, 4.5);
+        let pig_id = w.entities.alloc_id();
+        let mut pig = AnimalEnt::new(pig_id, AnimalKind::Pig);
+        pig.living.body.set_position(5.5, 64.0, 4.5);
+        w.entities.insert(Entity::Animal(pig));
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(crate::inventory::ItemStack::new(329, 1, 0)); // saddle
+            p.inventory.current = 0;
+        }
+        if let Some(ch) = w.chunks.get_mut(&(0, 0)) {
+            ch.clear_modified();
+        }
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 329;
+        let mut bc = Vec::new();
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::UseEntity {
+                player_entity_id: player,
+                target_entity_id: pig_id,
+                is_left_click: false,
+            },
+        );
+        match w.entities.get(pig_id).unwrap() {
+            Entity::Animal(a) => assert!(a.saddled, "right-clicking pig with saddle (329) must set saddled=true"),
+            _ => unreachable!(),
+        }
+        match w.entities.get(player).unwrap() {
+            Entity::Player(p) => assert!(p.inventory.main[0].is_none(), "saddling pig must consume the saddle"),
+            _ => unreachable!(),
+        }
+        assert!(
+            w.chunks.get(&(0, 0)).unwrap().is_modified,
+            "saddling pig must mark its chunk as modified"
+        );
+    }
+

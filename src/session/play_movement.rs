@@ -22,6 +22,11 @@ impl PlaySession {
         rotating: bool,
         on_ground: bool,
     ) -> Option<SessionOutcome> {
+        if (moving && (!x.is_finite() || !y.is_finite() || !stance.is_finite() || !z.is_finite()))
+            || (rotating && (!yaw.is_finite() || !pitch.is_finite()))
+        {
+            return self.kick("Illegal position");
+        }
         let me = self.player;
         let (pos, cur_yaw, cur_pitch, riding) = match ctx.world.entities.get(me) {
             Some(e) => (e.body().pos, e.body().yaw, e.body().pitch, e.body().riding),
@@ -53,8 +58,8 @@ impl PlaySession {
                 b.on_ground = on_ground;
                 b.motion = [0.0; 3];
                 if moving && y == -999.0 && stance == -999.0 {
-                    b.motion[0] = x;
-                    b.motion[2] = z;
+                    b.motion[0] = x.clamp(-1.0, 1.0);
+                    b.motion[2] = z.clamp(-1.0, 1.0);
                 }
             }
             ctx.world.entities.update_rider_position(riding);

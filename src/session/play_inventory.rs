@@ -1,4 +1,4 @@
-//! Inventory apply, ghost stacks and sign text on `PlaySession`.
+//! Inventory apply and sign text on `PlaySession`.
 //! Split out of `session.rs`; behavior unchanged.
 
 use crate::entity::table::Entity;
@@ -11,7 +11,7 @@ use crate::world::tiles::TileData;
 /// non-positive counts become 0, i.e. the slot stays empty; the rest clamp
 /// to the per-item max stack like `apply_inventory`).
 fn strict_tile_count(item_id: i32, count: i32) -> i32 {
-    if !crate::item_data::item_is_valid(item_id) {
+    if !crate::item_data::item_is_obtainable(item_id) {
         return 0;
     }
     count.clamp(0, crate::player::inventory::inventory_max_stack_size(item_id).max(1))
@@ -28,12 +28,6 @@ fn strict_tile_damage(item_id: i32, damage: i32) -> i32 {
 }
 
 impl PlaySession {
-    /// Ghost fallback for a held item id the server cannot find in any
-    /// real slot (desync/creative): a 1-count copy that shadows slot 35
-    /// without touching real contents, like vanilla's `field_10_k`.
-    pub(crate) fn ghost_stack(held_id: i32) -> ItemStack {
-        ItemStack::new(held_id, 1, 0)
-    }
 
     /// Handle client dropping items into the world (mirrors NetServerHandler.handlePickupSpawn).
     #[allow(clippy::too_many_arguments)]
@@ -102,6 +96,9 @@ impl PlaySession {
             return;
         }
         self.sync_held(ctx.world);
+        if self.selected_stack(ctx.world).is_none() {
+            self.held_id = 0;
+        }
 
         let eid = ctx.world.spawn_item_entity(item_id as i32, count as i32, damage, rx, ry, rz);
         if let Some(Entity::Item(it)) = ctx.world.entities.get_mut(eid) {
@@ -122,14 +119,14 @@ impl PlaySession {
         // `server::mod` docs): vanilla `handlePlayerInventory` assigns the
         // client stacks verbatim (`NetServerHandler.java:413`), so a hacked
         // client can grant itself 127-count stacks, out-of-range damage, or
-        // unknown ids. Clamp to the same tables the survival code uses:
-        // unknown ids are dropped, counts to the per-item max stack, damage
-        // to the per-item max durability.
+        // unknown/unobtainable ids. Clamp to the same tables the survival
+        // code uses: unobtainable/unknown ids are dropped, counts to the
+        // per-item max stack, damage to the per-item max durability.
         fn apply(bank: &mut [Option<ItemStack>], slots: &[crate::network::SlotData]) {
             let n = slots.len().min(bank.len());
             for i in 0..n {
                 let id = slots[i].item_id as i32;
-                if !crate::item_data::item_is_valid(id) {
+                if !crate::item_data::item_is_obtainable(id) {
                     bank[i] = None;
                     continue;
                 }
@@ -153,28 +150,7 @@ impl PlaySession {
             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
                 apply(&mut p.inventory.main, slots);
             }
-            if self.held_id > 0 {
-                let mut found = false;
-                if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
-                    for i in 0..36 {
-                        if p.inventory.main[i].map(|s| s.item_id) == Some(self.held_id) {
-                            p.inventory.current = i as i32;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if !found {
-                        // Ghost fallback only; every real slot (35
-                        // included) keeps its contents.
-                        p.inventory.current = 35;
-                    }
-                }
-                if found {
-                    self.held_fallback = None;
-                } else {
-                    self.held_fallback = Some(Self::ghost_stack(self.held_id));
-                }
-            }
+            self.sync_held(ctx.world);
         } else if inv_type == -2 {
             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
                 apply(&mut p.inventory.crafting, slots);
@@ -199,9 +175,30 @@ impl PlaySession {
         if nbt_gz.is_empty() || nbt_gz.len() > 65536 {
             return;
         }
+        let (px, py, pz) = match ctx.world.entities.get(self.player) {
+            Some(e) if !e.body().dead => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+            _ => return,
+        };
+        let dist_sq = (px - (x as f64 + 0.5)).powi(2)
+            + (py - (y as f64 + 0.5)).powi(2)
+            + (pz - (z as f64 + 0.5)).powi(2);
+        if dist_sq > 64.0 {
+            return;
+        }
+        if ctx.spawn_protection > 0 {
+            let sp = ctx.world.spawn;
+            let protected = crate::session::is_spawn_protected(x, z, sp, ctx.spawn_protection);
+            if protected && !self.is_op(ctx) {
+                return;
+            }
+        }
+        let tile = match ctx.world.tiles.get(&(x, y, z)) {
+            Some(TileData::MobSpawner(_)) | None => return,
+            Some(t) => *t,
+        };
         let dec = flate2::read::GzDecoder::new(nbt_gz);
         let mut raw = Vec::new();
-        if dec.take(524289).read_to_end(&mut raw).is_err() || raw.len() > 524288 || raw.is_empty() {
+        if dec.take(32769).read_to_end(&mut raw).is_err() || raw.len() > 32768 || raw.is_empty() {
             return;
         }
         let mut cursor = std::io::Cursor::new(raw);
@@ -226,27 +223,6 @@ impl PlaySession {
         if nx != x || ny != y || nz != z {
             return;
         }
-        let (px, py, pz) = match ctx.world.entities.get(self.player) {
-            Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
-            None => return,
-        };
-        let dist_sq = (px - (x as f64 + 0.5)).powi(2)
-            + (py - (y as f64 + 0.5)).powi(2)
-            + (pz - (z as f64 + 0.5)).powi(2);
-        if dist_sq > 64.0 {
-            return;
-        }
-        if ctx.spawn_protection > 0 {
-            let sp = ctx.world.spawn;
-            let protected = crate::session::is_spawn_protected(x, z, sp, ctx.spawn_protection);
-            if protected && !self.is_op(ctx) {
-                return;
-            }
-        }
-        let tile = match ctx.world.tiles.get(&(x, y, z)) {
-            Some(t) => *t,
-            None => return,
-        };
         match tile {
             TileData::Sign(mut s) => {
                 for i in 0..4 {

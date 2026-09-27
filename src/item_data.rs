@@ -132,9 +132,25 @@ pub const ITEM_FISH_RAW: i32 = 349;
 pub const ITEM_FISH_COOKED: i32 = 350;
 
 /// True for ids that can appear in `Item::itemsList` after `initItems`:
-/// block ids 1..=255 plus item ids 256..=350.
+/// registered block ids `1..=91`, item ids `256..=350`, and music records `2256 | 2257`.
 pub fn item_is_valid(item_id: i32) -> bool {
-    (1..=LAST_ITEM_ID).contains(&item_id)
+    if (1..=91).contains(&item_id) {
+        return crate::world::World::native_registered(item_id as u8);
+    }
+    (FIRST_ITEM_ID..=LAST_ITEM_ID).contains(&item_id) || matches!(item_id, 2256 | 2257)
+}
+
+/// True for items that a player can legitimately hold in survival inventory or
+/// place into containers (excludes technical/unobtainable block IDs such as
+/// bedrock, raw water/lava, fire, mob spawners, portals, lit furnace/ore, etc.).
+pub fn item_is_obtainable(item_id: i32) -> bool {
+    if !item_is_valid(item_id) {
+        return false;
+    }
+    !matches!(
+        item_id,
+        7 | 8..=11 | 43 | 51 | 52 | 55 | 59 | 60 | 62 | 63 | 64 | 68 | 71 | 74 | 75 | 78 | 83 | 90
+    )
 }
 
 // ---------------------------------------------------------------------------
