@@ -182,10 +182,10 @@ static BLOCK_PROPS: [AlphaBlockProperties; 256] = {
         0.0, 0.0, 0.0, 1.0, 0.9375, 1.0);
     props[61] = b!(3.5, 17.5, Rock, 255, 0, false, true, true, Normal, 61, 1, true);
     props[62] = b!(3.5, 17.5, Rock, 255, 13, false, true, true, Normal, 61, 1, true); // lit furnace drops the idle block
-    props[63] = b!(1.0, 5.0, Wood, 0, 0, false, true, true, Normal, 323, 1, true); // sign drops the sign item
+    props[63] = b!(1.0, 5.0, Wood, 0, 0, false, true, false, Normal, 323, 1, true); // sign drops the sign item
     props[64] = b!(3.0, 15.0, Wood, 0, 0, false, false, false, Normal, 324, 1, true);
     props[65] = b!(0.4, 2.0, Wood, 0, 0, false, false, false, Normal, 65, 1, true);
-    props[66] = b!(0.7, 3.5, Ground, 0, 0, false, false, false, Normal, 66, 1, true);
+    props[66] = b!(0.7, 3.5, Circuits, 0, 0, false, false, false, Normal, 66, 1, true);
     props[67] = b!(2.0, 30.0, Rock, 0, 0, false, false, false, Normal, 4, 1, true);
     props[68] = b!(1.0, 5.0, Wood, 0, 0, false, true, false, Normal, 323, 1, true); // wall sign drops the sign item
     props[69] = b!(0.5, 2.5, Circuits, 0, 0, false, false, false, Normal, 69, 1, true);
@@ -199,7 +199,7 @@ static BLOCK_PROPS: [AlphaBlockProperties; 256] = {
     props[77] = b!(0.5, 2.5, Circuits, 0, 0, true, false, false, Normal, 77, 1, true);
     props[78] = b!(0.1, 0.5, Snow, 0, 0, true, false, false, Normal, 332, 1, true); // snow layer drops 1 snowball via harvest
     props[79] = b!(0.5, 2.5, Ice, 3, 0, true, false, true, Normal, 79, 0, true); // ice drops nothing
-    props[80] = b!(0.2, 1.0, Snow, 255, 0, true, false, true, Normal, 332, 4, true); // snow block drops 4 snowballs
+    props[80] = b!(0.2, 1.0, BuiltSnow, 255, 0, true, false, true, Normal, 332, 4, true); // snow block drops 4 snowballs
     props[81] = b!(0.4, 2.0, Cactus, 0, 0, true, false, false, Cactus, 81, 1, true,
         0.0625, 0.0, 0.0625, 0.9375, 1.0, 0.9375);
     props[82] = b!(0.6, 3.0, Clay, 255, 0, false, false, true, Normal, 337, 4, true); // clay drops 4 clay balls

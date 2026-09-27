@@ -85,6 +85,7 @@ fn q_water_lava(w: &World, pos: BlockPos) -> bool {
 fn q_water(w: &World, pos: BlockPos) -> bool {
     w.material_at_pos(pos) == Material::WATER
 }
+#[allow(dead_code)]
 fn q_collidable(w: &World, pos: BlockPos) -> bool {
     let bid = w.id_at(pos);
     if bid == 0 {
@@ -207,7 +208,17 @@ pub fn block_sand_tick(w: &mut World, block_id: u8, pos: BlockPos) {
 // ---- fluid ----
 
 const FLOW_DIRS: [(i32, i32, i32); 6] = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)];
-const FLOW_PASSABLE: [u8; 11] = [6, 37, 38, 39, 40, 50, 51, 55, 59, 83, 78];
+const FLOW_PASSABLE: [u8; 15] = [
+    6, 37, 38, 39, 40, 50, 51, 55, 59, 66, 69, 75, 76, 77, 78,
+];
+
+fn fluid_blocks_flow(w: &World, pos: BlockPos) -> bool {
+    let id = q_id(w, pos);
+    if id == 0 || id == 8 || id == 9 || id == 10 || id == 11 {
+        return false;
+    }
+    !FLOW_PASSABLE.contains(&id)
+}
 
 fn fluid_can_flow_into(w: &World, pos: BlockPos) -> bool {
     let id = q_id(w, pos);
@@ -229,6 +240,64 @@ fn same_fluid(w: &World, pos: BlockPos, is_lava: bool) -> bool {
     }
 }
 
+fn calculate_flow_cost(
+    w: &World,
+    is_lava: bool,
+    pos: BlockPos,
+    distance: i32,
+    from_dir: usize,
+) -> i32 {
+    const H_DIRS: [(i32, i32, usize); 4] = [(-1, 0, 1), (1, 0, 0), (0, -1, 3), (0, 1, 2)];
+    let mut best = 1000;
+    for (dir, &(dx, dz, opp)) in H_DIRS.iter().enumerate() {
+        if dir == opp && from_dir == dir {
+            continue;
+        }
+        if (dir == 0 && from_dir == 1)
+            || (dir == 1 && from_dir == 0)
+            || (dir == 2 && from_dir == 3)
+            || (dir == 3 && from_dir == 2)
+        {
+            continue;
+        }
+        let n = pos.offset(dx, 0, dz);
+        if !fluid_blocks_flow(w, n) && (!same_fluid(w, n, is_lava) || q_meta(w, n) > 0) {
+            if n.y > 0 && !fluid_blocks_flow(w, n.below()) {
+                return distance;
+            }
+            if distance < 4 {
+                let c = calculate_flow_cost(w, is_lava, n, distance + 1, dir);
+                if c < best {
+                    best = c;
+                }
+            }
+        }
+    }
+    best
+}
+
+fn optimal_flow_dirs(w: &World, is_lava: bool, pos: BlockPos) -> [bool; 4] {
+    const H_DIRS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+    let mut costs = [1000i32; 4];
+    for (dir, &(dx, dz)) in H_DIRS.iter().enumerate() {
+        let n = pos.offset(dx, 0, dz);
+        if !fluid_blocks_flow(w, n) && (!same_fluid(w, n, is_lava) || q_meta(w, n) > 0) {
+            if n.y > 0 && !fluid_blocks_flow(w, n.below()) {
+                costs[dir] = 0;
+            } else {
+                costs[dir] = calculate_flow_cost(w, is_lava, n, 1, dir);
+            }
+        }
+    }
+    let min_cost = *costs.iter().min().unwrap_or(&1000);
+    [
+        costs[0] == min_cost,
+        costs[1] == min_cost,
+        costs[2] == min_cost,
+        costs[3] == min_cost,
+    ]
+}
+
 pub fn block_fluid_added(w: &mut World, block_id: u8, tick_rate: i32, pos: BlockPos) {
     u_schedule(w, pos, block_id, tick_rate);
 }
@@ -237,16 +306,55 @@ pub fn block_fluid_neighbor(w: &mut World, block_id: u8, tick_rate: i32, pos: Bl
     u_schedule(w, pos, block_id, tick_rate);
 }
 
+fn has_burning_neighbor(w: &World, pos: BlockPos) -> bool {
+    for (dx, dy, dz) in FLOW_DIRS {
+        let n = pos.offset(dx, dy, dz);
+        if w.material_at(n.x, n.y, n.z).get_burning() {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn block_fluid_tick(w: &mut World, block_id: u8, is_lava: bool, pos: BlockPos) {
     // Lava creates fire on adjacent burnable blocks (Java BlockStationary).
     if is_lava && q_meta(w, pos) == 0 {
+        let mut ignited = false;
         for (dx, dy, dz) in FLOW_DIRS {
             let n = pos.offset(dx, dy, dz);
-            if q_id(w, n) == 0
-                && rng_int(w, 4) == 0
-                && (q_attach_world(w, n.below()) || q_id(w, n.below()) == 87)
-            {
+            if q_id(w, n) == 0 && rng_int(w, 4) == 0 && has_burning_neighbor(w, n) {
                 u_set_notify(w, n, 51);
+                ignited = true;
+            }
+        }
+        if !ignited {
+            let mut has_nearby_flammable = false;
+            'scan: for dy in 1..=3 {
+                for dx in -2..=2 {
+                    for dz in -2..=2 {
+                        let p = pos.offset(dx, dy, dz);
+                        if w.material_at(p.x, p.y, p.z).get_burning() {
+                            has_nearby_flammable = true;
+                            break 'scan;
+                        }
+                    }
+                }
+            }
+            if has_nearby_flammable {
+                let steps = rng_int(w, 3);
+                let mut cur = pos;
+                for _ in 0..steps {
+                    cur = cur.offset(rng_int(w, 3) - 1, 1, rng_int(w, 3) - 1);
+                    let id = q_id(w, cur);
+                    if id == 0 {
+                        if has_burning_neighbor(w, cur) {
+                            u_set_notify(w, cur, 51);
+                            break;
+                        }
+                    } else if w.material_at(cur.x, cur.y, cur.z).blocks_movement() {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -306,7 +414,7 @@ pub fn block_fluid_tick(w: &mut World, block_id: u8, is_lava: bool, pos: BlockPo
     }
 
     if pos.y > 0 && fluid_can_flow_into(w, pos.below()) {
-        if q_id(w, pos.below()) != 0 {
+        if q_id(w, pos.below()) != 0 && !is_lava {
             w.drop_block_as_item(pos.x, pos.y - 1, pos.z);
         }
         let down_meta = if metadata >= 8 {
@@ -326,10 +434,14 @@ pub fn block_fluid_tick(w: &mut World, block_id: u8, is_lava: bool, pos: BlockPo
             metadata + step
         };
         if new_meta < 8 {
-            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let dirs = optimal_flow_dirs(w, is_lava, pos);
+            for (dir, (dx, dz)) in [(-1, 0), (1, 0), (0, -1), (0, 1)].into_iter().enumerate() {
+                if !dirs[dir] {
+                    continue;
+                }
                 let n = pos.offset(dx, 0, dz);
                 if fluid_can_flow_into(w, n) {
-                    if q_id(w, n) != 0 {
+                    if q_id(w, n) != 0 && !is_lava {
                         w.drop_block_as_item(n.x, n.y, n.z);
                     }
                     u_set_meta_notify(w, n, block_id, new_meta as u8);
@@ -502,12 +614,14 @@ fn reed_can_stay_here(w: &World, pos: BlockPos) -> bool {
 }
 
 /// Shared cactus/reed tick: stay check, headroom, grow to height 3 max.
-fn stalk_tick(w: &mut World, block_id: u8, can_stay: bool, pos: BlockPos) {
+fn stalk_tick_inner(w: &mut World, block_id: u8, can_stay: bool, pos: BlockPos, reschedule: bool) {
     if !can_stay {
         return;
     }
     if q_id(w, pos.above()) != 0 {
-        u_schedule(w, pos, block_id, 20);
+        if reschedule {
+            u_schedule(w, pos, block_id, 20);
+        }
         return;
     }
     let mut height = 1;
@@ -523,7 +637,9 @@ fn stalk_tick(w: &mut World, block_id: u8, can_stay: bool, pos: BlockPos) {
             u_set_meta(w, pos, age.saturating_add(1));
         }
     }
-    u_schedule(w, pos, block_id, 20);
+    if reschedule {
+        u_schedule(w, pos, block_id, 20);
+    }
 }
 
 pub fn block_cactus_can_stay(w: &World, pos: BlockPos) -> bool {
@@ -542,22 +658,18 @@ pub fn block_reed_added(w: &mut World, block_id: u8, pos: BlockPos) {
     u_schedule(w, pos, block_id, 20);
 }
 
-pub fn block_cactus_neighbor(w: &mut World, block_id: u8, drop: DropSpec, pos: BlockPos) {
+pub fn block_cactus_neighbor(w: &mut World, _block_id: u8, drop: DropSpec, pos: BlockPos) {
     if !cactus_can_stay_here(w, pos) {
         base_drop(w, drop, pos, 1.0);
         u_set_notify(w, pos, 0);
-        return;
     }
-    u_schedule(w, pos, block_id, 20);
 }
 
-pub fn block_reed_neighbor(w: &mut World, block_id: u8, drop: DropSpec, pos: BlockPos) {
+pub fn block_reed_neighbor(w: &mut World, _block_id: u8, drop: DropSpec, pos: BlockPos) {
     if !reed_can_stay_here(w, pos) {
         base_drop(w, drop, pos, 1.0);
         u_set_notify(w, pos, 0);
-        return;
     }
-    u_schedule(w, pos, block_id, 20);
 }
 
 pub fn block_cactus_tick(w: &mut World, block_id: u8, drop: DropSpec, pos: BlockPos) {
@@ -566,7 +678,16 @@ pub fn block_cactus_tick(w: &mut World, block_id: u8, drop: DropSpec, pos: Block
         u_set_notify(w, pos, 0);
         return;
     }
-    stalk_tick(w, block_id, true, pos);
+    stalk_tick_inner(w, block_id, true, pos, true);
+}
+
+pub fn block_cactus_random_tick(w: &mut World, block_id: u8, drop: DropSpec, pos: BlockPos) {
+    if !cactus_can_stay_here(w, pos) {
+        base_drop(w, drop, pos, 1.0);
+        u_set_notify(w, pos, 0);
+        return;
+    }
+    stalk_tick_inner(w, block_id, true, pos, false);
 }
 
 pub fn block_reed_tick(w: &mut World, block_id: u8, drop: DropSpec, pos: BlockPos) {
@@ -575,7 +696,7 @@ pub fn block_reed_tick(w: &mut World, block_id: u8, drop: DropSpec, pos: BlockPo
         u_set_notify(w, pos, 0);
         return;
     }
-    stalk_tick(w, block_id, true, pos);
+    stalk_tick_inner(w, block_id, true, pos, false);
 }
 
 // ---- leaves (recursion guard passed by mutable borrow) ----
@@ -745,20 +866,18 @@ pub fn block_sapling_can_stay(w: &World, pos: BlockPos) -> bool {
     sapling_can_stay_here(w, pos)
 }
 
-pub fn block_sapling_neighbor(w: &mut World, block_id: u8, drop: DropSpec, pos: BlockPos) {
+pub fn block_sapling_neighbor(w: &mut World, _block_id: u8, drop: DropSpec, pos: BlockPos) {
     if !sapling_can_stay_here(w, pos) {
         base_drop(w, drop, pos, 1.0);
         u_set_notify(w, pos, 0);
-        return;
     }
-    u_schedule(w, pos, block_id, 100);
 }
 
 /// Sapling tick. Returns GrowTree (with the rand draw) when the caller
 /// should run tree generation; it restores the sapling if generation fails.
 pub fn block_sapling_tick(
     w: &mut World,
-    block_id: u8,
+    _block_id: u8,
     drop: DropSpec,
     pos: BlockPos,
 ) -> TickAction {
@@ -772,13 +891,11 @@ pub fn block_sapling_tick(
         return none;
     }
     if q_light(w, pos.offset(0, 1, 0)) < 9 || !chance_one_in(w, 5) {
-        u_schedule(w, pos, block_id, 100);
         return none;
     }
     let metadata = q_meta(w, pos);
     if metadata < 15 {
         u_set_meta(w, pos, metadata.saturating_add(1));
-        u_schedule(w, pos, block_id, 100);
         return none;
     }
     let seed = rng_u64(w);
@@ -847,9 +964,7 @@ pub fn block_crops_neighbor(w: &mut World, ids: CropIds, pos: BlockPos) {
         let meta = q_meta(w, pos);
         block_crops_drop(w, ids.wheat, pos, meta);
         u_set_notify(w, pos, 0);
-        return;
     }
-    u_schedule(w, pos, ids.block, 20);
 }
 
 fn block_crops_drop(w: &mut World, wheat_id: i32, pos: BlockPos, metadata: u8) {
@@ -903,7 +1018,6 @@ pub fn block_crops_tick(w: &mut World, ids: CropIds, pos: BlockPos) {
             }
         }
     }
-    u_schedule(w, pos, ids.block, 20);
 }
 
 // ---- soil ----
@@ -932,7 +1046,7 @@ pub fn block_soil_added(w: &mut World, block_id: u8, pos: BlockPos) {
     u_schedule(w, pos, block_id, 20);
 }
 
-pub fn block_soil_tick(w: &mut World, block_id: u8, pos: BlockPos) {
+pub fn block_soil_tick(w: &mut World, _block_id: u8, pos: BlockPos) {
     if chance_one_in(w, 5) {
         if soil_has_water(w, pos) {
             soil_set_moisture(w, pos, 7);
@@ -942,11 +1056,9 @@ pub fn block_soil_tick(w: &mut World, block_id: u8, pos: BlockPos) {
                 soil_set_moisture(w, pos, moisture - 1);
             } else if q_id(w, pos.above()) != 59 {
                 u_set_notify(w, pos, 3);
-                return;
             }
         }
     }
-    u_schedule(w, pos, block_id, 20);
 }
 
 pub fn block_soil_walking(w: &mut World, pos: BlockPos) {
@@ -955,12 +1067,10 @@ pub fn block_soil_walking(w: &mut World, pos: BlockPos) {
     }
 }
 
-pub fn block_soil_neighbor(w: &mut World, block_id: u8, pos: BlockPos) {
-    if q_collidable(w, pos.above()) {
+pub fn block_soil_neighbor(w: &mut World, _block_id: u8, pos: BlockPos) {
+    if q_solid(w, pos.above()) {
         u_set_notify(w, pos, 3);
-        return;
     }
-    u_schedule(w, pos, block_id, 20);
 }
 
 // ---- base drop entry point (Block::dropBlockAsItemWithChance) ----
@@ -1141,12 +1251,18 @@ mod tests {
         block_soil_walking(&mut w, p(0, 4, 0));
         assert_eq!(w.get_block_id(0, 4, 0), 3);
 
-        // 12. Lava source ignites supported air neighbors on a 1/4 roll
-        // (seed opens with next_int(4) == 0; other faces lack support).
+        // 12. Lava source ignites air neighbors adjacent to burnable blocks
+        // on a 1/4 roll (seed opens with next_int(4) == 0), while bare stone
+        // without burnable neighbors does not ignite.
         let mut w = harness(102400);
-        stage(&mut w, &[(0, 5, 0, 11, 0), (1, 4, 0, 1, 0)]);
+        stage(&mut w, &[(0, 5, 0, 11, 0), (1, 4, 0, 5, 0)]);
         block_fluid_tick(&mut w, 11, true, p(0, 5, 0));
         assert_eq!(w.get_block_id(1, 5, 0), 51);
+
+        let mut w_stone = harness(102400);
+        stage(&mut w_stone, &[(0, 5, 0, 11, 0), (1, 4, 0, 1, 0)]);
+        block_fluid_tick(&mut w_stone, 11, true, p(0, 5, 0));
+        assert_eq!(w_stone.get_block_id(1, 5, 0), 0);
 
         // 13. Sapling at growth stage with light grows: action + seed,
         // cleared (seed opens with next_int(5) == 0, then u64 draws).

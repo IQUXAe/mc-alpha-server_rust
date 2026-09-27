@@ -10,12 +10,13 @@ impl World {
     /// accessor, then insert/write-back with fresh height and sky maps.
     /// Populated chunks are left alone; each chunk is decorated once.
     pub fn ensure_chunk(&mut self, cx: i32, cz: i32) {
+        self.recall_chunk(cx, cz);
         if self.chunks.get(&(cx, cz)).map(|c| c.is_terrain_populated).unwrap_or(false) {
             return;
         }
         use crate::biome::MobSpawnerBase;
         use crate::generator::{generate_chunk, populate_batch};
-        // 1. Stage the 2x2 canvas (existing chunks copied, missing generated).
+        // 1. Stage the 2x2 canvas (existing/recalled chunks copied, missing generated).
         let (center_biome, center_temps) = {
             let gen = self.generator();
             let mut center_temps = [0.0f64; 256];
@@ -28,6 +29,7 @@ impl World {
         for dx in 0..2usize {
             for dz in 0..2usize {
                 let (nx, nz) = (cx + dx as i32, cz + dz as i32);
+                self.recall_chunk(nx, nz);
                 if let Some(c) = self.chunks.get(&(nx, nz)) {
                     c.fill_arrays(&mut stage_blocks[dx][dz], &mut stage_meta[dx][dz]);
                 } else {
@@ -78,6 +80,7 @@ impl World {
         // 3. Write back: insert missing, refresh present (tree spillover);
         // only the requested chunk is flagged (canvas neighbors decorate
         // on their own request, exactly once each).
+        let mut canvas_set = std::collections::HashSet::with_capacity(4);
         for dx in 0..2usize {
             for dz in 0..2usize {
                 let (nx, nz) = (cx + dx as i32, cz + dz as i32);
@@ -98,8 +101,11 @@ impl World {
                         self.chunks.insert((nx, nz), c);
                     }
                 }
+                self.light_dirty.insert((nx, nz));
+                canvas_set.insert((nx, nz));
             }
         }
+        self.propagate_cross_chunk_light(&canvas_set);
         // 4. Dungeon-chest loot & spawner tiles: the canvas holds no tiles, so
         // materialize chest and mob-spawner rows on write-back.
         for (lx, ly, lz, slot, item, count) in dungeon_loot {

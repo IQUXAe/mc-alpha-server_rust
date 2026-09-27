@@ -197,6 +197,9 @@ pub struct World {
     /// once instead of once per write (lava/water storms write thousands
     /// of cells per tick).
     pub(crate) light_dirty: HashSet<(i32, i32)>,
+    /// Redstone torch flip timestamps `(x, y, z, world_time)` for the
+    /// 8-flips-in-100-ticks burnout rule (`BlockRedstoneTorch.torchUpdates`).
+    pub(crate) torch_burnouts: Vec<(i32, i32, i32, i64)>,
     /// Population guard (mirrors `World::isPopulating`): decoration
     /// sets bypass skylight regen (the write-back regenerates explicitly
     /// instead).
@@ -246,7 +249,7 @@ impl World {
             scheduled: BTreeMap::new(),
             scheduled_set: std::collections::HashSet::new(),
             leaves_guard: 0,
-            unload_radius: 10,
+            unload_radius: 12,
             unloaded: HashMap::new(),
             tiles: WorldTiles::new(),
             block_updates: Vec::new(),
@@ -259,6 +262,7 @@ impl World {
             pending_tnt: Vec::new(),
             player_pos_cache: (-1, Vec::new()),
             light_dirty: HashSet::new(),
+            torch_burnouts: Vec::new(),
             populating: false,
             generator: None,
             chunks: HashMap::new(),
@@ -706,6 +710,24 @@ impl World {
         Self::block_light_sub_in(chunks, 0, x, y, z)
     }
 
+    fn block_light_raw_in(
+        chunks: &HashMap<(i32, i32), Chunk>,
+        sky_sub: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> u8 {
+        if y < 0 {
+            return 0;
+        }
+        if y >= WORLD_HEIGHT {
+            return 15u8.saturating_sub(sky_sub);
+        }
+        Self::saved_light_in(chunks, 0, x, y, z)
+            .saturating_sub(sky_sub)
+            .max(Self::saved_light_in(chunks, 1, x, y, z))
+    }
+
     /// Chunk-map half of [`World::block_light_value`] with `sky_sub` subtracted from sky light.
     pub(crate) fn block_light_sub_in(
         chunks: &HashMap<(i32, i32), Chunk>,
@@ -714,12 +736,16 @@ impl World {
         y: i32,
         z: i32,
     ) -> u8 {
-        if !(0..WORLD_HEIGHT).contains(&y) {
-            return 0;
+        let id = Self::block_id_in(chunks, x, y, z);
+        if id == 44 || id == 60 {
+            let l_up = Self::block_light_raw_in(chunks, sky_sub, x, y + 1, z);
+            let l_px = Self::block_light_raw_in(chunks, sky_sub, x + 1, y, z);
+            let l_nx = Self::block_light_raw_in(chunks, sky_sub, x - 1, y, z);
+            let l_pz = Self::block_light_raw_in(chunks, sky_sub, x, y, z + 1);
+            let l_nz = Self::block_light_raw_in(chunks, sky_sub, x, y, z - 1);
+            return l_up.max(l_px).max(l_nx).max(l_pz).max(l_nz);
         }
-        Self::saved_light_in(chunks, 0, x, y, z)
-            .saturating_sub(sky_sub)
-            .max(Self::saved_light_in(chunks, 1, x, y, z))
+        Self::block_light_raw_in(chunks, sky_sub, x, y, z)
     }
 
     /// Compute the collision bounding box for block `id` at `(x, y, z)`,

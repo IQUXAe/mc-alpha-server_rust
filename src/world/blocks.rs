@@ -5,14 +5,12 @@ use crate::block::fire::{block_fire_added, block_fire_neighbor, block_fire_tick}
 use crate::block::pos::{BlockPos, DropSpec};
 use crate::block::table::block_properties_get;
 use crate::block::ticks::{
-    block_base_drop, block_cactus_added, block_cactus_neighbor, block_cactus_tick,
-    block_crops_added, block_crops_neighbor, block_crops_tick, block_flower_neighbor,
-    block_flower_tick, block_fluid_added, block_fluid_neighbor, block_fluid_tick,
-    block_leaves_added, block_leaves_neighbor, block_leaves_tick, block_mushroom_neighbor,
-    block_reed_added, block_reed_neighbor, block_reed_tick, block_sand_added, block_sand_neighbor,
-    block_sand_tick, block_sapling_added, block_sapling_neighbor, block_sapling_tick,
-    block_soil_added, block_soil_neighbor, block_soil_tick, block_torch_added,
-    block_torch_neighbor, CropIds,
+    block_base_drop, block_cactus_neighbor, block_cactus_random_tick, block_crops_neighbor,
+    block_crops_tick, block_flower_neighbor, block_flower_tick, block_fluid_added,
+    block_fluid_neighbor, block_fluid_tick, block_leaves_neighbor, block_leaves_tick,
+    block_mushroom_neighbor, block_reed_neighbor, block_reed_tick, block_sand_added,
+    block_sand_neighbor, block_sand_tick, block_sapling_neighbor, block_sapling_tick,
+    block_soil_neighbor, block_soil_tick, block_torch_added, block_torch_neighbor, CropIds,
 };
 use crate::entity::table::{Body, Entity, EntityId};
 use crate::material::Material;
@@ -184,13 +182,7 @@ impl World {
                 block_fluid_added(&mut *self, bid, rate, BlockPos::new(x, y, z));
                 self.fluid_lava_contact(x, y, z, bid);
             }
-            81 => block_cactus_added(&mut *self, bid, BlockPos::new(x, y, z)),
-            83 => block_reed_added(&mut *self, bid, BlockPos::new(x, y, z)),
             50 => block_torch_added(&mut *self, bid, BlockPos::new(x, y, z)),
-            18 => block_leaves_added(&mut *self, bid, BlockPos::new(x, y, z)),
-            6 => block_sapling_added(&mut *self, bid, BlockPos::new(x, y, z)),
-            59 => block_crops_added(&mut *self, bid, BlockPos::new(x, y, z)),
-            60 => block_soil_added(&mut *self, bid, BlockPos::new(x, y, z)),
             51 => block_fire_added(&mut *self, bid, 10, BlockPos::new(x, y, z)),
             46 if self.is_block_powered(x, y, z) => {
                 self.ignite_at(BlockPos::new(x, y, z), 80);
@@ -323,11 +315,73 @@ impl World {
         }
     }
 
-    /// True if `(x, y, z)` receives direct or indirect redstone power from
-    /// an adjacent redstone torch (`76`), lever (`69` with bit 8), button
-    /// (`77` with bit 8), pressure plate (`70 | 72` with meta > 0), or
-    /// powered redstone wire (`55` with meta > 0).
-    pub fn is_block_powered(&self, x: i32, y: i32, z: i32) -> bool {
+    /// Check whether a redstone wire at `(wx, wy, wz)` can connect diagonally
+    /// to `(wx + dx, wy + dy, wz + dz)` without being cut by an opaque/attachable block.
+    fn wire_can_connect_diagonal(&self, wx: i32, wy: i32, wz: i32, dx: i32, dy: i32, dz: i32) -> bool {
+        if dy == 0 {
+            true
+        } else if dy == 1 {
+            !self.attach_at(BlockPos::new(wx, wy + 1, wz))
+        } else {
+            !self.attach_at(BlockPos::new(wx + dx, wy, wz + dz))
+        }
+    }
+
+    /// True if a powered redstone wire (`55` with `meta > 0`) at `(wx, wy, wz)`
+    /// provides power to neighbor `(tx, ty, tz)` (`BlockRedstoneWire.isPoweringTo`).
+    pub fn wire_powers_neighbor(&self, wx: i32, wy: i32, wz: i32, tx: i32, ty: i32, tz: i32) -> bool {
+        if self.get_block_id(wx, wy, wz) != 55 || self.get_block_meta(wx, wy, wz) == 0 {
+            return false;
+        }
+        if tx == wx && tz == wz && ty == wy - 1 {
+            return true;
+        }
+        if ty != wy {
+            return false;
+        }
+        let can_connect = |x: i32, y: i32, z: i32| {
+            matches!(self.get_block_id(x, y, z), 55 | 69 | 70 | 72 | 75 | 76 | 77)
+        };
+        let conn_dir = |dx: i32, dz: i32| {
+            can_connect(wx + dx, wy, wz + dz)
+                || (!self.attach_at(BlockPos::new(wx + dx, wy, wz + dz))
+                    && can_connect(wx + dx, wy - 1, wz + dz))
+                || (!self.attach_at(BlockPos::new(wx, wy + 1, wz))
+                    && self.attach_at(BlockPos::new(wx + dx, wy, wz + dz))
+                    && can_connect(wx + dx, wy + 1, wz + dz))
+        };
+        let west = conn_dir(-1, 0);
+        let east = conn_dir(1, 0);
+        let north = conn_dir(0, -1);
+        let south = conn_dir(0, 1);
+        if !west && !east && !north && !south {
+            return true;
+        }
+        if tx == wx && tz == wz + 1 {
+            return north && !west && !east;
+        }
+        if tx == wx && tz == wz - 1 {
+            return south && !west && !east;
+        }
+        if tx == wx + 1 && tz == wz {
+            return west && !north && !south;
+        }
+        if tx == wx - 1 && tz == wz {
+            return east && !north && !south;
+        }
+        false
+    }
+
+    /// True if `(x, y, z)` is strongly powered (`World.isBlockGettingPowered` /
+    /// `Block.isIndirectlyPoweringTo`), excluding any source at `exclude`.
+    fn is_block_strongly_powered(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        include_wires: bool,
+        exclude: Option<(i32, i32, i32)>,
+    ) -> bool {
         const OFF: [(i32, i32, i32); 6] = [
             (-1, 0, 0),
             (1, 0, 0),
@@ -338,12 +392,84 @@ impl World {
         ];
         for (dx, dy, dz) in OFF {
             let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+            if exclude == Some((nx, ny, nz)) {
+                continue;
+            }
             let nid = self.get_block_id(nx, ny, nz);
             let nmeta = self.get_block_meta(nx, ny, nz);
             match nid {
-                76 => return true,
+                // Lit redstone torch below shines strong power up into (x, y, z).
+                76 if dy == -1 => return true,
+                // Lever or button attached to (x, y, z) strongly powers its support block.
+                69 | 77 if (nmeta & 8) != 0 => {
+                    let dir = nmeta & 7;
+                    let attached_here = match dir {
+                        1 => dx == 1 && dy == 0 && dz == 0,
+                        2 => dx == -1 && dy == 0 && dz == 0,
+                        3 => dx == 0 && dy == 0 && dz == 1,
+                        4 => dx == 0 && dy == 0 && dz == -1,
+                        _ => dx == 0 && dy == 1 && dz == 0,
+                    };
+                    if attached_here {
+                        return true;
+                    }
+                }
+                // Depressed pressure plate on top of (x, y, z) strongly powers (x, y, z).
+                70 | 72 if nmeta > 0 && dy == 1 => return true,
+                // Powered redstone wire strongly powers in the directions it powers.
+                55 if include_wires && self.wire_powers_neighbor(nx, ny, nz, x, y, z) => {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// True if `(x, y, z)` receives direct or indirect redstone power
+    /// (`World.isBlockIndirectlyGettingPowered`).
+    pub fn is_block_powered(&self, x: i32, y: i32, z: i32) -> bool {
+        self.is_block_powered_ext(x, y, z, true)
+    }
+
+    fn is_block_powered_ext(&self, x: i32, y: i32, z: i32, include_wires: bool) -> bool {
+        const OFF: [(i32, i32, i32); 6] = [
+            (-1, 0, 0),
+            (1, 0, 0),
+            (0, -1, 0),
+            (0, 1, 0),
+            (0, 0, -1),
+            (0, 0, 1),
+        ];
+        for (dx, dy, dz) in OFF {
+            let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+            if self.attach_at(BlockPos::new(nx, ny, nz)) {
+                if self.is_block_strongly_powered(nx, ny, nz, include_wires, Some((x, y, z))) {
+                    return true;
+                }
+                continue;
+            }
+            let nid = self.get_block_id(nx, ny, nz);
+            let nmeta = self.get_block_meta(nx, ny, nz);
+            match nid {
+                76 => {
+                    // Torch does not power the block it is attached to.
+                    let attached_to_target = match nmeta {
+                        1 => dx == 1 && dy == 0 && dz == 0,
+                        2 => dx == -1 && dy == 0 && dz == 0,
+                        3 => dx == 0 && dy == 0 && dz == 1,
+                        4 => dx == 0 && dy == 0 && dz == -1,
+                        _ => dx == 0 && dy == 1 && dz == 0,
+                    };
+                    if !attached_to_target {
+                        return true;
+                    }
+                }
                 69 | 77 if (nmeta & 8) != 0 => return true,
-                70 | 72 | 55 if nmeta > 0 => return true,
+                70 | 72 if nmeta > 0 && dy >= 0 => return true,
+                55 if include_wires && self.wire_powers_neighbor(nx, ny, nz, x, y, z) => {
+                    return true;
+                }
                 _ => {}
             }
         }
@@ -360,30 +486,7 @@ impl World {
             4 => (x, y, z + 1),
             _ => (x, y - 1, z),
         };
-        const OFF: [(i32, i32, i32); 6] = [
-            (-1, 0, 0),
-            (1, 0, 0),
-            (0, -1, 0),
-            (0, 1, 0),
-            (0, 0, -1),
-            (0, 0, 1),
-        ];
-        for (dx, dy, dz) in OFF {
-            let (nx, ny, nz) = (sx + dx, sy + dy, sz + dz);
-            if nx == x && ny == y && nz == z {
-                continue;
-            }
-            let nid = self.get_block_id(nx, ny, nz);
-            let nmeta = self.get_block_meta(nx, ny, nz);
-            match nid {
-                76 if dy == -1 => return true,
-                69 | 77 if (nmeta & 8) != 0 => return true,
-                70 | 72 if nmeta > 0 && dy == 1 => return true,
-                55 if nmeta > 0 => return true,
-                _ => {}
-            }
-        }
-        false
+        self.is_block_strongly_powered(sx, sy, sz, true, Some((x, y, z)))
     }
 
     fn redstone_torch_check(&mut self, x: i32, y: i32, z: i32, bid: u8) {
@@ -416,6 +519,9 @@ impl World {
             }
             for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
                 for dy in -1..=1 {
+                    if !self.wire_can_connect_diagonal(wx, wy, wz, dx, dy, dz) {
+                        continue;
+                    }
                     let p = (wx + dx, wy + dy, wz + dz);
                     if self.get_block_id(p.0, p.1, p.2) == 55 && !wires.contains_key(&p) {
                         wires.insert(p, 0);
@@ -427,32 +533,12 @@ impl World {
         if wires.is_empty() {
             return;
         }
-        // Seed direct power (15) from active non-wire sources adjacent to each wire cell.
+        // Seed direct/indirect power (15) from active non-wire sources or strongly-powered
+        // solid blocks adjacent to each wire cell (BlockRedstoneWire.java:39-41).
         let mut prop_q: VecDeque<(i32, i32, i32)> = VecDeque::new();
         let wire_coords: Vec<(i32, i32, i32)> = wires.keys().copied().collect();
         for &(wx, wy, wz) in &wire_coords {
-            let mut direct = false;
-            for (dx, dy, dz) in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
-                let (nx, ny, nz) = (wx + dx, wy + dy, wz + dz);
-                let nid = self.get_block_id(nx, ny, nz);
-                let nmeta = self.get_block_meta(nx, ny, nz);
-                match nid {
-                    76 => {
-                        direct = true;
-                        break;
-                    }
-                    69 | 77 if (nmeta & 8) != 0 => {
-                        direct = true;
-                        break;
-                    }
-                    70 | 72 if nmeta > 0 => {
-                        direct = true;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            if direct {
+            if self.is_block_powered_ext(wx, wy, wz, false) {
                 wires.insert((wx, wy, wz), 15);
                 prop_q.push_back((wx, wy, wz));
             }
@@ -465,6 +551,9 @@ impl World {
             let next_lvl = cur - 1;
             for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
                 for dy in -1..=1 {
+                    if !self.wire_can_connect_diagonal(wx, wy, wz, dx, dy, dz) {
+                        continue;
+                    }
                     let p = (wx + dx, wy + dy, wz + dz);
                     if let Some(slot) = wires.get_mut(&p) {
                         if next_lvl > *slot {
@@ -564,9 +653,12 @@ impl World {
         }
         let toggled = meta ^ 4;
         self.set_block_meta(x, y, z, toggled);
-        if self.get_block_id(x, y + 1, z) == bid {
+        let has_upper = self.get_block_id(x, y + 1, z) == bid;
+        if has_upper {
             self.set_block_meta(x, y + 1, z, toggled | 8);
+            self.notify_neighbors_of(x, y + 1, z);
         }
+        self.notify_neighbors_of(x, y, z);
         true
     }
 
@@ -587,9 +679,12 @@ impl World {
         if is_open != open {
             let next = meta ^ 4;
             self.set_block_meta(x, y, z, next);
-            if self.get_block_id(x, y + 1, z) == bid {
+            let has_upper = self.get_block_id(x, y + 1, z) == bid;
+            if has_upper {
                 self.set_block_meta(x, y + 1, z, next | 8);
+                self.notify_neighbors_of(x, y + 1, z);
             }
+            self.notify_neighbors_of(x, y, z);
         }
     }
 
@@ -857,7 +952,7 @@ impl World {
     }
 
     /// Scheduled/random-tick router (mirrors the `updateTick` overrides).
-    fn update_block_tick(&mut self, x: i32, y: i32, z: i32) {
+    pub(crate) fn update_block_tick(&mut self, x: i32, y: i32, z: i32) {
         let bid = self.get_block_id(x, y, z);
         if bid == 0 {
             return;
@@ -872,7 +967,12 @@ impl World {
                 block_flower_tick(&mut *self, Self::native_drop_spec(bid), BlockPos::new(x, y, z));
             }
             81 => {
-                block_cactus_tick(&mut *self, bid, Self::native_drop_spec(bid), BlockPos::new(x, y, z));
+                block_cactus_random_tick(
+                    &mut *self,
+                    bid,
+                    Self::native_drop_spec(bid),
+                    BlockPos::new(x, y, z),
+                );
             }
             83 => {
                 block_reed_tick(&mut *self, bid, Self::native_drop_spec(bid), BlockPos::new(x, y, z));
@@ -923,11 +1023,6 @@ impl World {
                 if self.saved_light_value(1, x, y, z) > 8 => {
                     self.apply_set_notify(x, y, z, 9);
                 }
-            80
-                if self.saved_light_value(1, x, y, z) > 11 => {
-                    self.drop_block_for(80, 0, x, y, z);
-                    self.apply_set_notify(x, y, z, 0);
-                }
             70 | 72 if self.get_block_meta(x, y, z) > 0 => {
                 self.update_pressure_plate(x, y, z, bid);
             }
@@ -936,14 +1031,30 @@ impl World {
                 self.apply_set_notify(x, y, z, 73);
             }
             75 | 76 => {
+                let now = self.time;
+                self.torch_burnouts.retain(|&(_, _, _, t)| now - t <= 100);
                 let powered = self.is_redstone_torch_input_powered(x, y, z);
                 let meta = self.get_block_meta(x, y, z);
                 if bid == 76 && powered {
                     self.apply_set_meta_notify(x, y, z, 75, meta);
                     self.recalculate_redstone_around(x, y, z);
+                    for (dx, dy, dz) in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
+                        self.notify_neighbors_of(x + dx, y + dy, z + dz);
+                    }
+                    self.torch_burnouts.push((x, y, z, now));
                 } else if bid == 75 && !powered {
-                    self.apply_set_meta_notify(x, y, z, 76, meta);
-                    self.recalculate_redstone_around(x, y, z);
+                    let flips = self
+                        .torch_burnouts
+                        .iter()
+                        .filter(|&&(bx, by, bz, _)| bx == x && by == y && bz == z)
+                        .count();
+                    if flips < 8 {
+                        self.apply_set_meta_notify(x, y, z, 76, meta);
+                        self.recalculate_redstone_around(x, y, z);
+                        for (dx, dy, dz) in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
+                            self.notify_neighbors_of(x + dx, y + dy, z + dz);
+                        }
+                    }
                 }
             }
             77 => {
@@ -1121,8 +1232,8 @@ impl World {
 
     /// Periodic unload (mirrors the `worldTime % 100` pass): chunks outside
     /// the unload radius of every joined player go, except the protected
-    /// spawn area (|cx|,|cz| <= 3). Live rows spill into the chunk lists
-    /// for reload; with no players everything stays (no-server case).
+    /// spawn area (`|cx - scx|, |cz - scz| <= 3`). Live rows spill into the
+    /// chunk lists for reload.
     pub(crate) fn unload_chunks(&mut self) {
         if self.time % 100 != 0 {
             return;
@@ -1136,18 +1247,17 @@ impl World {
                 ));
             }
         }
-        if anchors.is_empty() {
-            return;
-        }
+        let scx = self.spawn[0].div_euclid(16);
+        let scz = self.spawn[2].div_euclid(16);
         let r = self.unload_radius;
         let drop: Vec<(i32, i32)> = self
             .chunks
             .keys()
-            .filter(|(cx, cz)| {
-                if cx.abs() <= 3 && cz.abs() <= 3 {
+            .filter(|&&(cx, cz)| {
+                if (cx - scx).abs() <= 3 && (cz - scz).abs() <= 3 {
                     return false;
                 }
-                !anchors.iter().any(|(px, pz)| (cx - px).abs() <= r && (cz - pz).abs() <= r)
+                !anchors.iter().any(|&(px, pz)| (cx - px).abs() <= r && (cz - pz).abs() <= r)
             })
             .copied()
             .collect();
@@ -1238,6 +1348,7 @@ impl World {
                 }),
                 _ => continue,
             }
+            chunk.is_modified = true;
             gone.push(oid);
         }
         gone.sort_unstable();

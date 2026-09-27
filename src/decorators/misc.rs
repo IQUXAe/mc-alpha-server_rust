@@ -103,17 +103,16 @@ impl WorldGenLakes {
             }
         }
 
-        // Grass conversion (only when exposed to sky, matching WorldGenLakes.java:79)
+        // Grass conversion (only when exposed to sky light > 0, matching WorldGenLakes.java:79)
         for bx in 0..16 {
             let ibx = bx as i32;
             for bz in 0..16 {
                 let ibz = bz as i32;
-                let height = accessor.get_height_value(x + ibx, z + ibz);
                 for by in 4..8 {
                     let iby = by as i32;
                     if arr[(bx * 16 + bz) * 8 + by]
                         && accessor.get_block_id(x + ibx, y + iby - 1, z + ibz) == 3
-                        && y + iby >= height
+                        && column_sky_light(&mut *accessor, x + ibx, y + iby, z + ibz) > 0
                     {
                         accessor.set_block_id(x + ibx, y + iby - 1, z + ibz, 2); // grass
                     }
