@@ -570,23 +570,13 @@ impl Server {
                 }
             }
         }
-        // Idle timeout mirrors the C++ read timeout (dead players bypass).
+        // Idle timeout mirrors the read timeout (applies to all idle sessions,
+        // including players sitting on the death screen without sending packets).
         if outcome.is_none() && sess.idle >= READ_TIMEOUT_TICKS {
-            let dead = match &sess.state {
-                SessionState::Play(play, _) => match self.world.entities.get(play.player) {
-                    Some(Entity::Player(p)) => p.living.body.dead || p.living.health <= 0,
-                    _ => true,
-                },
-                SessionState::Login(_) => false,
-            };
-            if !dead {
-                if let SessionState::Play(play, _) = &mut sess.state {
-                    play.outbox.push(pkt_kick("Timed out"));
-                }
-                outcome = Some(SessionOutcome::Gone);
-            } else {
-                sess.idle = 0;
+            if let SessionState::Play(play, _) = &mut sess.state {
+                play.outbox.push(pkt_kick("Timed out"));
             }
+            outcome = Some(SessionOutcome::Gone);
         }
         sess.flush();
         self.fan_out(&mut sess, bcast);

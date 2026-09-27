@@ -1084,3 +1084,53 @@
         }
         assert!(next_pkt_opt(&mut b, Duration::from_millis(200)).is_none());
     }
+
+    #[test]
+    fn dead_idle_player_times_out_and_frees_slot() {
+        let mut srv = mk_server("");
+        let (mut a, cid) = pair(&mut srv);
+        join(&mut srv, &mut a, "Steve");
+        let pid = *srv.players.keys().next().unwrap();
+        if let Some(crate::entity::table::Entity::Player(p)) = srv.world.entities.get_mut(pid) {
+            p.living.health = 0;
+            p.living.body.dead = true;
+        }
+        if let Some(sess) = srv.sessions.get_mut(&cid) {
+            sess.idle = READ_TIMEOUT_TICKS - 1;
+        }
+        srv.tick();
+        let (id, text) = next_pkt(&mut a);
+        assert_eq!(id, 255);
+        assert!(text.contains("Timed out"), "dead idle player must time out: {text}");
+        assert!(srv.players.is_empty());
+        assert!(srv.sessions.is_empty());
+    }
+
+    #[test]
+    fn flush_unloaded_chunks_skips_clean_and_save_world_persists_live_entities() {
+        let mut srv = mk_server("");
+        // 1. Insert a clean (is_modified = false) chunk at (50, 50) into unloaded and call flush_unloaded_chunks:
+        let mut clean = crate::chunk::Chunk::new(50, 50);
+        clean.is_modified = false;
+        srv.world.unloaded.insert((50, 50), clean);
+        srv.flush_unloaded_chunks();
+        assert!(
+            srv.store.get_chunk(50, 50).is_none(),
+            "clean spilled chunk must not be written to LMDB store"
+        );
+
+        // 2. Insert a chunk at (20, 20), clear its is_modified flag, spawn a live item in it, and call save_world():
+        let mut ch = crate::chunk::Chunk::new(20, 20);
+        ch.is_modified = false;
+        srv.world.chunks.insert((20, 20), ch);
+        let _item = srv.world.spawn_item_entity(264, 3, 0, 20.0 * 16.0 + 8.5, 64.0, 20.0 * 16.0 + 8.5);
+        // Even if is_modified were manually cleared before save_world, save_world marks chunks with live entities dirty:
+        srv.world.chunks.get_mut(&(20, 20)).unwrap().is_modified = false;
+        srv.save_world();
+        let blob = srv
+            .store
+            .get_chunk(20, 20)
+            .expect("chunk with live item entity must be saved by save_world");
+        let decoded = crate::persist::decode_chunk_blob(&blob, 20, 20).unwrap();
+        assert_eq!(decoded.items.len(), 1, "saved chunk blob must contain the live item entity");
+    }

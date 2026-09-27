@@ -93,6 +93,17 @@ impl Server {
         }
         let keys: Vec<(i32, i32)> = self.world.unloaded.keys().copied().collect();
         for (cx, cz) in keys {
+            let dirty = self
+                .world
+                .unloaded
+                .get(&(cx, cz))
+                .map(|c| c.is_modified)
+                .unwrap_or(false);
+            if !dirty {
+                self.world.unloaded.remove(&(cx, cz));
+                self.world.tiles.remove_chunk(cx, cz);
+                continue;
+            }
             match crate::persist::encode_chunk_blob(&self.world, cx, cz, true) {
                 None => {
                     log::warning(&format!("Failed to encode chunk {cx},{cz}; keeping staged"));
@@ -118,7 +129,7 @@ impl Server {
 
     /// Flush level.dat plus modified loaded chunks (mirrors vanilla
     /// `saveWorld`: only `isModified` chunks hit the disk, flag cleared on
-    /// success; live boats pin their chunks like the C++ touch-up, staged
+    /// success; live persistent entities pin their chunks, staged
     /// unloads are flushed to LevelDB and freed from memory).
     pub(crate) fn save_world(&mut self) {
         if !self.world.save_level_to(&self.level_dir) {
@@ -126,12 +137,22 @@ impl Server {
         }
         self.flush_unloaded_chunks();
         for eid in self.world.entities.alive_ids() {
-            if let Some(Entity::Boat(b)) = self.world.entities.get(eid) {
-                let (cx, cz) = (
-                    (b.body.pos[0].floor() as i32).div_euclid(16),
-                    (b.body.pos[2].floor() as i32).div_euclid(16),
-                );
-                self.world.mark_chunk_modified(cx, cz);
+            if let Some(
+                Entity::Boat(_)
+                | Entity::Item(_)
+                | Entity::Animal(_)
+                | Entity::Mob(_)
+                | Entity::Arrow(_)
+                | Entity::Falling(_),
+            ) = self.world.entities.get(eid)
+            {
+                if let Some(e) = self.world.entities.get(eid) {
+                    let (cx, cz) = (
+                        (e.body().pos[0].floor() as i32).div_euclid(16),
+                        (e.body().pos[2].floor() as i32).div_euclid(16),
+                    );
+                    self.world.mark_chunk_modified(cx, cz);
+                }
             }
         }
         let coords = self.world.loaded_chunk_coords();

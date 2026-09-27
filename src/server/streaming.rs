@@ -100,12 +100,15 @@ impl Server {
         if let Some(ref worker) = self.chunk_worker {
             while let Ok(raw) = worker.resp_rx.try_recv() {
                 self.pending_chunk_gens.remove(&(raw.cx, raw.cz));
-                if !self.world.has_chunk(raw.cx, raw.cz) {
-                    let mut c = crate::chunk::Chunk::new(raw.cx, raw.cz);
-                    let meta = [0u8; 32768];
-                    c.load_arrays(&raw.blocks, &meta);
-                    c.generate_skylight_map();
-                    self.world.insert_chunk(c);
+                if !self.world.has_chunk(raw.cx, raw.cz) && !self.world.recall_chunk(raw.cx, raw.cz) {
+                    let _ = self.world.load_chunk_from(&mut self.store, raw.cx, raw.cz);
+                    if !self.world.has_chunk(raw.cx, raw.cz) {
+                        let mut c = crate::chunk::Chunk::new(raw.cx, raw.cz);
+                        let meta = [0u8; 32768];
+                        c.load_arrays(&raw.blocks, &meta);
+                        c.generate_skylight_map();
+                        self.world.insert_chunk(c);
+                    }
                 }
             }
         }
@@ -123,35 +126,54 @@ impl Server {
             let mut deferred = false;
             'nb: for dx in -1..=1 {
                 for dz in -1..=1 {
-                    let (nx, nz) = (qx + dx, qz + dz);
-                    if !self.world.has_chunk(nx, nz) && !self.world.recall_chunk(nx, nz) {
-                        let _ = self.world.load_chunk_from(&mut self.store, nx, nz);
-                        if !self.world.has_chunk(nx, nz) {
-                            if let Some(ref worker) = self.chunk_worker {
-                                if !self.pending_chunk_gens.contains(&(nx, nz))
-                                    && self.pending_chunk_gens.len() < 64
-                                {
-                                    self.pending_chunk_gens.insert((nx, nz));
-                                    let _ = worker.req_tx.send((nx, nz));
-                                }
-                                deferred = true;
-                                break 'nb;
-                            } else {
-                                generated += 1;
-                                if generated > CHUNK_GEN_PER_TICK {
-                                    deferred = true;
-                                    break 'nb;
+                    let (bx, bz) = (qx + dx, qz + dz);
+                    if !self.world.has_chunk(bx, bz) && !self.world.recall_chunk(bx, bz) {
+                        let _ = self.world.load_chunk_from(&mut self.store, bx, bz);
+                    }
+                    if self
+                        .world
+                        .chunk_ref(bx, bz)
+                        .map(|c| c.is_terrain_populated)
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    for cdx in 0..=1 {
+                        for cdz in 0..=1 {
+                            let (nx, nz) = (bx + cdx, bz + cdz);
+                            if !self.world.has_chunk(nx, nz) && !self.world.recall_chunk(nx, nz) {
+                                let _ = self.world.load_chunk_from(&mut self.store, nx, nz);
+                                if !self.world.has_chunk(nx, nz) {
+                                    if let Some(ref worker) = self.chunk_worker {
+                                        if !self.pending_chunk_gens.contains(&(nx, nz))
+                                            && self.pending_chunk_gens.len() < 64
+                                        {
+                                            self.pending_chunk_gens.insert((nx, nz));
+                                            let _ = worker.req_tx.send((nx, nz));
+                                        }
+                                        deferred = true;
+                                    } else {
+                                        generated += 1;
+                                        if generated > CHUNK_GEN_PER_TICK {
+                                            deferred = true;
+                                            break 'nb;
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                    self.world.ensure_chunk(nx, nz);
+                    if deferred {
+                        break 'nb;
+                    }
+                    self.world.ensure_chunk(bx, bz);
                 }
             }
             if deferred {
                 i += 1;
                 continue;
             }
+            self.world.refresh_light();
             let populated = self
                 .world
                 .chunk_ref(qx, qz)

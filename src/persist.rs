@@ -896,6 +896,7 @@ impl World {
         chunk.pending_animals = d.animals;
         chunk.pending_monsters = d.monsters;
         chunk.pending_boats = d.boats;
+        chunk.clear_modified();
         self.insert_chunk(chunk);
         // Tiles replace this chunk's cells.
         self.tiles.remove_chunk(cx, cz);
