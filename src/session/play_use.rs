@@ -54,7 +54,9 @@ impl PlaySession {
             let held = self.selected_stack(ctx.world);
             if let Some(s) = held {
                 if item_id < 0 || s.item_id == item_id as i32 {
-                    self.use_item_air(ctx, s);
+                    if !self.use_item_air(ctx, s) {
+                        self.send_inventory(ctx.world);
+                    }
                 }
             }
             return None;
@@ -74,12 +76,26 @@ impl PlaySession {
             return None;
         }
         let dir = (direction as u8) as i32;
-        let prot = {
-            let sp = ctx.world.spawn;
-            crate::session::is_spawn_protected(x, z, sp, ctx.spawn_protection)
+        let (nx, ny, nz) = match dir {
+            0 => (x, y - 1, z),
+            1 => (x, y + 1, z),
+            2 => (x, y, z - 1),
+            3 => (x, y, z + 1),
+            4 => (x - 1, y, z),
+            5 => (x + 1, y, z),
+            _ => (x, y, z),
         };
+        let prot = crate::session::is_spawn_protected(x, z, ctx.world.spawn, ctx.spawn_protection)
+            || crate::session::is_spawn_protected(nx, nz, ctx.world.spawn, ctx.spawn_protection);
         if prot && !self.is_op(ctx) {
             self.send_block_change(ctx.world, x, y, z);
+            self.send_block_change(ctx.world, nx, ny, nz);
+            let clicked = ctx.world.get_block_id(x, y, z);
+            if clicked == 64 || clicked == 71 {
+                self.send_block_change(ctx.world, x, y - 1, z);
+                self.send_block_change(ctx.world, x, y + 1, z);
+            }
+            self.send_inventory(ctx.world);
             return None;
         }
         let clicked = ctx.world.get_block_id(x, y, z);
@@ -407,7 +423,8 @@ impl PlaySession {
             }
             return false;
         }
-        let protected = crate::session::is_spawn_protected(nx, nz, ctx.world.spawn, ctx.spawn_protection);
+        let protected = crate::session::is_spawn_protected(nx, nz, ctx.world.spawn, ctx.spawn_protection)
+            || crate::session::is_spawn_protected(x, z, ctx.world.spawn, ctx.spawn_protection);
         if protected && !self.is_op(ctx) {
             return false;
         }
@@ -484,11 +501,14 @@ impl PlaySession {
             let Some([hx, hy, hz]) =
                 ctx.world.ray_trace_hit_liquids([aim.sx, aim.sy, aim.sz], [aim.ex, aim.ey, aim.ez])
             else {
+                self.send_inventory(ctx.world);
                 return false;
             };
             if s.item_id == 325 {
                 let protected = crate::session::is_spawn_protected(hx, hz, ctx.world.spawn, ctx.spawn_protection);
                 if protected && !self.is_op(ctx) {
+                    self.send_block_change(ctx.world, hx, hy, hz);
+                    self.send_inventory(ctx.world);
                     return false;
                 }
                 let bid = ctx.world.get_block_id(hx, hy, hz);
@@ -507,6 +527,8 @@ impl PlaySession {
                     self.send_inventory(ctx.world);
                     return true;
                 }
+                self.send_block_change(ctx.world, hx, hy, hz);
+                self.send_inventory(ctx.world);
                 return false;
             }
             // Place fluid at the last air/non-solid cell before the hit cell along the ray
@@ -524,8 +546,12 @@ impl PlaySession {
                     tz += if dz >= 0.0 { 1 } else { -1 };
                 }
             }
-            let protected = crate::session::is_spawn_protected(tx, tz, ctx.world.spawn, ctx.spawn_protection);
+            let protected = crate::session::is_spawn_protected(tx, tz, ctx.world.spawn, ctx.spawn_protection)
+                || crate::session::is_spawn_protected(hx, hz, ctx.world.spawn, ctx.spawn_protection);
             if protected && !self.is_op(ctx) {
+                self.send_block_change(ctx.world, tx, ty, tz);
+                self.send_block_change(ctx.world, hx, hy, hz);
+                self.send_inventory(ctx.world);
                 return false;
             }
             if (0..crate::world::WORLD_HEIGHT).contains(&ty)
@@ -537,6 +563,9 @@ impl PlaySession {
                 self.send_inventory(ctx.world);
                 return true;
             }
+            self.send_block_change(ctx.world, tx, ty, tz);
+            self.send_block_change(ctx.world, hx, hy, hz);
+            self.send_inventory(ctx.world);
             return false;
         }
         if s.item_id == 333 {

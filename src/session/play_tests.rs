@@ -1553,3 +1553,120 @@
         assert_eq!(sess.held_id, 326, "bucket must remain full");
     }
 
+    #[test]
+    fn test_spawn_protection_radius_zero_disabled() {
+        assert!(!crate::session::is_spawn_protected(0, 0, [0, 64, 0], 0));
+        assert!(!crate::session::is_spawn_protected(10, -5, [10, 64, -5], 0));
+        assert!(!crate::session::is_spawn_protected(0, 0, [0, 64, 0], -1));
+    }
+
+    #[test]
+    fn test_spawn_protection_rejects_block_placement_and_syncs_ghost_cells() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 4.5, 64.0, 4.5);
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(3, 64, 0)); // 64 dirt
+            p.inventory.current = 0;
+        }
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 3;
+        let mut bc = Vec::new();
+
+        // 1. Click block at (0, 64, 0) inside spawn (radius 16) with direction 1 (top):
+        {
+            let mut c = ctx(&mut w, &ops, &mut bc);
+            c.spawn_protection = 16;
+            sess.pump(
+                &mut c,
+                PacketData::Place { item_id: 3, x: 0, y: 64, z: 0, direction: 1 },
+            );
+        }
+        assert_eq!(w.get_block_id(0, 65, 0), 0, "block must not be placed at (0, 65, 0)");
+        // Must send Packet53BlockChange for both (0, 64, 0) and placed target (0, 65, 0) to clear ghost block:
+        let pkt53_targets: Vec<(i32, i8, i32)> = sess
+            .outbox
+            .iter()
+            .filter(|p| p.first() == Some(&53))
+            .map(|p| {
+                let x = i32::from_be_bytes([p[1], p[2], p[3], p[4]]);
+                let y = p[5] as i8;
+                let z = i32::from_be_bytes([p[6], p[7], p[8], p[9]]);
+                (x, y, z)
+            })
+            .collect();
+        assert!(pkt53_targets.contains(&(0, 64, 0)), "must send Packet53 for clicked (0, 64, 0): {pkt53_targets:?}");
+        assert!(pkt53_targets.contains(&(0, 65, 0)), "must send Packet53 for target (0, 65, 0): {pkt53_targets:?}");
+        // Must sync inventory:
+        assert!(sess.outbox.iter().any(|p| p.first() == Some(&5)), "must send Packet5 to restore inventory");
+
+        // 2. Click outside spawn (17, 64, 0) with direction 4 (west) targeting (16, 64, 0) inside spawn:
+        sess.outbox.clear();
+        w.set_block_id(17, 64, 0, 1);
+        if let Some(e) = w.entities.get_mut(player) {
+            e.body_mut().set_position(16.5, 64.0, 0.5);
+        }
+        {
+            let mut c = ctx(&mut w, &ops, &mut bc);
+            c.spawn_protection = 16;
+            sess.pump(
+                &mut c,
+                PacketData::Place { item_id: 3, x: 17, y: 64, z: 0, direction: 4 },
+            );
+        }
+        assert_eq!(w.get_block_id(16, 64, 0), 0, "block into spawn must be rejected");
+        let pkt53_border: Vec<(i32, i8, i32)> = sess
+            .outbox
+            .iter()
+            .filter(|p| p.first() == Some(&53))
+            .map(|p| {
+                let x = i32::from_be_bytes([p[1], p[2], p[3], p[4]]);
+                let y = p[5] as i8;
+                let z = i32::from_be_bytes([p[6], p[7], p[8], p[9]]);
+                (x, y, z)
+            })
+            .collect();
+        assert!(pkt53_border.contains(&(17, 64, 0)), "must send Packet53 for clicked (17, 64, 0)");
+        assert!(pkt53_border.contains(&(16, 64, 0)), "must send Packet53 for target (16, 64, 0)");
+        assert!(sess.outbox.iter().any(|p| p.first() == Some(&5)), "must send Packet5 to restore inventory");
+    }
+
+    #[test]
+    fn test_spawn_protection_bucket_air_use_sends_packet53_and_inventory() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 4.5, 64.0, 4.5);
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(326, 1, 0)); // water bucket
+            p.inventory.current = 0;
+            p.living.body.pitch = 90.0; // looking down at floor (4, 63, 4)
+        }
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 326;
+        let mut bc = Vec::new();
+
+        {
+            let mut c = ctx(&mut w, &ops, &mut bc);
+            c.spawn_protection = 16;
+            sess.pump(
+                &mut c,
+                PacketData::Place { item_id: 326, x: -1, y: -1, z: -1, direction: -1 },
+            );
+        }
+        assert_eq!(w.get_block_id(4, 64, 4), 0, "water must not be placed");
+        // Must send Packet53BlockChange for target (4, 64, 4) and hit (4, 63, 4):
+        let pkt53: Vec<(i32, i8, i32)> = sess
+            .outbox
+            .iter()
+            .filter(|p| p.first() == Some(&53))
+            .map(|p| {
+                let x = i32::from_be_bytes([p[1], p[2], p[3], p[4]]);
+                let y = p[5] as i8;
+                let z = i32::from_be_bytes([p[6], p[7], p[8], p[9]]);
+                (x, y, z)
+            })
+            .collect();
+        assert!(pkt53.contains(&(4, 64, 4)), "must send Packet53 for target cell: {pkt53:?}");
+        assert!(sess.outbox.iter().any(|p| p.first() == Some(&5)), "must send Packet5 to restore bucket");
+    }
+

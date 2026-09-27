@@ -72,6 +72,9 @@ pub enum SessionOutcome {
 /// `i32::MIN` instead of panicking. We use `i64` for the same outcome on
 /// normal coords without any panic on extremes.
 pub fn is_spawn_protected(x: i32, z: i32, spawn: [i32; 3], radius: i32) -> bool {
+    if radius <= 0 {
+        return false;
+    }
     let dx = (x as i64 - spawn[0] as i64).abs();
     let dz = (z as i64 - spawn[2] as i64).abs();
     dx.max(dz) <= radius as i64
