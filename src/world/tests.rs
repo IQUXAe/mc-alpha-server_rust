@@ -1,6 +1,8 @@
 
     use super::*;
-    use crate::entity::table::{Body, MobEnt, PlayerEnt};
+    use crate::block::BlockPos;
+    use crate::entity::table::{Body, Entity, MobEnt, PlayerEnt};
+    use crate::session::PlaySession;
 
     fn world_with_floor() -> World {
         let mut w = World::new(1234);
@@ -2453,4 +2455,209 @@
         };
         assert!(hp_next < 16, "tick 11 in lava must deal damage once hurt_resist reaches 10");
         assert_eq!(helm_dmg_next, 4, "iron helmet must take 4 durability wear on tick 11 lava hit");
+    }
+
+    #[test]
+    fn test_torch_suffocation_immunity_and_stone_suffocation() {
+        let mut w = world_with_floor();
+        let player = add_player(&mut w, "steve", 3.5, 64.0, 4.5);
+        // Steve's eye position is y = 64.0 + 1.62 = 65.62, inside block (3, 65, 4).
+        // With a torch at (3, 65, 4), Steve must not suffocate.
+        w.set_block_id(3, 65, 4, 50);
+        w.tick_player(player);
+        let hp = match w.entities.get(player).unwrap() {
+            Entity::Player(p) => p.living.health,
+            _ => unreachable!(),
+        };
+        assert_eq!(hp, 20, "torch at eye level must not cause suffocation");
+
+        // With stone at (3, 65, 4), Steve must take suffocation damage.
+        w.set_block_id(3, 65, 4, 1);
+        w.tick_player(player);
+        let hp = match w.entities.get(player).unwrap() {
+            Entity::Player(p) => p.living.health,
+            _ => unreachable!(),
+        };
+        assert_eq!(hp, 19, "stone at eye level must cause suffocation");
+    }
+
+    #[test]
+    fn test_collision_boxes_stairs_ladder_farmland_fence() {
+        let mut w = world_with_floor();
+        // 1. Stairs (53) with meta 0 (Ascending East) must return 2 collision boxes:
+        w.set_block_id(3, 64, 4, 53);
+        w.set_block_meta(3, 64, 4, 0);
+        let mask = AxisAlignedBB::get_bounding_box(2.0, 63.0, 3.0, 5.0, 66.0, 5.0);
+        let boxes = w.colliding_boxes(&mask);
+        // Filter boxes to the stairs at (3, 64, 4):
+        let stairs_boxes: Vec<_> = boxes
+            .into_iter()
+            .filter(|b| b.min_x >= 3.0 && b.max_x <= 4.0 && b.min_y >= 64.0 && b.max_y <= 65.0)
+            .collect();
+        assert_eq!(stairs_boxes.len(), 2, "stairs must produce 2 collision boxes");
+        assert_eq!(stairs_boxes[0].max_y, 64.5);
+        assert_eq!(stairs_boxes[1].max_y, 65.0);
+
+        // 2. Farmland (60) must have a full 1.0 collision box height:
+        w.set_block_id(5, 64, 5, 60);
+        let farm_box = w.block_collision_box(5, 64, 5, 60);
+        assert_eq!(farm_box.min_y, 64.0);
+        assert_eq!(farm_box.max_y, 65.0, "farmland collision box must be full 1.0 height");
+
+        // 3. Ladder (65) oriented collision box:
+        w.set_block_id(7, 64, 7, 65);
+        w.set_block_meta(7, 64, 7, 2); // meta 2: attached to z=8 (+z face)
+        let ladder_box = w.block_collision_box(7, 64, 7, 65);
+        assert_eq!(ladder_box.min_z, 7.875);
+        assert_eq!(ladder_box.max_z, 8.0);
+
+        // 4. Fence (85) at y=63 with height 1.5 must collide with an entity bounding box at y=64.0..65.8:
+        w.set_block_id(9, 63, 9, 85);
+        let feet_box = AxisAlignedBB::get_bounding_box(9.1, 64.0, 9.1, 9.7, 65.8, 9.7);
+        let fence_coll = w.colliding_boxes(&feet_box);
+        assert!(
+            fence_coll.iter().any(|b| b.min_y == 63.0 && b.max_y == 64.5),
+            "fence below player feet must be detected by colliding_boxes"
+        );
+    }
+
+    #[test]
+    fn test_ladder_drops_when_support_broken() {
+        let mut w = world_with_floor();
+        w.set_block_id(3, 64, 5, 1); // wall support
+        w.set_block_id(3, 64, 4, 65); // ladder
+        w.set_block_meta(3, 64, 4, 2); // attached to wall at z=5
+        w.apply_set_notify(3, 64, 5, 0); // break wall
+        assert_eq!(w.get_block_id(3, 64, 4), 0, "ladder must break when support block is removed");
+        assert!(w.entities.alive_ids().into_iter().any(|oid| matches!(
+            w.entities.get(oid).unwrap(),
+            crate::entity::table::Entity::Item(e) if e.item_id == 65
+        )));
+    }
+
+    #[test]
+    fn test_walking_contact_redstone_ore() {
+        let mut w = world_with_floor();
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                if cx == 0 && cz == 0 {
+                    continue;
+                }
+                add_floor_chunk(&mut w, cx, cz);
+            }
+        }
+        w.set_block_id(3, 63, 4, 73); // idle redstone ore under feet
+        let player = add_player(&mut w, "steve", 3.5, 66.0, 4.5);
+        w.move_body(player, 0.0, -3.0, 0.0);
+        assert_eq!(w.get_block_id(3, 63, 4), 74, "walking on redstone ore must light it up to id 74");
+        // Scheduled update after 30 ticks must revert it to 73:
+        for _ in 0..35 {
+            w.time += 1;
+            w.process_scheduled_ticks();
+        }
+        assert_eq!(w.get_block_id(3, 63, 4), 73, "redstone ore must revert to 73 after 30 ticks");
+    }
+
+    #[test]
+    fn test_walking_contact_farmland_trample() {
+        let mut w = world_with_floor();
+        w.set_block_id(3, 63, 4, 60); // farmland under feet
+        // Seed RNG so next_int_bound(4) returns 0 or try a loop
+        let player = add_player(&mut w, "steve", 3.5, 66.0, 4.5);
+        w.move_body(player, 0.0, -3.0, 0.0);
+        // Over multiple steps, 1 in 4 chance will trample farmland to dirt (3):
+        let mut trampled = w.get_block_id(3, 63, 4) == 3;
+        for _ in 0..20 {
+            if trampled {
+                break;
+            }
+            w.move_body(player, 0.0, -0.01, 0.0);
+            if w.get_block_id(3, 63, 4) == 3 {
+                trampled = true;
+            }
+        }
+        assert!(trampled, "walking on farmland must eventually trample it to dirt (3)");
+    }
+
+    #[test]
+    fn test_non_opaque_blocks_suffocation_immunity() {
+        let mut w = world_with_floor();
+        let player = add_player(&mut w, "steve", 3.5, 64.0, 4.5);
+        // Steve's eye position is y = 64.0 + 1.62 = 65.62, inside block (3, 65, 4).
+        for bid in [50, 52, 53, 79, 85] {
+            w.set_block_id(3, 65, 4, bid);
+            w.tick_player(player);
+            let hp = match w.entities.get(player).unwrap() {
+                Entity::Player(p) => p.living.health,
+                _ => unreachable!(),
+            };
+            assert_eq!(hp, 20, "block id {bid} at eye level must not cause suffocation");
+        }
+    }
+
+    #[test]
+    fn test_torch_cannot_attach_to_fence_and_fence_cannot_stack() {
+        let mut w = world_with_floor();
+        // Fence has allows_attachment = false:
+        assert!(!w.attach_at(BlockPos::new(3, 64, 4)));
+        // Torch on side of fence must not be supported:
+        w.set_block_id(3, 63, 4, 0); // clear floor under torch
+        w.set_block_id(3, 64, 5, 85); // fence
+        assert!(!crate::block::ticks::block_torch_can_stay(&w, BlockPos::new(3, 64, 4)));
+
+        // Fence placement: can place on stone floor, but CANNOT place on top of another fence
+        let player = add_player(&mut w, "steve", 5.5, 64.0, 5.5);
+        let mut sess = PlaySession::new(player);
+        // Can stay on solid floor:
+        {
+            let mut u = crate::item_verbs::ItemUseWorld {
+                world: &mut w,
+                session: &mut sess,
+            };
+            assert!(crate::item_verbs::item_block_use(
+                &mut u,
+                crate::item_verbs::BlockPlace { block_id: 85, stack_count: 1, side: 1, yaw: 0.0 },
+                BlockPos::new(4, 63, 4) // floor at 63, places at 64
+            ));
+        }
+        assert_eq!(w.get_block_id(4, 64, 4), 85);
+
+        // Cannot place another fence on top of the fence at (4, 64, 4):
+        {
+            let mut u = crate::item_verbs::ItemUseWorld {
+                world: &mut w,
+                session: &mut sess,
+            };
+            assert!(!crate::item_verbs::item_block_use(
+                &mut u,
+                crate::item_verbs::BlockPlace { block_id: 85, stack_count: 1, side: 1, yaw: 0.0 },
+                BlockPos::new(4, 64, 4) // target would be 65
+            ));
+        }
+        assert_eq!(w.get_block_id(4, 65, 4), 0, "fence cannot be stacked on top of another fence");
+    }
+
+    #[test]
+    fn test_pumpkin_placement_facing_metadata() {
+        let mut w = world_with_floor();
+        let player = add_player(&mut w, "steve", 3.5, 66.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        // Alpha 1.2.6 formula: floor(yaw * 4 / 360 + 0.5) & 3
+        let yaws_and_metas = [(0.0, 0), (90.0, 1), (180.0, 2), (270.0, 3)];
+        for (i, (yaw, expected_meta)) in yaws_and_metas.iter().enumerate() {
+            let x = 3 + i as i32;
+            {
+                let mut u = crate::item_verbs::ItemUseWorld {
+                    world: &mut w,
+                    session: &mut sess,
+                };
+                assert!(crate::item_verbs::item_block_use(
+                    &mut u,
+                    crate::item_verbs::BlockPlace { block_id: 86, stack_count: 1, side: 1, yaw: *yaw },
+                    BlockPos::new(x, 63, 4)
+                ));
+            }
+            assert_eq!(w.get_block_id(x, 64, 4), 86);
+            assert_eq!(w.get_block_meta(x, 64, 4), *expected_meta, "pumpkin placed at yaw {yaw} must have meta {expected_meta}");
+        }
     }

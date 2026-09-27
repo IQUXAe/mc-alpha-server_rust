@@ -1436,3 +1436,120 @@
         );
     }
 
+    #[test]
+    fn test_dig_left_click_triggers_mechanisms_and_redstone_ore() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 4.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // 1. Door (64)
+        w.set_block_id(3, 64, 4, 64);
+        w.set_block_meta(3, 64, 4, 0);
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+        assert_eq!(w.get_block_meta(3, 64, 4) & 4, 4, "left click must toggle door");
+
+        // 2. Lever (69)
+        w.set_block_id(3, 64, 5, 69);
+        w.set_block_meta(3, 64, 5, 5); // floor lever, off
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 5, face: 1 },
+        );
+        assert_eq!(w.get_block_meta(3, 64, 5) & 8, 8, "left click must toggle lever");
+
+        // 3. Button (77)
+        w.set_block_id(2, 64, 6, 1); // supporting wall block
+        w.set_block_id(3, 64, 6, 77);
+        w.set_block_meta(3, 64, 6, 1); // wall button attached to (2, 64, 6), unpressed
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 6, face: 1 },
+        );
+        assert_eq!(w.get_block_meta(3, 64, 6) & 8, 8, "left click must press button");
+
+        // 4. Redstone ore (73)
+        w.set_block_id(3, 64, 7, 73);
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 7, face: 1 },
+        );
+        assert_eq!(w.get_block_id(3, 64, 7), 74, "left click must activate redstone ore to glowing (74)");
+    }
+
+    #[test]
+    fn test_spawn_protection_rejects_bucket_air_use_for_non_op() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 4.5, 64.0, 4.5);
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(326, 1, 0)); // water bucket
+            p.inventory.current = 0;
+            p.living.body.pitch = 90.0; // looking straight down at floor
+        }
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 326;
+        let mut bc = Vec::new();
+
+        // Non-op with spawn protection = 16:
+        {
+            let mut c = ctx(&mut w, &ops, &mut bc);
+            c.spawn_protection = 16;
+            sess.pump(
+                &mut c,
+                PacketData::Place { item_id: 326, x: -1, y: -1, z: -1, direction: -1 },
+            );
+        }
+        // Should not place water at (4, 64, 4):
+        assert_eq!(w.get_block_id(4, 64, 4), 0, "non-op bucket air use must be rejected in spawn protection");
+        assert_eq!(sess.held_id, 326, "bucket must not be emptied");
+
+        // Op with spawn protection = 16:
+        let mut ops_set = HashSet::new();
+        ops_set.insert("steve".to_string());
+        {
+            let mut c = SessionCtx {
+                world: &mut w, ops: &ops_set, spawn_protection: 16, pvp: true, broadcast: &mut bc,
+            };
+            sess.pump(
+                &mut c,
+                PacketData::Place { item_id: 326, x: -1, y: -1, z: -1, direction: -1 },
+            );
+        }
+        assert_eq!(w.get_block_id(4, 64, 4), 8, "op bucket air use must succeed in spawn protection");
+        assert_eq!(sess.held_id, 325, "bucket must be emptied to 325");
+    }
+
+    #[test]
+    fn test_spawn_protection_rejects_bucket_on_block_for_non_op() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 4.5, 64.0, 4.5);
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(326, 1, 0)); // water bucket
+            p.inventory.current = 0;
+        }
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 326;
+        let mut bc = Vec::new();
+
+        // Target (x=16, y=64, z=0) is outside spawn protection (sp is 0,0,0, radius 16),
+        // but placing on west face (side 4) goes into (15, 64, 0) which is inside spawn.
+        w.set_block_id(16, 64, 0, 1); // stone block at y=64 right on border
+        {
+            let mut c = ctx(&mut w, &ops, &mut bc);
+            c.spawn_protection = 16;
+            // Try to place water against west face (side 4), into (15, 64, 0) which is inside spawn:
+            sess.pump(
+                &mut c,
+                PacketData::Place { item_id: 326, x: 16, y: 64, z: 0, direction: 4 },
+            );
+        }
+        assert_eq!(w.get_block_id(15, 64, 0), 0, "bucket on block into spawn protection must be rejected");
+        assert_eq!(sess.held_id, 326, "bucket must remain full");
+    }
+
