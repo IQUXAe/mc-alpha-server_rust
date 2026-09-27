@@ -20,10 +20,10 @@ A world directory (`<level-name>`, default `world`) contains:
 ## 2. Chunk Database Format
 
 ### 2.1 Key Encoding
-Chunk keys in LevelDB are 8-byte big-endian integers computed from chunk coordinates `(cx, cz)`:
+Chunk keys in LevelDB are 8-byte little-endian integers computed from chunk coordinates `(cx, cz)`:
 ```rust
-let key = ((cx as u64) << 32) | (cz as u32 as u64);
-let bytes = key.to_be_bytes();
+let key = ((cx as u32 as u64) << 32) | (cz as u32 as u64);
+let bytes = key.to_le_bytes();
 ```
 
 ### 2.2 Value Compression & Compatibility
