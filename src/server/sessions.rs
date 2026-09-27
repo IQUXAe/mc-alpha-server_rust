@@ -684,6 +684,12 @@ impl Server {
                 let mut p = PlayerEnt::new(id, &username);
                 let sp = self.world.spawn;
                 p.living.body.set_position(sp[0] as f64 + 0.5, sp[1] as f64, sp[2] as f64 + 0.5);
+                while !self.world.colliding_boxes(&p.living.body.bounding_box).is_empty()
+                    && p.living.body.pos[1] < crate::world::WORLD_HEIGHT as f64
+                {
+                    let cur_y = p.living.body.pos[1];
+                    p.living.body.set_position(p.living.body.pos[0], cur_y + 1.0, p.living.body.pos[2]);
+                }
                 self.world.entities.insert(Entity::Player(p));
                 id
             }

@@ -55,6 +55,15 @@ impl PlaySession {
                 if bid == 0 {
                     return None;
                 }
+                if bid == 64 {
+                    ctx.world.toggle_door(x, y, z);
+                } else if bid == 69 {
+                    ctx.world.toggle_lever(x, y, z);
+                } else if bid == 77 {
+                    ctx.world.press_button(x, y, z);
+                } else if bid == 73 {
+                    ctx.world.apply_set_notify(x, y, z, 74);
+                }
                 let input = self.dig_input(ctx, bid as i32);
                 if dig_on_click(input) {
                     self.harvest(ctx, x, y, z);

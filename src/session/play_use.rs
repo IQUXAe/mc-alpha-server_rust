@@ -388,6 +388,10 @@ impl PlaySession {
         };
         if s.item_id == 325 {
             for (tx, ty, tz) in [(x, y, z), (nx, ny, nz)] {
+                let protected = crate::session::is_spawn_protected(tx, tz, ctx.world.spawn, ctx.spawn_protection);
+                if protected && !self.is_op(ctx) {
+                    continue;
+                }
                 let bid = ctx.world.get_block_id(tx, ty, tz);
                 let meta = ctx.world.get_block_meta(tx, ty, tz);
                 if (bid == 8 || bid == 9) && meta == 0 {
@@ -401,6 +405,10 @@ impl PlaySession {
                     return true;
                 }
             }
+            return false;
+        }
+        let protected = crate::session::is_spawn_protected(nx, nz, ctx.world.spawn, ctx.spawn_protection);
+        if protected && !self.is_op(ctx) {
             return false;
         }
         if !(0..crate::world::WORLD_HEIGHT).contains(&ny) {
@@ -479,6 +487,10 @@ impl PlaySession {
                 return false;
             };
             if s.item_id == 325 {
+                let protected = crate::session::is_spawn_protected(hx, hz, ctx.world.spawn, ctx.spawn_protection);
+                if protected && !self.is_op(ctx) {
+                    return false;
+                }
                 let bid = ctx.world.get_block_id(hx, hy, hz);
                 let meta = ctx.world.get_block_meta(hx, hy, hz);
                 if (bid == 8 || bid == 9) && meta == 0 {
@@ -511,6 +523,10 @@ impl PlaySession {
                 } else {
                     tz += if dz >= 0.0 { 1 } else { -1 };
                 }
+            }
+            let protected = crate::session::is_spawn_protected(tx, tz, ctx.world.spawn, ctx.spawn_protection);
+            if protected && !self.is_op(ctx) {
+                return false;
             }
             if (0..crate::world::WORLD_HEIGHT).contains(&ty)
                 && !ctx.world.material_at(tx, ty, tz).is_solid()

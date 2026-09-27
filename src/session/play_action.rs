@@ -239,11 +239,11 @@ const CHAT_ALLOWED: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQR
         // Vanilla gates (Java NetServerHandler.handleChat): chars (not
         // bytes) over 100 kick, then trim, then the allowed-charset kick.
         if message.chars().count() > 100 {
-            return Some(SessionOutcome::Kick("Chat message too long".to_string()));
+            return self.kick("Chat message too long");
         }
         let msg = message.trim().to_string();
         if !msg.chars().all(|c| Self::CHAT_ALLOWED.contains(c)) {
-            return Some(SessionOutcome::Kick("Illegal characters in chat".to_string()));
+            return self.kick("Illegal characters in chat");
         }
         if msg.starts_with('/') {
             chat_command(ctx.world, self, ctx.ops, ctx.broadcast, &msg);
@@ -275,11 +275,20 @@ const CHAT_ALLOWED: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQR
             p.living.body.motion = [0.0; 3];
             p.respawn_ticks = 60;
         }
-        let (sx, sy, sz) = (sp[0] as f64 + 0.5, sp[1] as f64, sp[2] as f64 + 0.5);
+        let (sx, mut sy, sz) = (sp[0] as f64 + 0.5, sp[1] as f64, sp[2] as f64 + 0.5);
         if let Some(e) = ctx.world.entities.get_mut(me) {
             e.body_mut().set_position(sx, sy, sz);
             e.body_mut().yaw = 0.0;
             e.body_mut().pitch = 0.0;
+        }
+        while let Some(bb) = ctx.world.entities.get(me).map(|e| e.body().bounding_box) {
+            if ctx.world.colliding_boxes(&bb).is_empty() || sy >= crate::world::WORLD_HEIGHT as f64 {
+                break;
+            }
+            sy += 1.0;
+            if let Some(e) = ctx.world.entities.get_mut(me) {
+                e.body_mut().set_position(sx, sy, sz);
+            }
         }
         self.last = [sx, sy, sz];
         self.has_moved = false;
