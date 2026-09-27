@@ -162,10 +162,6 @@ pub enum Packet {
     AttachEntity { entity_id: i32, vehicle_id: i32 },
 }
 
-fn read_exact<R: Read>(stream: &mut R, buf: &mut [u8]) -> std::io::Result<()> {
-    stream.read_exact(buf)
-}
-
 fn read_u8<R: Read>(stream: &mut R) -> std::io::Result<u8> {
     let mut buf = [0; 1];
     stream.read_exact(&mut buf)?;
@@ -195,8 +191,14 @@ fn read_utf<R: Read>(stream: &mut R) -> std::io::Result<String> {
     if len == 0 {
         return Ok(String::new());
     }
-    let mut bytes = vec![0u8; len];
-    read_exact(stream, &mut bytes)?;
+    let mut bytes = Vec::with_capacity(len.min(1024));
+    stream.take(len as u64).read_to_end(&mut bytes)?;
+    if bytes.len() != len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "unexpected EOF in read_utf",
+        ));
+    }
     String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
@@ -242,8 +244,15 @@ pub(crate) fn read_packet_payload<R: Read>(stream: &mut R, packet_id: u8) -> std
         }
         5 => {
             let inventory_type = read_i32(stream)?;
-            let item_count = read_u16(stream)?;
-            let mut slots = Vec::with_capacity(item_count as usize);
+            let item_count_i16 = read_u16(stream)? as i16;
+            if !(0..=36).contains(&item_count_i16) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid inventory slot count",
+                ));
+            }
+            let item_count = item_count_i16 as usize;
+            let mut slots = Vec::with_capacity(item_count);
             for _ in 0..item_count {
                 let item_id = read_u16(stream)? as i16;
                 let mut slot = SlotData { item_id, count: 0, damage: 0 };
@@ -386,8 +395,14 @@ pub(crate) fn read_packet_payload<R: Read>(stream: &mut R, packet_id: u8) -> std
             let y = read_u16(stream)? as i16;
             let z = read_i32(stream)?;
             let len = read_u16(stream)? as usize;
-            let mut nbt_data = vec![0; len];
-            read_exact(stream, &mut nbt_data)?;
+            let mut nbt_data = Vec::with_capacity(len.min(1024));
+            stream.take(len as u64).read_to_end(&mut nbt_data)?;
+            if nbt_data.len() != len {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "unexpected EOF in ComplexEntity",
+                ));
+            }
             Ok(PacketData::ComplexEntity {
                 x,
                 y,
@@ -670,6 +685,34 @@ mod tests {
         let (p2, used2) = try_decode_packet_slice(&raw[used1..]).unwrap().unwrap();
         assert_eq!(used1 + used2, raw.len());
         assert!(matches!(p2, PacketData::Chat { message } if message == "hello"));
+    }
+
+    #[test]
+    fn test_decode_rejects_excessive_inventory_slots_and_partial_64kb_headers() {
+        // Packet 5 (PlayerInventory) with count = 100 (> 36) returns InvalidData error.
+        let mut bad_inv = Vec::new();
+        put_u8(&mut bad_inv, 5);
+        put_i32(&mut bad_inv, -1);
+        put_i16(&mut bad_inv, 100);
+        assert!(matches!(
+            try_decode_packet_slice(&bad_inv),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData
+        ));
+
+        // Partial Packet 3 (Chat) claiming 65535 bytes with only 4 bytes present returns Ok(None) cleanly.
+        let mut partial_chat = vec![3, 0xFF, 0xFF, b'a', b'b'];
+        assert!(try_decode_packet_slice(&partial_chat).unwrap().is_none());
+        partial_chat.clear();
+
+        // Partial Packet 59 (ComplexEntity) claiming 65535 bytes with only 2 bytes present returns Ok(None).
+        let mut partial_tile = Vec::new();
+        put_u8(&mut partial_tile, 59);
+        put_i32(&mut partial_tile, 1);
+        put_i16(&mut partial_tile, 64);
+        put_i32(&mut partial_tile, 1);
+        put_i16(&mut partial_tile, -1); // 65535 u16
+        partial_tile.extend_from_slice(&[1, 2]);
+        assert!(try_decode_packet_slice(&partial_tile).unwrap().is_none());
     }
 }
 
