@@ -655,7 +655,11 @@ impl World {
                 continue;
             }
             if let Some(o) = self.entities.get(oid) {
-                if !o.body().dead && mask.intersects_with(&o.body().bounding_box) {
+                let pushable = matches!(
+                    o,
+                    Entity::Mob(_) | Entity::Animal(_) | Entity::Player(_) | Entity::Boat(_)
+                );
+                if pushable && !o.body().dead && mask.intersects_with(&o.body().bounding_box) {
                     others.push((oid, o.body().pos[0], o.body().pos[2]));
                 }
             }
@@ -783,8 +787,17 @@ impl World {
             return false;
         };
         if d2 > 16384.0 {
+            let chunk = self.entities.get(id).map(|e| {
+                (
+                    (e.body().pos[0].floor() as i32) >> 4,
+                    (e.body().pos[2].floor() as i32) >> 4,
+                )
+            });
             if let Some(e) = self.entities.get_mut(id) {
                 e.body_mut().dead = true;
+            }
+            if let Some((cx, cz)) = chunk {
+                self.mark_chunk_modified(cx, cz);
             }
             return true;
         }
@@ -821,8 +834,17 @@ impl World {
                     _ => {}
                 }
             } else {
+                let chunk = self.entities.get(id).map(|e| {
+                    (
+                        (e.body().pos[0].floor() as i32) >> 4,
+                        (e.body().pos[2].floor() as i32) >> 4,
+                    )
+                });
                 if let Some(e) = self.entities.get_mut(id) {
                     e.body_mut().dead = true;
+                }
+                if let Some((cx, cz)) = chunk {
+                    self.mark_chunk_modified(cx, cz);
                 }
                 return true;
             }
@@ -838,8 +860,17 @@ impl World {
         // Peaceful (difficulty 0): mobs die instead of ticking
         // (Java EntityMobs.onUpdate: monstersEnabled == 0 -> dead).
         if self.difficulty == 0 {
+            let chunk = self.entities.get(id).map(|e| {
+                (
+                    (e.body().pos[0].floor() as i32) >> 4,
+                    (e.body().pos[2].floor() as i32) >> 4,
+                )
+            });
             if let Some(e) = self.entities.get_mut(id) {
                 e.body_mut().dead = true;
+            }
+            if let Some((cx, cz)) = chunk {
+                self.mark_chunk_modified(cx, cz);
             }
             return;
         }

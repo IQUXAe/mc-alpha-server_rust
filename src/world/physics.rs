@@ -21,6 +21,7 @@ impl World {
             age: 0,
             pickup_delay: 10,
         }));
+        self.mark_chunk_modified((x.floor() as i32) >> 4, (z.floor() as i32) >> 4);
         id
     }
 
@@ -28,25 +29,37 @@ impl World {
     /// without the soil-walking sound, which arrives with the block phase).
     /// Returns the fall event distance when `onFall` must fire.
     pub fn move_body(&mut self, id: EntityId, dx: f64, dy: f64, dz: f64) -> Option<f32> {
-        let (orig, no_clip, step, was_ground, suppress, fall, sneaking) = match self.entities.get(id) {
-            Some(e) => {
-                let b = e.body();
-                let sneak = match e {
-                    Entity::Player(p) => p.living.sneaking,
-                    _ => false,
-                };
-                (
-                    b.bounding_box,
-                    b.no_clip,
-                    b.step_height,
-                    b.on_ground,
-                    b.suppress_fall_state,
-                    b.fall_distance,
-                    sneak,
-                )
-            }
-            None => return None,
-        };
+        let (orig, no_clip, step, was_ground, suppress, fall, sneaking, old_chunk, persistent) =
+            match self.entities.get(id) {
+                Some(e) => {
+                    let b = e.body();
+                    let sneak = match e {
+                        Entity::Player(p) => p.living.sneaking,
+                        _ => false,
+                    };
+                    let pers = matches!(
+                        e,
+                        Entity::Item(_)
+                            | Entity::Mob(_)
+                            | Entity::Animal(_)
+                            | Entity::Boat(_)
+                            | Entity::Arrow(_)
+                            | Entity::Falling(_)
+                    );
+                    (
+                        b.bounding_box,
+                        b.no_clip,
+                        b.step_height,
+                        b.on_ground,
+                        b.suppress_fall_state,
+                        b.fall_distance,
+                        sneak,
+                        ((b.pos[0].floor() as i32) >> 4, (b.pos[2].floor() as i32) >> 4),
+                        pers,
+                    )
+                }
+                None => return None,
+            };
         let (old_x, old_y, old_z) = (dx, dy, dz);
         let (mut mx, mut my, mut mz) = (dx, dy, dz);
         // Sneak edge-stop (Java Entity.moveEntity:212-234): on ground while
@@ -122,7 +135,7 @@ impl World {
                 }
             }
 
-            let falling = {
+            let (falling, new_chunk) = {
                 let e = self.entities.get_mut(id)?;
                 let b = e.body_mut();
                 b.bounding_box = work;
@@ -141,8 +154,15 @@ impl World {
                 if old_z != mz {
                     b.motion[2] = 0.0;
                 }
-                (b.on_ground, my)
+                (
+                    (b.on_ground, my),
+                    ((b.pos[0].floor() as i32) >> 4, (b.pos[2].floor() as i32) >> 4),
+                )
             };
+            if persistent && new_chunk != old_chunk {
+                self.mark_chunk_modified(old_chunk.0, old_chunk.1);
+                self.mark_chunk_modified(new_chunk.0, new_chunk.1);
+            }
             // Contact damage (mirrors the `onEntityCollidedWithBlock`
             // sweep at the tail of `Entity.moveEntity`): any cactus in
             // the post-move box deals 1 through the pipeline.
@@ -361,7 +381,12 @@ impl World {
                 }
                 e.age += 1;
                 if e.age >= 6000 {
+                    let (cx, cz) = (
+                        (e.body.pos[0].floor() as i32) >> 4,
+                        (e.body.pos[2].floor() as i32) >> 4,
+                    );
                     e.body.dead = true;
+                    self.mark_chunk_modified(cx, cz);
                     return;
                 }
                 e.body.motion[1] -= 0.04;
@@ -446,7 +471,7 @@ impl World {
         if amount <= 0 {
             return false;
         }
-        let broke = match self.entities.get_mut(id) {
+        let (broke, chunk_pos) = match self.entities.get_mut(id) {
             Some(Entity::Boat(b)) => {
                 if b.body.dead {
                     return false;
@@ -454,10 +479,14 @@ impl World {
                 b.forward_dir = -b.forward_dir;
                 b.time_since_hit = 10;
                 b.damage_taken += amount * 10;
-                b.damage_taken > 40
+                (
+                    b.damage_taken > 40,
+                    ((b.body.pos[0].floor() as i32) >> 4, (b.body.pos[2].floor() as i32) >> 4),
+                )
             }
             _ => return false,
         };
+        self.mark_chunk_modified(chunk_pos.0, chunk_pos.1);
         if !broke {
             return false;
         }
@@ -479,6 +508,7 @@ impl World {
         if let Some(Entity::Boat(b)) = self.entities.get_mut(id) {
             b.body.dead = true;
         }
+        self.mark_chunk_modified((px.floor() as i32) >> 4, (pz.floor() as i32) >> 4);
         true
     }
 

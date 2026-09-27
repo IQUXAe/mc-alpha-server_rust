@@ -82,6 +82,7 @@ impl crate::mob_spawning::SpawnerWorld for World {
                 return None;
             }
         }
+        self.mark_chunk_modified((fx.floor() as i32) >> 4, (fz.floor() as i32) >> 4);
         Some((id, 4))
     }
 
@@ -95,6 +96,7 @@ impl crate::mob_spawning::SpawnerWorld for World {
         m.living.body.yaw = yaw;
         self.entities.insert(Entity::Mob(m));
         self.entities.mount(id, Some(host_id));
+        self.mark_chunk_modified((fx.floor() as i32) >> 4, (fz.floor() as i32) >> 4);
         true
     }
 }
@@ -255,8 +257,14 @@ impl World {
                 if !hit {
                     continue;
                 }
-                let (item_id, count, damage) = match self.entities.get(iid) {
-                    Some(Entity::Item(e)) => (e.item_id, e.count, e.damage),
+                let (item_id, count, damage, icx, icz) = match self.entities.get(iid) {
+                    Some(Entity::Item(e)) => (
+                        e.item_id,
+                        e.count,
+                        e.damage,
+                        (e.body.pos[0].floor() as i32) >> 4,
+                        (e.body.pos[2].floor() as i32) >> 4,
+                    ),
                     _ => continue,
                 };
                 let rem = self.player_add_item(
@@ -264,6 +272,7 @@ impl World {
                     crate::inventory::ItemStack::new(item_id, count, damage),
                 );
                 if rem < count {
+                    self.mark_chunk_modified(icx, icz);
                     if rem <= 0 {
                         if let Some(e) = self.entities.get_mut(iid) {
                             e.body_mut().dead = true;
@@ -419,6 +428,7 @@ impl World {
                 if let Some(TileData::MobSpawner(s)) = self.tiles.get_mut(&(x, y, z)) {
                     s.delay = new_delay;
                 }
+                self.mark_chunk_modified(cx, cz);
             }
             let cur_delay = match self.tiles.get(&(x, y, z)) {
                 Some(TileData::MobSpawner(s)) => s.delay,
@@ -428,6 +438,7 @@ impl World {
                 if let Some(TileData::MobSpawner(s)) = self.tiles.get_mut(&(x, y, z)) {
                     s.delay -= 1;
                 }
+                self.mark_chunk_modified(cx, cz);
                 continue;
             }
             for _ in 0..4 {
@@ -478,6 +489,7 @@ impl World {
                     if let Some(TileData::MobSpawner(s)) = self.tiles.get_mut(&(x, y, z)) {
                         s.delay = new_delay;
                     }
+                    self.mark_chunk_modified(cx, cz);
                     break;
                 }
                 let sx = x as f64 + (self.rng.next_double() - self.rng.next_double()) * 4.0;
@@ -499,6 +511,7 @@ impl World {
                     if let Some(TileData::MobSpawner(s)) = self.tiles.get_mut(&(x, y, z)) {
                         s.delay = new_delay;
                     }
+                    self.mark_chunk_modified(cx, cz);
                 }
             }
         }

@@ -536,6 +536,20 @@ impl World {
     /// table, TNT cells chain-ignite instead of dropping, and queues an
     /// explosion event for `Packet60` (`WorldServer.java:92-96`).
     pub(crate) fn blast(&mut self, px: f64, py: f64, pz: f64, radius: f32, attacker: Option<EntityId>) {
+        self.blast_flaming(px, py, pz, radius, attacker, false);
+    }
+
+    /// Shared blast with optional fire ignition (`Explosion.field_12031_a`,
+    /// `Explosion.java:110-122`).
+    pub fn blast_flaming(
+        &mut self,
+        px: f64,
+        py: f64,
+        pz: f64,
+        radius: f32,
+        attacker: Option<EntityId>,
+        is_flaming: bool,
+    ) {
         // Phase 1: living victims in the blast radius.
         let mut victims: Vec<EntityId> = Vec::new();
         for oid in self.entities.alive_ids() {
@@ -636,7 +650,7 @@ impl World {
             }
         }
         let cells: Vec<(i32, i32, i32)> = destroyed.iter().copied().collect();
-        self.explosion_events.push((px, py, pz, radius, cells));
+        self.explosion_events.push((px, py, pz, radius, cells.clone()));
         let mut tnt_chain: Vec<(i32, i32, i32)> = Vec::new();
         let mut removals: Vec<(i32, i32, i32, u8, u8)> = Vec::new();
         for (bx, by, bz) in destroyed {
@@ -674,6 +688,18 @@ impl World {
         for (bx, by, bz) in tnt_chain {
             let fuse = 10 + self.rng.next_int_bound(21);
             self.pending_tnt.push((bx, by, bz, fuse));
+        }
+        // Explosion.java:110-122: when isFlaming is set, 1/3 of air cells in
+        // the blast volume sitting on top of an opaque/solid block ignite.
+        if is_flaming {
+            for &(bx, by, bz) in cells.iter().rev() {
+                if self.get_block_id(bx, by, bz) == 0
+                    && self.block_allows_attachment(bx, by - 1, bz)
+                    && self.rng.next_int_bound(3) == 0
+                {
+                    self.apply_set_notify(bx, by, bz, 51);
+                }
+            }
         }
     }
 

@@ -347,8 +347,9 @@
 
     #[test]
     fn test_lava_contact_damages_ignites_and_burns() {
-        // Vanilla `World.func_523_c`: lava deals 1 and ignites for 300
-        // ticks; the burn persists (lava must NOT extinguish like water).
+        // Vanilla `World.func_523_c` in `moveEntity`: lava deals 1 and ignites
+        // for 300 ticks; then `Entity.handleLavaMovement` in `tick_living`
+        // deals 4 (upgrading 1 -> 4 during hurt_resist) and sets fire = 600.
         let mut w = world_with_floor();
         for y in 64..68 {
             w.set_block_id(3, y, 4, 10);
@@ -361,18 +362,19 @@
             _ => unreachable!(),
         };
         w.move_body(id, 0.0, 0.0, 0.0);
-        let fire_after_contact = match w.entities.get(id).unwrap() {
-            crate::entity::table::Entity::Mob(m) => m.living.body.fire,
+        let (hp_after_contact, fire_after_contact) = match w.entities.get(id).unwrap() {
+            crate::entity::table::Entity::Mob(m) => (m.living.health, m.living.body.fire),
             _ => unreachable!(),
         };
+        assert_eq!(hp_before - hp_after_contact, 1);
         assert_eq!(fire_after_contact, 300);
         w.tick_living(id);
         let (hp_after, fire) = match w.entities.get(id).unwrap() {
             crate::entity::table::Entity::Mob(m) => (m.living.health, m.living.body.fire),
             _ => unreachable!(),
         };
-        assert_eq!(hp_before - hp_after, 1);
-        assert!(fire > 0, "lava must not extinguish the fire it sets");
+        assert_eq!(hp_before - hp_after, 4);
+        assert_eq!(fire, 600, "lava must set fire to 600 and not extinguish it");
     }
 
     #[test]
@@ -2070,5 +2072,385 @@
         assert_eq!(target_after_far, None, "spider must lose target when player is beyond 24 blocks");
     }
 
+    #[test]
+    fn test_ensure_chunk_recalls_unloaded_and_unload_chunks_protects_actual_spawn() {
+        let mut w = World::new(12345);
+        w.spawn = [160, 64, 160]; // spawn at chunk (10, 10)
+        // Populate chunk (0, 0), place a diamond block at (5, 70, 5), and unload it via unload_chunks:
+        add_floor_chunk(&mut w, 0, 0);
+        w.set_block_id(5, 70, 5, 57);
+        w.time = 100;
+        w.unload_chunks();
+        assert!(!w.has_chunk(0, 0));
+
+        // Calling ensure_chunk(0, 0) must recall the spilled chunk from unloaded instead of regenerating over it!
+        w.ensure_chunk(0, 0);
+        assert!(w.has_chunk(0, 0));
+        assert_eq!(w.get_block_id(5, 70, 5), 57, "ensure_chunk must recall unloaded chunk rather than regenerating");
+
+        // Also add chunk at spawn (10, 10) and far chunk (30, 30) with 0 players online:
+        add_floor_chunk(&mut w, 10, 10);
+        add_floor_chunk(&mut w, 30, 30);
+        w.time = 200;
+        w.unload_chunks();
+        assert!(w.has_chunk(10, 10), "spawn chunk (10, 10) must be protected from unload");
+        assert!(!w.has_chunk(0, 0), "chunk (0, 0) away from spawn (10, 10) must be unloaded when 0 players online");
+        assert!(!w.has_chunk(30, 30), "far chunk (30, 30) must be unloaded when 0 players online");
+    }
+
+    #[test]
+    fn test_entity_dirty_tracking_on_spawn_move_and_despawn() {
+        let mut w = world_with_floor();
+        add_floor_chunk(&mut w, 1, 0);
+        w.chunks.get_mut(&(0, 0)).unwrap().is_modified = false;
+        w.chunks.get_mut(&(1, 0)).unwrap().is_modified = false;
+
+        // 1. Spawning an item marks chunk (0, 0) modified:
+        let item = w.spawn_item_entity(264, 1, 0, 15.5, 64.25, 8.5);
+        assert!(w.chunks.get(&(0, 0)).unwrap().is_modified, "spawning item must mark chunk modified");
+
+        // Clear modified flags, then move item across chunk boundary into chunk (1, 0) (x=16.5):
+        w.chunks.get_mut(&(0, 0)).unwrap().is_modified = false;
+        w.chunks.get_mut(&(1, 0)).unwrap().is_modified = false;
+        w.move_body(item, 1.0, 0.0, 0.0);
+        assert!(w.chunks.get(&(0, 0)).unwrap().is_modified, "leaving chunk (0, 0) must mark it modified");
+        assert!(w.chunks.get(&(1, 0)).unwrap().is_modified, "entering chunk (1, 0) must mark it modified");
+
+        // Clear modified flag on (1, 0), then age-despawn item at age 5999 -> 6000:
+        w.chunks.get_mut(&(1, 0)).unwrap().is_modified = false;
+        if let Some(crate::entity::table::Entity::Item(it)) = w.entities.get_mut(item) {
+            it.age = 5999;
+        }
+        w.tick_item(item);
+        assert!(w.chunks.get(&(1, 0)).unwrap().is_modified, "despawning item must mark chunk modified");
+    }
+
+    #[test]
+    fn test_plants_and_farmland_do_not_schedule_infinite_tick_loops() {
+        let mut w = world_with_floor();
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                if (cx, cz) != (0, 0) {
+                    w.insert_chunk(Chunk::new(cx, cz));
+                }
+            }
+        }
+        // Place sand at (4, 63, 4) and cactus at (4, 64, 4), farmland at (6, 63, 6) and crops at (6, 64, 6)
+        w.set_block_id(4, 63, 4, 12);
+        w.apply_set_notify(4, 64, 4, 81);
+        w.set_block_id(6, 63, 6, 60);
+        w.apply_set_notify(6, 64, 6, 59);
+        w.neighbor_changed(4, 64, 4);
+        w.neighbor_changed(6, 63, 6);
+        w.neighbor_changed(6, 64, 6);
+        assert!(
+            !w.scheduled_set.iter().any(|&(_, _, _, id)| matches!(id, 6 | 18 | 59 | 60 | 81 | 83)),
+            "placing or notifying cactus/farmland/crops must not schedule 1-tick self-rescheduling loops"
+        );
+        // Running random ticks on cactus/crops/farmland also schedules no plant/farmland ticks:
+        crate::block::ticks::block_cactus_random_tick(
+            &mut w,
+            81,
+            crate::block::pos::DropSpec::new(81, 1, 0),
+            crate::block::pos::BlockPos::new(4, 64, 4),
+        );
+        crate::block::ticks::block_soil_tick(&mut w, 60, crate::block::pos::BlockPos::new(6, 63, 6));
+        crate::block::ticks::block_crops_tick(
+            &mut w,
+            crate::block::ticks::CropIds { block: 59, crop: 59, wheat: 296, seeds: 295 },
+            crate::block::pos::BlockPos::new(6, 64, 6),
+        );
+        assert!(
+            !w.scheduled_set.iter().any(|&(_, _, _, id)| matches!(id, 6 | 18 | 59 | 60 | 81 | 83)),
+            "ticking cactus/farmland/crops must not re-schedule themselves"
+        );
+
+        // Placing a non-opaque solid block (wooden stairs, id 53) above farmland (6, 63, 6) converts farmland to dirt (3):
+        w.apply_set_notify(6, 64, 6, 53);
+        assert_eq!(w.get_block_id(6, 63, 6), 3, "any solid block above farmland must revert farmland to dirt");
+    }
+
+    #[test]
+    fn test_water_optimal_drop_path_and_lava_destroys_without_drop() {
+        let mut w = world_with_floor();
+        // Carve a drop-off hole at (6, 63, 4) (2 blocks +X from (4, 64, 4)):
+        w.set_block_id(6, 63, 4, 0);
+        // Place water source at (4, 64, 4) and run fluid tick:
+        w.set_block_id(4, 64, 4, 8);
+        w.set_block_meta(4, 64, 4, 0);
+        crate::block::ticks::block_fluid_tick(&mut w, 8, false, crate::block::pos::BlockPos::new(4, 64, 4));
+        // Water must flow ONLY toward +X (5, 64, 4) where the 2-step drop to (6, 63, 4) is, NOT -X/+Z/-Z:
+        assert_eq!(w.get_block_id(5, 64, 4), 8, "water must flow toward nearby drop-off");
+        assert_eq!(w.get_block_id(3, 64, 4), 0, "water must not spread away from optimal drop-off");
+        assert_eq!(w.get_block_id(4, 64, 5), 0, "water must not spread away from optimal drop-off");
+        assert_eq!(w.get_block_id(4, 64, 3), 0, "water must not spread away from optimal drop-off");
+
+        // Lava flowing into a torch (50) destroys it WITHOUT spawning an item drop:
+        let mut w2 = world_with_floor();
+        w2.set_block_id(9, 64, 8, 50); // torch
+        w2.set_block_meta(9, 64, 8, 5);
+        w2.set_block_id(8, 64, 8, 10); // flowing lava source at center of chunk (0, 0)
+        w2.set_block_meta(8, 64, 8, 0);
+        let items_before = w2
+            .entities
+            .alive_ids()
+            .into_iter()
+            .filter(|&id| matches!(w2.entities.get(id), Some(crate::entity::table::Entity::Item(_))))
+            .count();
+        crate::block::ticks::block_fluid_tick(&mut w2, 10, true, crate::block::pos::BlockPos::new(8, 64, 8));
+        let items_after = w2
+            .entities
+            .alive_ids()
+            .into_iter()
+            .filter(|&id| matches!(w2.entities.get(id), Some(crate::entity::table::Entity::Item(_))))
+            .count();
+        assert_eq!(w2.get_block_id(9, 64, 8), 10, "lava must flow into torch cell");
+        assert_eq!(items_after, items_before, "lava must destroy torch without dropping item");
+    }
+
+    #[test]
+    fn test_redstone_indirect_power_diagonal_cut_and_torch_burnout() {
+        let mut w = world_with_floor();
+
+        // 1. Indirect power through a solid block:
+        // Redstone wire at (4, 64, 4) powered by redstone torch at (3, 64, 4), pointing into stone block at (5, 64, 4),
+        // with a redstone torch attached to the other side of the stone block at (6, 64, 4) (meta=1, attached to x-1):
+        w.apply_set_meta_notify(3, 64, 4, 76, 5);
+        w.apply_set_notify(4, 64, 4, 55);
+        w.apply_set_notify(5, 64, 4, 1); // solid stone block
+        w.apply_set_meta_notify(6, 64, 4, 76, 1); // attached to (5, 64, 4)
+        assert!(w.get_block_meta(4, 64, 4) > 0, "wire at (4, 64, 4) must be powered");
+        assert!(w.is_block_powered(5, 64, 4), "stone block at (5, 64, 4) must be powered by wire pointing into it");
+
+        // 2. Solid block cuts diagonal vertical wire connection:
+        let mut w2 = world_with_floor();
+        w2.apply_set_meta_notify(3, 64, 4, 76, 5); // torch powering (4, 64, 4)
+        w2.apply_set_notify(4, 64, 4, 55); // lower wire
+        w2.apply_set_notify(5, 64, 4, 1);  // step stone
+        w2.apply_set_notify(5, 65, 4, 55); // upper wire on step
+        assert!(w2.get_block_meta(5, 65, 4) > 0, "upper wire connects diagonally when air above lower wire");
+        // Now place solid stone at (4, 65, 4) above the lower wire — cuts diagonal connection!
+        w2.apply_set_notify(4, 65, 4, 1);
+        assert_eq!(w2.get_block_meta(5, 65, 4), 0, "solid block above lower wire must cut diagonal wire power");
+
+        // 3. Redstone torch burnout after 8 flips within 100 ticks:
+        let mut w3 = world_with_floor();
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                if (cx, cz) != (0, 0) {
+                    w3.insert_chunk(Chunk::new(cx, cz));
+                }
+            }
+        }
+        w3.apply_set_notify(4, 64, 4, 1); // support stone at (4, 64, 4)
+        w3.apply_set_meta_notify(5, 64, 4, 76, 1); // torch at (5, 64, 4) attached to (4, 64, 4)
+        w3.apply_set_notify(5, 64, 5, 55); // wire powered by torch
+        w3.apply_set_notify(4, 64, 5, 55); // wire leading back
+        w3.apply_set_notify(4, 65, 4, 55); // wire on top of support stone (4, 64, 4)
+        for _ in 0..40 {
+            w3.time += 1;
+            w3.process_scheduled_ticks();
+        }
+        assert_eq!(w3.get_block_id(5, 64, 4), 75, "short-circuit redstone torch must burn out to unlit (75)");
+    }
+
+    #[test]
+    fn test_push_neighbors_skips_arrows_and_items_and_blast_flaming_ignites_fire() {
+        use crate::entity::table::{ArrowEnt, Body, Entity};
+        let mut w = world_with_floor();
+        let mob = add_mob(&mut w, MobKind::Zombie, 4.5, 64.0, 4.5);
+        let item = w.spawn_item_entity(264, 1, 0, 4.55, 64.0, 4.5);
+        let aid = w.entities.alloc_id();
+        let mut ab = Body::new(aid, 0.5, 0.5, 0.0);
+        ab.set_position(4.55, 64.0, 4.5);
+        w.entities.insert(Entity::Arrow(ArrowEnt {
+            body: ab,
+            tile: [-1, -1, -1],
+            in_tile: 0,
+            in_ground: false,
+            shake: 0,
+            shooter_id: -1,
+            ticks_in_ground: 0,
+            ticks_in_air: 0,
+        }));
+        if let Some(e) = w.entities.get_mut(item) {
+            e.body_mut().motion = [0.0, 0.0, 0.0];
+        }
+        w.tick_mob(mob, &[mob, item, aid]);
+        assert_eq!(w.entities.get(item).unwrap().body().motion, [0.0, 0.0, 0.0], "items must not be pushed by mobs");
+        assert_eq!(w.entities.get(aid).unwrap().body().motion, [0.0, 0.0, 0.0], "arrows must not be pushed by mobs");
+
+        // Flaming blast ignites fire (51) on air cells above solid floor:
+        w.blast_flaming(8.5, 64.5, 8.5, 3.0, None, true);
+        let mut found_fire = false;
+        for x in 4..=12 {
+            for y in 60..=66 {
+                for z in 4..=12 {
+                    if w.get_block_id(x, y, z) == 51 {
+                        found_fire = true;
+                    }
+                }
+            }
+        }
+        assert!(found_fire, "blast_flaming(is_flaming=true) must ignite fire (id 51) in crater");
+    }
+
+    #[test]
+    fn test_apply_decoded_chunk_clears_modified_and_slab_farmland_light_value() {
+        let mut w = world_with_floor();
+        let encoded = crate::persist::encode_chunk_blob(&w, 0, 0, true).expect("chunk must encode");
+        let decoded = crate::persist::decode_chunk_blob(&encoded, 0, 0).expect("chunk must decode");
+        let mut w2 = World::new(12345);
+        w2.apply_decoded_chunk(decoded);
+        assert!(
+            !w2.chunks.get(&(0, 0)).unwrap().is_modified,
+            "chunk loaded from store must start with is_modified == false"
+        );
+
+        // Slab (44) and farmland (60) have opacity 255 in Chunk, so their own cell has light 0,
+        // but World.block_light_value must return the max of (y+1, x+1, x-1, z+1, z-1):
+        w.set_block_id(8, 63, 8, 44);
+        w.set_block_id(10, 63, 8, 60);
+        if let Some(ch) = w.chunks.get_mut(&(0, 0)) {
+            ch.generate_skylight_map();
+        }
+        assert_eq!(w.block_light_value(8, 63, 8), 15, "slab at surface must inherit max neighbor light (15 from y+1)");
+        assert_eq!(w.block_light_value(10, 63, 8), 15, "farmland at surface must inherit max neighbor light (15 from y+1)");
+    }
+
+    #[test]
+    fn test_pressure_plates_block_water_and_lava_upward_fire_spread() {
+        use crate::block::pos::BlockPos;
+        let mut w = world_with_floor();
+        // In Alpha 1.2.6 (BlockPressurePlate.java:10), both stone (70) and wooden (72) pressure plates
+        // have Material.rock, so BlockFlowing.func_309_k returns true and water does not wash them away:
+        w.set_block_id(8, 64, 8, 8);
+        w.set_block_id(9, 64, 8, 70);
+        w.set_block_id(7, 64, 8, 72);
+        crate::block::ticks::block_fluid_tick(&mut w, 8, false, BlockPos::new(8, 64, 8));
+        assert_eq!(w.get_block_id(9, 64, 8), 70, "stone pressure plate (70) blocks water in Alpha 1.2.6");
+        assert_eq!(w.get_block_id(7, 64, 8), 72, "wooden pressure plate (72) blocks water in Alpha 1.2.6");
+
+        // Place stationary lava (11) at (4, 64, 4) and flammable planks (5) above at (4, 65, 5) with air at (4, 65, 4):
+        let mut w2 = world_with_floor();
+        w2.set_block_id(4, 64, 4, 11);
+        w2.set_block_id(4, 65, 5, 5);
+        let mut ignited = false;
+        for _ in 0..200 {
+            crate::block::ticks::block_fluid_tick(&mut w2, 11, true, BlockPos::new(4, 64, 4));
+            for dx in -2..=2 {
+                for dy in 0..=3 {
+                    for dz in -2..=2 {
+                        if w2.get_block_id(4 + dx, 64 + dy, 4 + dz) == 51 {
+                            ignited = true;
+                        }
+                    }
+                }
+            }
+            if ignited {
+                break;
+            }
+        }
+        assert!(ignited, "lava must ignite air cells adjacent to flammable blocks above it");
+    }
 
 
+    #[test]
+    fn test_block_props_and_void_damage_living_and_non_living() {
+        use crate::block::table::{block_properties_get, BlockMaterial};
+        use crate::entity::table::Entity;
+        assert!(!block_properties_get(63).allows_attachment, "signPost (63) must have allows_attachment == false");
+        assert_eq!(block_properties_get(66).material, BlockMaterial::Circuits as u8, "minecartTrack (66) must have BlockMaterial::Circuits");
+        assert_eq!(block_properties_get(80).material, BlockMaterial::BuiltSnow as u8, "blockSnow (80) must have BlockMaterial::BuiltSnow");
+
+        let mut w = world_with_floor();
+        let mob = add_mob(&mut w, MobKind::Zombie, 4.5, -65.0, 4.5);
+        let item = w.spawn_item_entity(264, 1, 0, 4.5, -65.0, 4.5);
+        let hp_before = match w.entities.get(mob).unwrap() {
+            Entity::Mob(m) => m.living.health,
+            _ => unreachable!(),
+        };
+        w.tick_mob(mob, &[mob]);
+        let hp_after = match w.entities.get(mob).unwrap() {
+            Entity::Mob(m) => m.living.health,
+            _ => unreachable!(),
+        };
+        assert_eq!(hp_before - hp_after, 4, "living entity below y=-64 must take 4 void damage per tick");
+
+        w.entities.tick_base(item);
+        assert!(w.entities.get(item).unwrap().body().dead, "non-living entity below y=-64 must die in tick_base");
+    }
+
+    #[test]
+    fn test_snow_block_no_melt_and_stationary_lava_damage() {
+        use crate::block::pos::BlockPos;
+        use crate::entity::table::Entity;
+
+        let mut w = world_with_floor();
+        // Place snow layer (78) at (4, 64, 4) and snow block (80) at (6, 64, 4) with blocklight = 15:
+        w.set_block_id(4, 64, 4, 78);
+        w.set_block_id(6, 64, 4, 80);
+        if let Some(c) = w.chunks.get_mut(&(0, 0)) {
+            c.set_light_value(1, 4, 64, 4, 15);
+            c.set_light_value(1, 6, 64, 4, 15);
+        }
+
+        w.update_block_tick(4, 64, 4);
+        w.update_block_tick(6, 64, 4);
+        assert_eq!(w.get_block_id(4, 64, 4), 0, "snow layer (78) must melt when blocklight > 11");
+        assert_eq!(w.get_block_id(6, 64, 4), 80, "snow block (80) must NOT melt when blocklight > 11");
+
+        // Bare stone cave around stationary lava (11) must never spawn fire (51):
+        let mut w_cave = world_with_floor();
+        w_cave.set_block_id(8, 64, 8, 11);
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            w_cave.set_block_id(8 + dx, 63, 8 + dz, 1);
+            w_cave.set_block_id(8 + dx, 64, 8 + dz, 1);
+        }
+        for _ in 0..100 {
+            crate::block::ticks::block_fluid_tick(&mut w_cave, 11, true, BlockPos::new(8, 64, 8));
+        }
+        for dx in -2..=2 {
+            for dy in 0..=3 {
+                for dz in -2..=2 {
+                    assert_ne!(
+                        w_cave.get_block_id(8 + dx, 64 + dy, 8 + dz),
+                        51,
+                        "lava in bare stone cave without burnable blocks must not spawn fire"
+                    );
+                }
+            }
+        }
+
+        // Stationary player in lava (move_body NOT called) must take 4 damage and fire = 600 in tick_living:
+        let mut w_lava = world_with_floor();
+        w_lava.set_block_id(3, 64, 4, 11);
+        let player = add_player(&mut w_lava, "steve", 3.5, 64.0, 4.5);
+        w_lava.tick_player(player);
+        let (hp, fire) = match w_lava.entities.get(player).unwrap() {
+            Entity::Player(p) => (p.living.health, p.living.body.fire),
+            _ => unreachable!(),
+        };
+        assert_eq!(hp, 16, "stationary player in lava must take 4 damage from handleLavaMovement");
+        assert_eq!(fire, 600, "stationary player in lava must have fire set to 600");
+
+        // Multi-tick hurt_resist cycle with armor: ticks 2..=10 are blocked by hurt_resist > 10,
+        // and tick 11 deals the next 4-damage lava hit:
+        set_slot(&mut w_lava, player, 1, 0, stk(306, 1, 0)); // iron helmet (3 armor pts)
+        for _ in 0..9 {
+            w_lava.tick_player(player);
+        }
+        let (hp_mid, helm_dmg_mid) = match w_lava.entities.get(player).unwrap() {
+            Entity::Player(p) => (p.living.health, p.inventory.armor[0].unwrap().damage),
+            _ => unreachable!(),
+        };
+        assert_eq!(hp_mid, 16, "ticks 2..=10 in lava must be blocked by hurt_resist > 10");
+        assert_eq!(helm_dmg_mid, 0, "armor must not wear during hurt_resist > 10");
+        w_lava.tick_player(player); // tick 11: hurt_resist == 10 <= 10 -> next 4-damage lava hit lands
+        let (hp_next, helm_dmg_next) = match w_lava.entities.get(player).unwrap() {
+            Entity::Player(p) => (p.living.health, p.inventory.armor[0].unwrap().damage),
+            _ => unreachable!(),
+        };
+        assert!(hp_next < 16, "tick 11 in lava must deal damage once hurt_resist reaches 10");
+        assert_eq!(helm_dmg_next, 4, "iron helmet must take 4 durability wear on tick 11 lava hit");
+    }

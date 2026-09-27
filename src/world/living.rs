@@ -140,6 +140,12 @@ impl World {
             }
             _ => return,
         }
+        if !matches!(self.entities.get(id), Some(Entity::Player(_))) {
+            self.mark_chunk_modified(
+                (input.self_x.floor() as i32) >> 4,
+                (input.self_z.floor() as i32) >> 4,
+            );
+        }
         if r.send_status {
             self.status_events.push((id, 2));
         }
@@ -175,6 +181,7 @@ impl World {
         if let Some(Entity::Animal(a)) = self.entities.get_mut(id) {
             a.sheared = true;
         }
+        self.mark_chunk_modified((px.floor() as i32) >> 4, (pz.floor() as i32) >> 4);
         let count = 1 + self.rng.next_int_bound(3);
         for _ in 0..count {
             let draws = [
@@ -209,6 +216,7 @@ impl World {
             Some(Entity::Player(p)) => (p.living.body.pos[0], p.living.body.pos[1], p.living.body.pos[2]),
             _ => return,
         };
+        self.mark_chunk_modified((px.floor() as i32) >> 4, (pz.floor() as i32) >> 4);
         // Dismount rider and vehicle.
         let (riding, ridden_by) = match self.entities.get(id) {
             Some(e) => (e.body().riding, e.body().ridden_by),
@@ -446,6 +454,14 @@ impl World {
     /// Per-tick living maintenance (mirrors `EntityLiving::tick`).
     pub fn tick_living(&mut self, id: EntityId) {
         self.entities.tick_base(id);
+        if self
+            .entities
+            .get(id)
+            .map(|e| e.body().pos[1] < -64.0)
+            .unwrap_or(false)
+        {
+            self.attack_living(id, 4, None);
+        }
         // Fire decay (Entity.onUpdate: fire-- each tick, 1 damage per 20
         // ticks while burning, extinguished in water). Water only, like
         // vanilla `handleWaterMovement` (Entity.java:446): lava must NOT
@@ -528,6 +544,45 @@ impl World {
         };
         if fire_damage {
             self.attack_living(id, 1, None);
+        }
+        // Lava immersion (`Entity.handleLavaMovement` + `setOnFireFromLava`,
+        // Entity.java:170-172, 181-186, 469-471): `isMaterialInBB` on
+        // `boundingBox.expand(-0.1, -0.4, -0.1)` against `Material::LAVA`
+        // deals 4 damage and sets `fire = fire.max(600)` every tick, even when
+        // the entity is standing still (`move_body` not called).
+        let in_lava = match self.entities.get(id) {
+            Some(Entity::Mob(m)) => Some(m.living.body.bounding_box),
+            Some(Entity::Animal(a)) => Some(a.living.body.bounding_box),
+            Some(Entity::Player(p)) => Some(p.living.body.bounding_box),
+            _ => None,
+        }
+        .map(|bbox| {
+            let bb = bbox.expand(-0.1, -0.4, -0.1);
+            let (x0, x1) = (floor_double(bb.min_x), floor_double(bb.max_x + 1.0));
+            let (y0, y1) = (floor_double(bb.min_y), floor_double(bb.max_y + 1.0));
+            let (z0, z1) = (floor_double(bb.min_z), floor_double(bb.max_z + 1.0));
+            let mut found = false;
+            'lava: for x in x0..x1 {
+                for y in y0..y1 {
+                    for z in z0..z1 {
+                        if self.material_at(x, y, z) == Material::LAVA {
+                            found = true;
+                            break 'lava;
+                        }
+                    }
+                }
+            }
+            found
+        })
+        .unwrap_or(false);
+        if in_lava {
+            self.attack_living(id, 4, None);
+            match self.entities.get_mut(id) {
+                Some(Entity::Mob(m)) => m.living.body.fire = m.living.body.fire.max(600),
+                Some(Entity::Animal(a)) => a.living.body.fire = a.living.body.fire.max(600),
+                Some(Entity::Player(p)) => p.living.body.fire = p.living.body.fire.max(600),
+                _ => {}
+            }
         }
         let (alive, opaque, water, air, hurt, attack, resist) = match self.entities.get(id) {
             Some(Entity::Mob(m)) => {

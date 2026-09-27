@@ -665,6 +665,7 @@ impl EntityTable {
             None => return,
         };
         if let Some(e) = self.get_mut(id) {
+            let is_living = e.is_living();
             let b = e.body_mut();
             if riding_dead {
                 b.riding = NO_ENTITY;
@@ -678,6 +679,9 @@ impl EntityTable {
             b.track_pos = b.pos;
             b.track_yaw = b.yaw;
             b.track_pitch = b.pitch;
+            if !is_living && b.pos[1] < -64.0 {
+                b.dead = true;
+            }
         }
     }
 
