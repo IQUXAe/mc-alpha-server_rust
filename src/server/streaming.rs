@@ -110,9 +110,7 @@ impl Server {
         for raw in completed {
             self.pending_chunk_gens.remove(&(raw.cx, raw.cz));
             if !self.world.has_chunk(raw.cx, raw.cz) && !self.world.recall_chunk(raw.cx, raw.cz) {
-                if !self.load_chunk(raw.cx, raw.cz) {
-                    self.world.insert_chunk_boxed(raw.chunk);
-                }
+                self.world.insert_chunk_boxed(raw.chunk);
             }
         }
 
@@ -122,7 +120,6 @@ impl Server {
         // so unbounded ensures while exploring blow the 50 ms tick.
         // Skipped chunks stay queued for the next ticks.
         let mut sent_now = 0;
-        let mut generated = 0;
         let mut deferred_count = 0;
         let mut i = 0;
         while i < stream.queue.len() && sent_now < CHUNKS_PER_TICK as usize {
@@ -156,11 +153,11 @@ impl Server {
                                         }
                                         deferred = true;
                                     } else {
-                                        generated += 1;
-                                        if generated > CHUNK_GEN_PER_TICK {
+                                        if self.chunks_generated_this_tick >= CHUNK_GEN_PER_TICK {
                                             deferred = true;
                                             break 'nb;
                                         }
+                                        self.chunks_generated_this_tick += 1;
                                     }
                                 }
                             }
@@ -169,19 +166,22 @@ impl Server {
                     if deferred {
                         break 'nb;
                     }
-                    if generated >= CHUNK_GEN_PER_TICK {
+                    if self.chunks_generated_this_tick >= CHUNK_GEN_PER_TICK {
                         deferred = true;
                         break 'nb;
                     }
                     self.world.ensure_chunk(bx, bz);
-                    generated += 1;
+                    self.chunks_generated_this_tick += 1;
                 }
             }
             if deferred {
-                deferred_count += 1;
-                if deferred_count >= 8
-                    && (generated >= CHUNK_GEN_PER_TICK || self.pending_chunk_gens.len() >= 64)
+                if self.chunks_generated_this_tick >= CHUNK_GEN_PER_TICK
+                    || (self.chunk_worker.is_some() && self.pending_chunk_gens.len() >= 64)
                 {
+                    break;
+                }
+                deferred_count += 1;
+                if deferred_count >= 8 {
                     break;
                 }
                 i += 1;

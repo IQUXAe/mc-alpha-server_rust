@@ -134,6 +134,7 @@ pub struct Server {
     pub health_scratch: Vec<(ConnId, i8)>,
     pub sent_tiles_scratch: HashSet<(i32, i32, i32)>,
     pub store_missing: HashSet<(i32, i32)>,
+    pub chunks_generated_this_tick: i32,
 }
 
 #[derive(Default)]

@@ -32,8 +32,9 @@ impl PlaySession {
             Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
             None => return None,
         };
+        let dy = (py - (y as f64 + 0.5)) + 1.5;
         let dist_sq = (px - (x as f64 + 0.5)).powi(2)
-            + (py - (y as f64 + 0.5)).powi(2)
+            + dy.powi(2)
             + (pz - (z as f64 + 0.5)).powi(2);
         if (status == 0 || status == 1) && dist_sq > 36.0 {
             return None;
@@ -132,16 +133,15 @@ impl PlaySession {
                         true,
                     );
                     if hardness_tick > 0.0
-                        && (self.dig.cur_damage >= 0.70
-                            || self.dig.cur_damage + hardness_tick >= 0.99
-                            || self.dig.cur_damage + ground_hardness_tick >= 0.70)
+                        && (self.dig.cur_damage >= 0.35
+                            || self.dig.cur_damage + hardness_tick >= 0.70
+                            || self.dig.cur_damage + ground_hardness_tick >= 0.35)
                     {
                         self.harvest(ctx, x, y, z);
                     }
                 }
             }
             self.send_block_change(ctx.world, x, y, z);
-            crate::player::digging::dig_cancel(&mut self.dig);
         }
         None
     }
@@ -271,8 +271,9 @@ impl PlaySession {
                 return;
             }
         };
+        let dy = (py - (y as f64 + 0.5)) + 1.5;
         let dist_sq = (px - (x as f64 + 0.5)).powi(2)
-            + (py - (y as f64 + 0.5)).powi(2)
+            + dy.powi(2)
             + (pz - (z as f64 + 0.5)).powi(2);
         if dist_sq > 36.0 {
             crate::player::digging::dig_cancel(&mut self.dig);

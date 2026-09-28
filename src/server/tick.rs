@@ -332,6 +332,7 @@ impl Server {
         if !self.running {
             return;
         }
+        self.chunks_generated_this_tick = 0;
         self.poll_network(std::time::Duration::ZERO);
         self.tick_count += 1;
         if self.tick_count.is_multiple_of(crate::server::LOGIN_WINDOW_TICKS) {

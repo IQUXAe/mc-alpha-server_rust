@@ -2022,4 +2022,101 @@
         assert!(sess.dig.cur_damage > dmg_after_status_1, "subsequent tick must advance damage");
     }
 
+    #[test]
+    fn test_status_3_completion_with_relaxed_damage() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        if let Some(e) = w.entities.get_mut(player) {
+            e.body_mut().on_ground = true;
+        }
+        w.set_block_id(3, 64, 4, 3); // dirt
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        // Dig for 6 ticks -> damage reaches ~0.40 (>= 0.35)
+        for _ in 0..6 {
+            sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        }
+        assert!(sess.dig.cur_damage >= 0.35, "cur_damage should be >= 0.35: {}", sess.dig.cur_damage);
+        assert!(sess.dig.cur_damage < 0.70, "cur_damage should be < 0.70: {}", sess.dig.cur_damage);
+
+        // Status 3 must now succeed with relaxed threshold
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        assert_eq!(w.get_block_id(3, 64, 4), 0, "block must be harvested on status 3");
+        assert!(!sess.dig.has_target);
+        assert_eq!(sess.dig.cur_damage, 0.0);
+    }
+
+    #[test]
+    fn test_status_3_rejection_preserves_damage_and_target() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        if let Some(e) = w.entities.get_mut(player) {
+            e.body_mut().on_ground = true;
+        }
+        w.set_block_id(3, 64, 4, 3);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        // Dig only 2 ticks -> damage is ~0.13 (< 0.35)
+        for _ in 0..2 {
+            sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        }
+        let dmg_before = sess.dig.cur_damage;
+        assert!(dmg_before > 0.0 && dmg_before < 0.35);
+
+        // Premature status 3 arrives
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        // Block must NOT be broken, but target and damage MUST be preserved!
+        assert_eq!(w.get_block_id(3, 64, 4), 3, "block must not be broken yet");
+        assert!(sess.dig.has_target, "has_target must remain true after rejected status 3");
+        assert_eq!(sess.dig.cur_damage, dmg_before, "damage must be preserved after rejected status 3");
+
+        // Continuing to dig finishes the block
+        for _ in 0..6 {
+            sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        }
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
+        );
+        assert_eq!(w.get_block_id(3, 64, 4), 0, "block must be harvested after further digging");
+    }
+
+    #[test]
+    fn test_reach_with_eye_offset_allows_digging_above_head() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        w.set_block_id(3, 67, 9, 3);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 67, z: 9, face: 1 },
+        );
+        assert!(sess.dig.has_target, "block within eye-level reach must latch target");
+    }
+
 

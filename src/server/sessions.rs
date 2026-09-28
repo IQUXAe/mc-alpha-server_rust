@@ -142,6 +142,7 @@ impl Server {
             health_scratch: Vec::new(),
             sent_tiles_scratch: HashSet::new(),
             store_missing: HashSet::new(),
+            chunks_generated_this_tick: 0,
         })
     }
 
@@ -152,6 +153,9 @@ impl Server {
         }
         let ok = self.world.load_chunk_from(&mut self.store, cx, cz);
         if !ok {
+            if self.store_missing.len() >= 16384 {
+                self.store_missing.clear();
+            }
             self.store_missing.insert((cx, cz));
         }
         ok
