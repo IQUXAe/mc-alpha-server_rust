@@ -1134,3 +1134,36 @@
         let decoded = crate::persist::decode_chunk_blob(&blob, 20, 20).unwrap();
         assert_eq!(decoded.items.len(), 1, "saved chunk blob must contain the live item entity");
     }
+
+    #[test]
+    fn test_scratch_buffers_retained_across_ticks() {
+        let mut srv = mk_server("");
+        // Pre-reserve capacities in scratch buffers
+        srv.tracker_scratch.out.reserve(64);
+        let out_cap_before = srv.tracker_scratch.out.capacity();
+        assert!(out_cap_before >= 64);
+
+        srv.world.tick_ids.reserve(32);
+        let tick_cap_before = srv.world.tick_ids.capacity();
+        assert!(tick_cap_before >= 32);
+
+        srv.world.pickup_items_scratch.reserve(16);
+        let pickup_items_cap_before = srv.world.pickup_items_scratch.capacity();
+        assert!(pickup_items_cap_before >= 16);
+
+        srv.world.pickup_players_scratch.reserve(16);
+        let pickup_players_cap_before = srv.world.pickup_players_scratch.capacity();
+        assert!(pickup_players_cap_before >= 16);
+
+        // Run multiple ticks
+        for _ in 0..5 {
+            srv.tick();
+        }
+
+        // Verify capacities were not thrown away or replaced with 0-capacity vecs
+        assert_eq!(srv.tracker_scratch.out.capacity(), out_cap_before);
+        assert_eq!(srv.world.tick_ids.capacity(), tick_cap_before);
+        assert_eq!(srv.world.pickup_items_scratch.capacity(), pickup_items_cap_before);
+        assert_eq!(srv.world.pickup_players_scratch.capacity(), pickup_players_cap_before);
+    }
+

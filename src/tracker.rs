@@ -316,6 +316,11 @@ impl Tracker {
         out
     }
 
+    /// Iterator over tracked entity ids without any heap allocation.
+    pub fn iter_tracked_ids(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.entries.keys().copied()
+    }
+
     /// Reuses caller-provided buffer to collect tracked ids without allocation.
     pub fn collect_tracked_ids(&self, out: &mut Vec<EntityId>) {
         out.clear();

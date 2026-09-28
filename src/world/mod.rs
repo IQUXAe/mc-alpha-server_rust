@@ -219,6 +219,14 @@ pub struct World {
     pub(crate) spawn_anchor_rows: Vec<(EntityId, [f64; 3])>,
     /// Scratch buffer for random block tick chunk coordinates across ticks.
     pub(crate) random_tick_keys: Vec<(i32, i32)>,
+    /// Scratch buffer for alive entity IDs in tick_world across ticks.
+    pub(crate) tick_ids: Vec<EntityId>,
+    /// Scratch buffer for item IDs in pickup_items across ticks.
+    pub(crate) pickup_items_scratch: Vec<EntityId>,
+    /// Scratch buffer for player IDs in pickup_items across ticks.
+    pub(crate) pickup_players_scratch: Vec<EntityId>,
+    /// Scratch buffer for candidate entities in push_neighbors across ticks.
+    pub(crate) push_others_scratch: Vec<(EntityId, f64, f64)>,
 }
 
 impl std::fmt::Debug for World {
@@ -279,6 +287,10 @@ impl World {
             spawn_anchors: (Vec::new(), Vec::new(), Vec::new()),
             spawn_anchor_rows: Vec::new(),
             random_tick_keys: Vec::new(),
+            tick_ids: Vec::new(),
+            pickup_items_scratch: Vec::new(),
+            pickup_players_scratch: Vec::new(),
+            push_others_scratch: Vec::new(),
         }
     }
 

@@ -130,6 +130,9 @@ pub struct Server {
     pub chunk_worker: Option<chunk_worker::ChunkGenWorker>,
     pub pending_chunk_gens: HashSet<(i32, i32)>,
     pub tracker_scratch: TrackerScratch,
+    pub cids_scratch: Vec<ConnId>,
+    pub health_scratch: Vec<(ConnId, i8)>,
+    pub sent_tiles_scratch: HashSet<(i32, i32, i32)>,
 }
 
 #[derive(Default)]

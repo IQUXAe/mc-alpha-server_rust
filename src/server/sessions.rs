@@ -138,6 +138,9 @@ impl Server {
             chunk_worker: Some(crate::server::chunk_worker::ChunkGenWorker::start(world_seed)),
             pending_chunk_gens: HashSet::new(),
             tracker_scratch: crate::server::TrackerScratch::default(),
+            cids_scratch: Vec::new(),
+            health_scratch: Vec::new(),
+            sent_tiles_scratch: HashSet::new(),
         })
     }
 
@@ -364,8 +367,13 @@ impl Server {
 
     /// Send owned tracker bytes to the owning connections (addressed to
     /// player ids; rows gone mid-tick are dropped like C++).
-    pub(crate) fn route_outbox(&mut self, out: Vec<Outbox>) {
-        for o in out {
+    pub(crate) fn route_outbox(&mut self, mut out: Vec<Outbox>) {
+        self.route_outbox_drain(&mut out);
+    }
+
+    /// Send and drain tracker bytes without dropping the caller buffer capacity.
+    pub(crate) fn route_outbox_drain(&mut self, out: &mut Vec<Outbox>) {
+        for o in out.drain(..) {
             if let Some(cid) = self.players.get(&o.to).copied() {
                 if let Some(sess) = self.sessions.get(&cid) {
                     sess.conn.send(o.bytes);

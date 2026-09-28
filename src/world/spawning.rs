@@ -239,23 +239,24 @@ impl World {
     /// equivalent here: fresh drops always carry a pickup delay, and
     /// native players hold still between network ticks.
     pub(crate) fn pickup_items(&mut self) {
-        let mut items: Vec<EntityId> = Vec::new();
-        for oid in self.entities.alive_ids() {
-            if let Some(Entity::Item(e)) = self.entities.get(oid) {
-                if e.pickup_delay <= 0 {
-                    items.push(oid);
-                }
+        let mut items = std::mem::take(&mut self.pickup_items_scratch);
+        let mut players = std::mem::take(&mut self.pickup_players_scratch);
+        items.clear();
+        players.clear();
+        for (&oid, e) in self.entities.iter() {
+            if e.body().dead {
+                continue;
+            }
+            match e {
+                Entity::Item(it) if it.pickup_delay <= 0 => items.push(oid),
+                Entity::Player(_) => players.push(oid),
+                _ => {}
             }
         }
         items.sort_unstable();
-        let mut players: Vec<EntityId> = Vec::new();
-        for oid in self.entities.alive_ids() {
-            if self.target_alive(oid) {
-                players.push(oid);
-            }
-        }
         players.sort_unstable();
-        for iid in items {
+        for i in 0..items.len() {
+            let iid = items[i];
             if self.entities.get(iid).map(|e| e.body().dead).unwrap_or(true) {
                 continue;
             }
@@ -308,6 +309,8 @@ impl World {
                 }
             }
         }
+        self.pickup_items_scratch = items;
+        self.pickup_players_scratch = players;
     }
 
     /// Server tick (mirrors `World::tick` minus chunk I/O, lighting,
@@ -344,7 +347,8 @@ impl World {
         self.random_block_ticks();
         let random = t.elapsed();
         let t = Instant::now();
-        let mut ids = self.entities.alive_ids();
+        let mut ids = std::mem::take(&mut self.tick_ids);
+        self.entities.collect_alive_ids(&mut ids);
         ids.sort_unstable();
         for &id in &ids {
             if self.entities.get(id).map(|e| e.body().dead).unwrap_or(true) {
@@ -361,6 +365,7 @@ impl World {
                 None => {}
             }
         }
+        self.tick_ids = ids;
         let entities = t.elapsed();
         let t = Instant::now();
         self.pickup_items();

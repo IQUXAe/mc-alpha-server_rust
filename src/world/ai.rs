@@ -648,7 +648,8 @@ impl World {
             ),
             None => return,
         };
-        let mut others: Vec<(EntityId, f64, f64)> = Vec::new();
+        let mut others = std::mem::take(&mut self.push_others_scratch);
+        others.clear();
         for oid in ids {
             let oid = *oid;
             if oid == id {
@@ -665,7 +666,7 @@ impl World {
             }
         }
         // `ids` arrives sorted, so `others` is already sorted.
-        for (oid, ox, oz) in others {
+        for &(oid, ox, oz) in &others {
             let (sx, sz) = match self.entities.get(id) {
                 Some(e) => (e.body().pos[0], e.body().pos[2]),
                 None => (self_pos[0], self_pos[2]),
@@ -682,6 +683,7 @@ impl World {
                 e.body_mut().motion[2] += push.dvz2;
             }
         }
+        self.push_others_scratch = others;
     }
 
     /// Mob daylight ignition (mirrors `checkDaylightBurn`): burning kinds

@@ -3,7 +3,7 @@
 
 use crate::entity::table::Entity;
 use crate::server::sessions::{Session, SessionState};
-use crate::server::{ConnId, Server, chunk_key};
+use crate::server::{Server, chunk_key};
 use crate::server_constants::TICKS_PER_SECOND;
 use crate::session::{pkt_block_change, pkt_explosion, pkt_health, pkt_time};
 use crate::tracker::{Observer, TrackedEntity};
@@ -24,7 +24,7 @@ impl Server {
         // the corpse animation rather than collapsing it on the death tick.
         scratch.gone_ids.clear();
         scratch.out.clear();
-        for id in self.world.tracker.tracked_ids() {
+        for id in self.world.tracker.iter_tracked_ids() {
             match self.world.entities.get(id) {
                 None => scratch.gone_ids.push(id),
                 Some(Entity::Player(p)) if p.living.body.dead => scratch.gone_ids.push(id),
@@ -118,9 +118,14 @@ impl Server {
                 &mut scratch.out,
             );
         }
-        let out = std::mem::take(&mut scratch.out);
+        for o in scratch.out.drain(..) {
+            if let Some(cid) = self.players.get(&o.to).copied() {
+                if let Some(sess) = self.sessions.get(&cid) {
+                    sess.conn.send(o.bytes);
+                }
+            }
+        }
         self.tracker_scratch = scratch;
-        self.route_outbox(out);
     }
 }
 
@@ -132,17 +137,24 @@ impl Server {
     /// the picker. Drained before `tracker_tick` so Collect precedes the
     /// destroy for the dead item row.
     fn drain_pickup_events(&mut self) {
-        let pickups = std::mem::take(&mut self.world.item_pickups);
-        if pickups.is_empty() {
+        if self.world.item_pickups.is_empty() {
             return;
         }
-        let mut out = Vec::new();
-        for (item_id, player_id) in &pickups {
-            self.world.tracker.collect_fx(*item_id, *player_id, &mut out);
+        self.tracker_scratch.out.clear();
+        for i in 0..self.world.item_pickups.len() {
+            let (item_id, player_id) = self.world.item_pickups[i];
+            self.world.tracker.collect_fx(item_id, player_id, &mut self.tracker_scratch.out);
         }
-        self.route_outbox(out);
-        for (_, player_id) in &pickups {
-            if let Some(cid) = self.players.get(player_id).copied() {
+        for o in self.tracker_scratch.out.drain(..) {
+            if let Some(cid) = self.players.get(&o.to).copied() {
+                if let Some(sess) = self.sessions.get(&cid) {
+                    sess.conn.send(o.bytes);
+                }
+            }
+        }
+        for i in 0..self.world.item_pickups.len() {
+            let (_, player_id) = self.world.item_pickups[i];
+            if let Some(cid) = self.players.get(&player_id).copied() {
                 if let Some(Session { state: SessionState::Play(play, _), .. }) =
                     self.sessions.get_mut(&cid)
                 {
@@ -150,6 +162,7 @@ impl Server {
                 }
             }
         }
+        self.world.item_pickups.clear();
     }
 
     /// Ship death animations, status changes, velocity impulses, and
@@ -157,24 +170,32 @@ impl Server {
     /// drained before `tracker_tick` so animations precede destroy packets
     /// for the same tick's kills.
     fn drain_death_events(&mut self) {
-        let deaths = std::mem::take(&mut self.world.death_events);
-        let statuses = std::mem::take(&mut self.world.status_events);
-        let velocities = std::mem::take(&mut self.world.velocity_events);
-        let explosions = std::mem::take(&mut self.world.explosion_events);
-        if !deaths.is_empty() || !statuses.is_empty() || !velocities.is_empty() {
-            let mut out = Vec::new();
-            for id in deaths {
-                self.world.tracker.death_fx(id, &mut out);
+        if !self.world.death_events.is_empty()
+            || !self.world.status_events.is_empty()
+            || !self.world.velocity_events.is_empty()
+        {
+            self.tracker_scratch.out.clear();
+            for &id in &self.world.death_events {
+                self.world.tracker.death_fx(id, &mut self.tracker_scratch.out);
             }
-            for (id, status) in statuses {
-                self.world.tracker.status_fx(id, status, &mut out);
+            for &(id, status) in &self.world.status_events {
+                self.world.tracker.status_fx(id, status, &mut self.tracker_scratch.out);
             }
-            for (id, motion) in velocities {
-                self.world.tracker.velocity_fx(id, motion, &mut out);
+            for &(id, motion) in &self.world.velocity_events {
+                self.world.tracker.velocity_fx(id, motion, &mut self.tracker_scratch.out);
             }
-            self.route_outbox(out);
+            for o in self.tracker_scratch.out.drain(..) {
+                if let Some(cid) = self.players.get(&o.to).copied() {
+                    if let Some(sess) = self.sessions.get(&cid) {
+                        sess.conn.send(o.bytes);
+                    }
+                }
+            }
+            self.world.death_events.clear();
+            self.world.status_events.clear();
+            self.world.velocity_events.clear();
         }
-        for (ex, ey, ez, radius, cells) in explosions {
+        for (ex, ey, ez, radius, cells) in self.world.explosion_events.drain(..) {
             let pkt = pkt_explosion(ex, ey, ez, radius, &cells);
             for (&pid, &cid) in &self.players {
                 let in_range = match self.world.entities.get(pid) {
@@ -200,7 +221,7 @@ impl Server {
     /// changed since the last send, so fall, mob, burn and drown damage
     /// all reach the HUD — previously only login/respawn/eat synced it.
     fn push_health_changes(&mut self) {
-        let mut changed: Vec<(ConnId, i8)> = Vec::new();
+        self.health_scratch.clear();
         for (eid, cid) in &self.players {
             let health = match self.world.entities.get(*eid) {
                 Some(Entity::Player(p)) => p.living.health as i8,
@@ -211,10 +232,11 @@ impl Server {
                 _ => continue,
             };
             if health != last {
-                changed.push((*cid, health));
+                self.health_scratch.push((*cid, health));
             }
         }
-        for (cid, health) in changed {
+        for i in 0..self.health_scratch.len() {
+            let (cid, health) = self.health_scratch[i];
             if let Some(sess) = self.sessions.get_mut(&cid) {
                 sess.conn.send(pkt_health(health));
                 if let SessionState::Play(play, _) = &mut sess.state {
@@ -231,9 +253,8 @@ impl Server {
     /// on the client updates the block ID, facing metadata, and surrounding
     /// blocklight/skylight maps without calling `BlockFurnace.onBlockAdded`
     /// (which would replace `GuiFurnace.field_978_j` and clobber facing metadata).
-    fn drain_block_updates(&mut self) -> std::collections::HashSet<(i32, i32, i32)> {
+    fn drain_block_updates(&mut self) {
         self.world.refresh_light();
-        let mut sent_tiles = std::collections::HashSet::new();
         for [x, y, z] in self.world.take_block_updates() {
             let id = self.world.get_block_id(x, y, z);
             let meta = self.world.get_block_meta(x, y, z);
@@ -262,7 +283,7 @@ impl Server {
                 None
             };
             if furnace_tile.is_some() {
-                sent_tiles.insert((x, y, z));
+                self.sent_tiles_scratch.insert((x, y, z));
             }
             let bytes = pkt_block_change(x, y, z, id, meta);
             let cids = self.conns_with_chunk(chunk_key(x.div_euclid(16), z.div_euclid(16)));
@@ -278,13 +299,12 @@ impl Server {
                 }
             }
         }
-        sent_tiles
     }
 
     /// Ship queued tile-entity updates (`Packet59ComplexEntity`) to chunk-loaded players.
-    fn drain_tile_updates(&mut self, mut already_sent: std::collections::HashSet<(i32, i32, i32)>) {
+    fn drain_tile_updates(&mut self) {
         for [x, y, z] in self.world.take_tile_updates() {
-            if !already_sent.insert((x, y, z)) {
+            if !self.sent_tiles_scratch.insert((x, y, z)) {
                 continue;
             }
             if let Some(tile) = self.world.tiles.get(&(x, y, z)).copied() {
@@ -319,15 +339,18 @@ impl Server {
         }
 
         // Process incoming client packets and session events first (mirrors MinecraftServer func_715_a).
-        let cids: Vec<ConnId> = self.sessions.keys().copied().collect();
-        for cid in cids {
+        self.cids_scratch.clear();
+        for &cid in self.sessions.keys() {
+            self.cids_scratch.push(cid);
+        }
+        for i in 0..self.cids_scratch.len() {
+            let cid = self.cids_scratch[i];
             self.pump_one(cid);
         }
 
         if self.tick_count.is_multiple_of(TICKS_PER_SECOND as u64) {
             let bytes = pkt_time(self.world.time);
-            let cids: Vec<ConnId> = self.sessions.keys().copied().collect();
-            for cid in cids {
+            for &cid in &self.cids_scratch {
                 if self.is_play(cid) {
                     if let Some(sess) = self.sessions.get(&cid) {
                         sess.conn.send(bytes.clone());
@@ -347,8 +370,9 @@ impl Server {
             self.save_world();
         }
         self.tracker_tick();
-        let sent_tiles = self.drain_block_updates();
-        self.drain_tile_updates(sent_tiles);
+        self.sent_tiles_scratch.clear();
+        self.drain_block_updates();
+        self.drain_tile_updates();
         self.poll_network(std::time::Duration::ZERO);
         let lines = std::mem::take(&mut self.console);
         for line in lines {
