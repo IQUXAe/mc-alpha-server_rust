@@ -114,7 +114,6 @@ pub struct PendingBoat {
 }
 
 /// Owned chunk data + lighting (no `World`, no entities, no I/O).
-#[derive(Clone, Debug)]
 pub struct Chunk {
     /// Chunk X position (mirrors C++ `xPosition`).
     pub x_position: i32,
@@ -136,6 +135,48 @@ pub struct Chunk {
     skylight: NibbleArray,
     blocklight: NibbleArray,
     height_map: [u8; CHUNK_AREA],
+    cached_map_compressed: std::sync::Mutex<Option<Vec<u8>>>,
+}
+
+impl Clone for Chunk {
+    fn clone(&self) -> Self {
+        Self {
+            x_position: self.x_position,
+            z_position: self.z_position,
+            is_terrain_populated: self.is_terrain_populated,
+            is_modified: self.is_modified,
+            pending_items: self.pending_items.clone(),
+            pending_animals: self.pending_animals.clone(),
+            pending_monsters: self.pending_monsters.clone(),
+            pending_boats: self.pending_boats.clone(),
+            blocks: self.blocks,
+            data: self.data.clone(),
+            skylight: self.skylight.clone(),
+            blocklight: self.blocklight.clone(),
+            height_map: self.height_map,
+            cached_map_compressed: std::sync::Mutex::new(
+                self.cached_map_compressed
+                    .lock()
+                    .ok()
+                    .and_then(|c| c.clone()),
+            ),
+        }
+    }
+}
+
+impl std::fmt::Debug for Chunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Chunk")
+            .field("x_position", &self.x_position)
+            .field("z_position", &self.z_position)
+            .field("is_terrain_populated", &self.is_terrain_populated)
+            .field("is_modified", &self.is_modified)
+            .field("pending_items", &self.pending_items.len())
+            .field("pending_animals", &self.pending_animals.len())
+            .field("pending_monsters", &self.pending_monsters.len())
+            .field("pending_boats", &self.pending_boats.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Chunk {
@@ -155,6 +196,14 @@ impl Chunk {
             skylight: NibbleArray::with_nibbles(CHUNK_VOLUME),
             blocklight: NibbleArray::with_nibbles(CHUNK_VOLUME),
             height_map: [0u8; CHUNK_AREA],
+            cached_map_compressed: std::sync::Mutex::new(None),
+        }
+    }
+
+    #[inline]
+    fn invalidate_cache(&mut self) {
+        if let Ok(mut lock) = self.cached_map_compressed.lock() {
+            *lock = None;
         }
     }
 
@@ -253,6 +302,7 @@ impl Chunk {
         }
         self.data.set_nibble(x, y, z, metadata);
         self.recalculate_height_column(x, z);
+        self.invalidate_cache();
         self.is_modified = true;
         true
     }
@@ -268,6 +318,7 @@ impl Chunk {
             return;
         }
         self.data.set_nibble(x, y, z, metadata);
+        self.invalidate_cache();
         self.is_modified = true;
     }
 
@@ -296,6 +347,7 @@ impl Chunk {
             }
         }
         self.generate_height_map();
+        self.invalidate_cache();
         self.is_modified = true;
     }
 
@@ -322,6 +374,7 @@ impl Chunk {
                 }
             }
         }
+        self.invalidate_cache();
         self.is_modified = true;
         true
     }
@@ -375,7 +428,13 @@ impl Chunk {
     /// zlib-compressed map payload at level 1 (mirrors the
     /// Compressed tail of chunk data;
     /// empty on I/O failure like the other codecs here).
+    /// Result is cached until chunk blocks or lighting change.
     pub fn map_compressed(&self) -> Vec<u8> {
+        if let Ok(guard) = self.cached_map_compressed.lock() {
+            if let Some(ref cached) = *guard {
+                return cached.clone();
+            }
+        }
         use std::io::Read;
         let raw = self.map_raw();
         let mut encoder =
@@ -383,6 +442,9 @@ impl Chunk {
         let mut out = Vec::new();
         if encoder.read_to_end(&mut out).is_err() {
             return Vec::new();
+        }
+        if let Ok(mut guard) = self.cached_map_compressed.lock() {
+            *guard = Some(out.clone());
         }
         out
     }
@@ -406,6 +468,7 @@ impl Chunk {
         } else {
             self.blocklight.set_nibble(x, y, z, value);
         }
+        self.invalidate_cache();
         self.is_modified = true;
     }
 
@@ -487,6 +550,7 @@ impl Chunk {
     /// this port stops at the chunk border (equivalent to C++ with all
     /// neighbours missing).
     pub fn generate_skylight_map(&mut self) {
+        self.invalidate_cache();
         let mut sky_queue: VecDeque<LightNode> = VecDeque::new();
         let mut block_queue: VecDeque<LightNode> = VecDeque::new();
 
@@ -947,5 +1011,36 @@ mod tests {
         let mut back = Vec::new();
         decoder.read_to_end(&mut back).unwrap();
         assert_eq!(back, chunk.map_raw());
+    }
+
+    #[test]
+    fn test_map_compressed_caching_and_invalidation() {
+        let mut chunk = Chunk::new(0, 0);
+        // Initially cache is empty
+        assert!(chunk.cached_map_compressed.lock().unwrap().is_none());
+
+        // First call populates cache
+        let comp1 = chunk.map_compressed();
+        assert!(chunk.cached_map_compressed.lock().unwrap().is_some());
+
+        // Second call matches cached
+        let comp2 = chunk.map_compressed();
+        assert_eq!(comp1, comp2);
+
+        // Setting a block invalidates cache
+        chunk.set_block_id(1, 10, 1, 1);
+        assert!(chunk.cached_map_compressed.lock().unwrap().is_none());
+        let comp3 = chunk.map_compressed();
+        assert_ne!(comp1, comp3);
+
+        // Setting light invalidates cache
+        chunk.set_light_value(SKY_LIGHT, 1, 10, 1, 14);
+        assert!(chunk.cached_map_compressed.lock().unwrap().is_none());
+
+        // generate_skylight_map invalidates cache
+        let _ = chunk.map_compressed();
+        assert!(chunk.cached_map_compressed.lock().unwrap().is_some());
+        chunk.generate_skylight_map();
+        assert!(chunk.cached_map_compressed.lock().unwrap().is_none());
     }
 }

@@ -103,9 +103,9 @@ impl Server {
                 if !self.world.has_chunk(raw.cx, raw.cz) && !self.world.recall_chunk(raw.cx, raw.cz) {
                     let _ = self.world.load_chunk_from(&mut self.store, raw.cx, raw.cz);
                     if !self.world.has_chunk(raw.cx, raw.cz) {
+                        const ZERO_META: [u8; 32768] = [0u8; 32768];
                         let mut c = crate::chunk::Chunk::new(raw.cx, raw.cz);
-                        let meta = [0u8; 32768];
-                        c.load_arrays(&raw.blocks, &meta);
+                        c.load_arrays(&raw.blocks, &ZERO_META);
                         c.generate_skylight_map();
                         self.world.insert_chunk(c);
                     }
