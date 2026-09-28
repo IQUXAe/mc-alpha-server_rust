@@ -38,7 +38,7 @@ pub trait BlockAccess {
 /// `queue` collects written cells for the broadcast fan-out when `Some`
 /// (live ticks); chunk population passes `None` (fresh chunks stream whole).
 pub struct WorldAccess<'a> {
-    pub chunks: &'a mut HashMap<(i32, i32), Chunk>,
+    pub chunks: &'a mut HashMap<(i32, i32), Box<Chunk>>,
     pub populating: bool,
     pub queue: Option<&'a mut Vec<[i32; 3]>>,
 }

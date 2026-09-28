@@ -1112,7 +1112,7 @@
         // 1. Insert a clean (is_modified = false) chunk at (50, 50) into unloaded and call flush_unloaded_chunks:
         let mut clean = crate::chunk::Chunk::new(50, 50);
         clean.is_modified = false;
-        srv.world.unloaded.insert((50, 50), clean);
+        srv.world.unloaded.insert((50, 50), Box::new(clean));
         srv.flush_unloaded_chunks();
         assert!(
             srv.store.get_chunk(50, 50).is_none(),
@@ -1122,7 +1122,7 @@
         // 2. Insert a chunk at (20, 20), clear its is_modified flag, spawn a live item in it, and call save_world():
         let mut ch = crate::chunk::Chunk::new(20, 20);
         ch.is_modified = false;
-        srv.world.chunks.insert((20, 20), ch);
+        srv.world.chunks.insert((20, 20), Box::new(ch));
         let _item = srv.world.spawn_item_entity(264, 3, 0, 20.0 * 16.0 + 8.5, 64.0, 20.0 * 16.0 + 8.5);
         // Even if is_modified were manually cleared before save_world, save_world marks chunks with live entities dirty:
         srv.world.chunks.get_mut(&(20, 20)).unwrap().is_modified = false;

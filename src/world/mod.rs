@@ -151,7 +151,7 @@ pub struct World {
     /// Unloaded chunks with their entity spill (mirrors the leveldb
     /// round-trip: evicted here, thawed back on recall; disk eviction
     /// arrives with the persistence slice).
-    pub(crate) unloaded: HashMap<(i32, i32), Chunk>,
+    pub(crate) unloaded: HashMap<(i32, i32), Box<Chunk>>,
     /// Block-entity storage by cell (mirrors the chunk `TileEntity` map;
     /// furnaces tick in [`World::tick_furnaces`], NBT here).
     pub tiles: WorldTiles,
@@ -207,7 +207,7 @@ pub struct World {
     /// Terrain generator, built lazily (eleven octave tables; tests that
     /// never generate pay nothing; skipped in `Debug` dumps).
     pub(crate) generator: Option<crate::generator::ChunkProvider>,
-    pub(crate) chunks: HashMap<(i32, i32), Chunk>,
+    pub(crate) chunks: HashMap<(i32, i32), Box<Chunk>>,
     pub entities: EntityTable,
     pub tracker: Tracker,
     pub(crate) rng: JavaRandom,
@@ -274,6 +274,10 @@ impl World {
     }
 
     pub fn insert_chunk(&mut self, chunk: Chunk) {
+        self.chunks.insert((chunk.x_position, chunk.z_position), Box::new(chunk));
+    }
+
+    pub fn insert_chunk_boxed(&mut self, chunk: Box<Chunk>) {
         self.chunks.insert((chunk.x_position, chunk.z_position), chunk);
     }
 
@@ -283,16 +287,19 @@ impl World {
 
     /// Crate-visible chunk lookup for persistence.
     pub(crate) fn chunk_ref(&self, cx: i32, cz: i32) -> Option<&Chunk> {
-        self.chunks.get(&(cx, cz)).or_else(|| self.unloaded.get(&(cx, cz)))
+        self.chunks
+            .get(&(cx, cz))
+            .map(|c| c.as_ref())
+            .or_else(|| self.unloaded.get(&(cx, cz)).map(|c| c.as_ref()))
     }
 
     /// Crate-visible mutable chunk lookup (the server clears the
     /// save-dirty flag after flushing a chunk to the store).
     pub(crate) fn chunk_ref_mut(&mut self, cx: i32, cz: i32) -> Option<&mut Chunk> {
         if self.chunks.contains_key(&(cx, cz)) {
-            self.chunks.get_mut(&(cx, cz))
+            self.chunks.get_mut(&(cx, cz)).map(|c| c.as_mut())
         } else {
-            self.unloaded.get_mut(&(cx, cz))
+            self.unloaded.get_mut(&(cx, cz)).map(|c| c.as_mut())
         }
     }
 
@@ -344,7 +351,7 @@ impl World {
     /// Chunk-map half of [`World::get_block_id`]: split out so AI closures
     /// can borrow the map while the RNG field is borrowed mutably elsewhere
     /// (disjoint field borrows; same formula, one flow).
-    pub(crate) fn block_id_in(chunks: &HashMap<(i32, i32), Chunk>, x: i32, y: i32, z: i32) -> u8 {
+    pub(crate) fn block_id_in(chunks: &HashMap<(i32, i32), Box<Chunk>>, x: i32, y: i32, z: i32) -> u8 {
         if !(0..WORLD_HEIGHT).contains(&y) {
             return 0;
         }
@@ -354,7 +361,7 @@ impl World {
 
     /// Chunk-map half of [`World::get_block_meta`] (same split as
     /// `block_id_in`; also reused by the decorator tree accessor).
-    pub(crate) fn block_meta_in(chunks: &HashMap<(i32, i32), Chunk>, x: i32, y: i32, z: i32) -> u8 {
+    pub(crate) fn block_meta_in(chunks: &HashMap<(i32, i32), Box<Chunk>>, x: i32, y: i32, z: i32) -> u8 {
         if !(0..WORLD_HEIGHT).contains(&y) {
             return 0;
         }
@@ -365,7 +372,7 @@ impl World {
     /// Chunk-map half of [`World::set_block_meta`] (same split as
     /// `block_meta_in`; also reused by the decorator tree accessor).
     pub(crate) fn set_block_meta_in(
-        chunks: &mut HashMap<(i32, i32), Chunk>,
+        chunks: &mut HashMap<(i32, i32), Box<Chunk>>,
         x: i32,
         y: i32,
         z: i32,
@@ -391,7 +398,7 @@ impl World {
     /// writes and regenerates each dirty chunk once via
     /// [`World::refresh_light`]).
     pub(crate) fn set_block_id_in(
-        chunks: &mut HashMap<(i32, i32), Chunk>,
+        chunks: &mut HashMap<(i32, i32), Box<Chunk>>,
         populating: bool,
         x: i32,
         y: i32,
@@ -415,7 +422,7 @@ impl World {
 
     /// Chunk-map half of [`World::is_solid`] (same split; the id list
     /// mirrors `isBlockSolidNoChunkLoad` exactly).
-    pub(crate) fn is_solid_in(chunks: &HashMap<(i32, i32), Chunk>, x: i32, y: i32, z: i32) -> bool {
+    pub(crate) fn is_solid_in(chunks: &HashMap<(i32, i32), Box<Chunk>>, x: i32, y: i32, z: i32) -> bool {
         if !(0..WORLD_HEIGHT).contains(&y) {
             return false;
         }
@@ -426,7 +433,7 @@ impl World {
     }
 
     /// Chunk-map half of [`World::get_height_value`] (same split).
-    pub(crate) fn height_in(chunks: &HashMap<(i32, i32), Chunk>, x: i32, z: i32) -> i32 {
+    pub(crate) fn height_in(chunks: &HashMap<(i32, i32), Box<Chunk>>, x: i32, z: i32) -> i32 {
         let (cx, cz, lx, lz) = Self::chunk_of(x, z);
         chunks.get(&(cx, cz)).map(|c| c.get_height_value(lx, lz)).unwrap_or(0)
     }
@@ -651,7 +658,7 @@ impl World {
     }
 
     /// Chunk-map half of [`World::material_at`] (see `block_id_in`).
-    pub(crate) fn material_in(chunks: &HashMap<(i32, i32), Chunk>, x: i32, y: i32, z: i32) -> Material {
+    pub(crate) fn material_in(chunks: &HashMap<(i32, i32), Box<Chunk>>, x: i32, y: i32, z: i32) -> Material {
         let id = Self::block_id_in(chunks, x, y, z);
         if id == 0 {
             return Material::AIR;
@@ -685,7 +692,7 @@ impl World {
     }
 
     /// Chunk-map half of [`World::saved_light_value`] (see `block_id_in`).
-    pub(crate) fn saved_light_in(chunks: &HashMap<(i32, i32), Chunk>, kind: u8, x: i32, y: i32, z: i32) -> u8 {
+    pub(crate) fn saved_light_in(chunks: &HashMap<(i32, i32), Box<Chunk>>, kind: u8, x: i32, y: i32, z: i32) -> u8 {
         if y < 0 {
             return 0;
         }
@@ -706,12 +713,12 @@ impl World {
 
     /// Chunk-map half of [`World::block_light_value`] without skylight subtraction.
     #[allow(dead_code)]
-    pub(crate) fn block_light_in(chunks: &HashMap<(i32, i32), Chunk>, x: i32, y: i32, z: i32) -> u8 {
+    pub(crate) fn block_light_in(chunks: &HashMap<(i32, i32), Box<Chunk>>, x: i32, y: i32, z: i32) -> u8 {
         Self::block_light_sub_in(chunks, 0, x, y, z)
     }
 
     fn block_light_raw_in(
-        chunks: &HashMap<(i32, i32), Chunk>,
+        chunks: &HashMap<(i32, i32), Box<Chunk>>,
         sky_sub: u8,
         x: i32,
         y: i32,
@@ -730,7 +737,7 @@ impl World {
 
     /// Chunk-map half of [`World::block_light_value`] with `sky_sub` subtracted from sky light.
     pub(crate) fn block_light_sub_in(
-        chunks: &HashMap<(i32, i32), Chunk>,
+        chunks: &HashMap<(i32, i32), Box<Chunk>>,
         sky_sub: u8,
         x: i32,
         y: i32,

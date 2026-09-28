@@ -98,7 +98,7 @@ impl World {
                         c.load_arrays(&stage_blocks[dx][dz], &stage_meta[dx][dz]);
                         c.generate_skylight_map();
                         c.is_terrain_populated = requested;
-                        self.chunks.insert((nx, nz), c);
+                        self.chunks.insert((nx, nz), Box::new(c));
                     }
                 }
                 self.light_dirty.insert((nx, nz));
