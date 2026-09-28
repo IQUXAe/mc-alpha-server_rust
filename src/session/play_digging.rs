@@ -309,12 +309,12 @@ impl PlaySession {
             true,
         );
         if hardness_tick > 0.0 {
-            // Keep damage progressing during network jitter up to 0.95 without
+            // Keep damage progressing during network jitter up to 0.80 without
             // ever harvesting in the background. Harvesting must be driven by
             // client packet synchronization (status 1 / status 3) so that
             // crack animations and break particles play naturally on the client.
-            self.dig.cur_damage = (self.dig.cur_damage + hardness_tick).min(0.95);
-            self.dig.ground_damage += ground_hardness_tick;
+            self.dig.cur_damage = (self.dig.cur_damage + hardness_tick).min(0.80);
+            self.dig.ground_damage = (self.dig.ground_damage + ground_hardness_tick).min(0.80);
         }
     }
 }

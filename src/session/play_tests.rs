@@ -2168,4 +2168,34 @@
         assert!(sess.dig.has_target, "block within eye-level reach must latch target");
     }
 
+    #[test]
+    fn test_ground_damage_and_cur_damage_capped_in_background_jitter() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        if let Some(e) = w.entities.get_mut(player) {
+            e.body_mut().on_ground = true;
+        }
+        w.set_block_id(3, 64, 4, 3); // dirt
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // Latch target with status 0
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        // Tick 50 times in background (2.5 seconds) without client packets
+        for _ in 0..50 {
+            sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        }
+
+        // Damage must be strictly capped at 0.80 (never reaching 1.0 or overflowing ground_damage)
+        assert!(sess.dig.cur_damage <= 0.80, "cur_damage must be capped at 0.80: {}", sess.dig.cur_damage);
+        assert!(sess.dig.ground_damage <= 0.80, "ground_damage must be capped at 0.80: {}", sess.dig.ground_damage);
+        assert_eq!(w.get_block_id(3, 64, 4), 3, "block must never be harvested by background ticks");
+    }
+
+
 
