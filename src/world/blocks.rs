@@ -1207,28 +1207,27 @@ impl World {
     /// chunk order is sorted for determinism where C++ iterates an
     /// unordered set).
     pub(crate) fn random_block_ticks(&mut self) {
-        let mut players: Vec<(f64, f64, f64)> = Vec::new();
-        for oid in self.entities.all_ids() {
-            if let Some(Entity::Player(p)) = self.entities.get(oid) {
+        let mut keys = std::mem::take(&mut self.random_tick_keys);
+        keys.clear();
+        for (_, e) in self.entities.iter() {
+            if let Entity::Player(p) = e {
                 let b = &p.living.body;
-                players.push((b.pos[0], b.pos[1], b.pos[2]));
-            }
-        }
-        if players.is_empty() {
-            return;
-        }
-        let mut keys: Vec<(i32, i32)> = Vec::new();
-        for (px, _, pz) in &players {
-            let (cx, cz) = ((px / 16.0).floor() as i32, (pz / 16.0).floor() as i32);
-            for dx in -9..=9 {
-                for dz in -9..=9 {
-                    keys.push((cx + dx, cz + dz));
+                let cx = (b.pos[0] / 16.0).floor() as i32;
+                let cz = (b.pos[2] / 16.0).floor() as i32;
+                for dx in -9..=9 {
+                    for dz in -9..=9 {
+                        keys.push((cx + dx, cz + dz));
+                    }
                 }
             }
         }
+        if keys.is_empty() {
+            self.random_tick_keys = keys;
+            return;
+        }
         keys.sort_unstable();
         keys.dedup();
-        for (cx, cz) in keys {
+        for &(cx, cz) in &keys {
             if !self.has_chunk(cx, cz) {
                 continue;
             }
@@ -1245,6 +1244,7 @@ impl World {
                 }
             }
         }
+        self.random_tick_keys = keys;
     }
 
     /// Periodic unload (mirrors the `worldTime % 100` pass): chunks outside
@@ -1256,8 +1256,8 @@ impl World {
             return;
         }
         let mut anchors: Vec<(i32, i32)> = Vec::new();
-        for oid in self.entities.all_ids() {
-            if let Some(Entity::Player(p)) = self.entities.get(oid) {
+        for (_, e) in self.entities.iter() {
+            if let Entity::Player(p) = e {
                 anchors.push((
                     (p.living.body.pos[0].floor() as i32) >> 4,
                     (p.living.body.pos[2].floor() as i32) >> 4,
@@ -1318,11 +1318,10 @@ impl World {
     /// unload spill; boats included).
     fn spill_chunk(&mut self, cx: i32, cz: i32) {
         let mut gone: Vec<EntityId> = Vec::new();
-        for oid in self.entities.alive_ids() {
-            let e = match self.entities.get(oid) {
-                Some(e) => e,
-                None => continue,
-            };
+        for (&oid, e) in self.entities.iter() {
+            if e.body().dead {
+                continue;
+            }
             if (e.body().pos[0].floor() as i32) >> 4 != cx
                 || (e.body().pos[2].floor() as i32) >> 4 != cz
             {

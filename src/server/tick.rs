@@ -1,8 +1,7 @@
 //! The 20 TPS tick: event drains, tracker pass, world tick.
 //! Split out of `server.rs`; behavior unchanged.
 
-use std::collections::{HashMap, HashSet};
-use crate::entity::table::{Entity, EntityId};
+use crate::entity::table::Entity;
 use crate::server::sessions::{Session, SessionState};
 use crate::server::{ConnId, Server, chunk_key};
 use crate::server_constants::TICKS_PER_SECOND;
@@ -14,55 +13,49 @@ impl Server {
     /// retired entries (dead or vanished rows, e.g. killed mobs that used
     /// to hang client-side), then per-entity updates for the live ones.
     fn tracker_tick(&mut self) {
-        let mut ids = self.world.entities.alive_ids();
-        ids.sort_unstable();
-        let live: HashSet<EntityId> = ids
-            .iter()
-            .copied()
-            .filter(|id| match self.world.entities.get(*id) {
-                Some(e) => !e.body().dead,
-                None => false,
-            })
-            .collect();
+        let mut scratch = std::mem::take(&mut self.tracker_scratch);
+        self.world.entities.collect_alive_ids(&mut scratch.live_ids);
+        scratch.live_ids.sort_unstable();
+
         // Retire vanished entries (and dead players) with destroy packets
         // (mirrors `EntityTrackerEntry.func_604_a`). Dead mobs/animals stay in
         // `world.entities` for their 20-tick death animation (`death_time < 20`)
         // before `purge_dead` removes them, so `DestroyEntity` is sent after
         // the corpse animation rather than collapsing it on the death tick.
-        let mut out = Vec::new();
-        let gone: Vec<EntityId> = self
-            .world
-            .tracker
-            .tracked_ids()
-            .into_iter()
-            .filter(|id| match self.world.entities.get(*id) {
-                None => true,
-                Some(Entity::Player(p)) => p.living.body.dead,
-                Some(_) => false,
-            })
-            .collect();
-        for id in gone {
-            self.world.tracker.remove(id, &mut out);
+        scratch.gone_ids.clear();
+        scratch.out.clear();
+        for id in self.world.tracker.tracked_ids() {
+            match self.world.entities.get(id) {
+                None => scratch.gone_ids.push(id),
+                Some(Entity::Player(p)) if p.living.body.dead => scratch.gone_ids.push(id),
+                Some(_) => {}
+            }
         }
-        let observers: Vec<Observer> = live
-            .iter()
-            .filter_map(|id| match self.world.entities.get(*id) {
-                Some(Entity::Player(p)) if self.players.contains_key(id) => Some(Observer {
-                    id: *id,
-                    pos: p.living.body.pos,
-                    // The dead see nothing (mirrors the C++ isDead skip).
-                    alive: !p.living.body.dead,
-                }),
-                _ => None,
-            })
-            .collect();
+        for &id in &scratch.gone_ids {
+            self.world.tracker.remove(id, &mut scratch.out);
+        }
+
+        scratch.observers.clear();
+        for &id in &scratch.live_ids {
+            if let Some(Entity::Player(p)) = self.world.entities.get(id) {
+                if self.players.contains_key(&id) {
+                    scratch.observers.push(Observer {
+                        id,
+                        pos: p.living.body.pos,
+                        // The dead see nothing (mirrors the C++ isDead skip).
+                        alive: !p.living.body.dead,
+                    });
+                }
+            }
+        }
+
         // Snapshot rows into owned tracked structs (params mirror C++).
-        let mut tracked = Vec::new();
-        let mut chunks = HashMap::new();
-        for id in &live {
-            let held = match self.world.entities.get(*id) {
+        scratch.tracked.clear();
+        scratch.chunks.clear();
+        for &id in &scratch.live_ids {
+            let held = match self.world.entities.get(id) {
                 Some(Entity::Player(_)) => {
-                    match self.players.get(id).and_then(|cid| self.sessions.get(cid)) {
+                    match self.players.get(&id).and_then(|cid| self.sessions.get(cid)) {
                         Some(Session { state: SessionState::Play(play, _), .. }) => {
                             play.held_id as i16
                         }
@@ -71,7 +64,7 @@ impl Server {
                 }
                 _ => 0,
             };
-            let te = match self.world.entities.get(*id) {
+            let te = match self.world.entities.get(id) {
                 // Java EntityTracker: player 512/2, item 64/20, arrow 64/5,
                 // boat 160/5, mobs+animals 160/3 — each clamped to the view
                 // distance in blocks (EntityTracker.java:42-44).
@@ -95,26 +88,26 @@ impl Server {
                 Some(Entity::Falling(_)) | None => None,
             };
             if let Some(te) = te {
-                chunks.insert(
+                scratch.chunks.insert(
                     te.id,
                     (
                         (te.pos[0].floor() as i32).div_euclid(16),
                         (te.pos[2].floor() as i32).div_euclid(16),
                     ),
                 );
-                tracked.push(te);
+                scratch.tracked.push(te);
             }
         }
         let sessions = &self.sessions;
         let players = &self.players;
         let tracker = &mut self.world.tracker;
-        for te in &tracked {
+        for te in &scratch.tracked {
             tracker.add(te);
             tracker.tick_entity(
                 te,
-                &observers,
+                &scratch.observers,
                 &|observer, entity| {
-                    let (ecx, ecz) = chunks.get(&entity).copied().unwrap_or((0, 0));
+                    let (ecx, ecz) = scratch.chunks.get(&entity).copied().unwrap_or((0, 0));
                     match players.get(&observer).and_then(|cid| sessions.get(cid)) {
                         Some(Session { state: SessionState::Play(_, stream), .. }) => {
                             stream.sent.contains(&chunk_key(ecx, ecz))
@@ -122,9 +115,11 @@ impl Server {
                         _ => false,
                     }
                 },
-                &mut out,
+                &mut scratch.out,
             );
         }
+        let out = std::mem::take(&mut scratch.out);
+        self.tracker_scratch = scratch;
         self.route_outbox(out);
     }
 }

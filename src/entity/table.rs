@@ -582,14 +582,40 @@ impl EntityTable {
         self.rows.is_empty()
     }
 
+    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, EntityId, Entity> {
+        self.rows.iter()
+    }
+
     pub fn alive_ids(&self) -> Vec<EntityId> {
-        self.rows.iter().filter(|(_, e)| !e.body().dead).map(|(id, _)| *id).collect()
+        let mut out = Vec::with_capacity(self.rows.len());
+        self.collect_alive_ids(&mut out);
+        out
+    }
+
+    /// Reuses a caller-provided buffer to collect alive entity ids without heap allocation.
+    pub fn collect_alive_ids(&self, out: &mut Vec<EntityId>) {
+        out.clear();
+        for (&id, e) in &self.rows {
+            if !e.body().dead {
+                out.push(id);
+            }
+        }
     }
 
     /// Every row id, dead or not (spawn anchors count dead players like
     /// the C++ gather).
     pub fn all_ids(&self) -> Vec<EntityId> {
-        self.rows.keys().copied().collect()
+        let mut out = Vec::with_capacity(self.rows.len());
+        self.collect_all_ids(&mut out);
+        out
+    }
+
+    /// Reuses a caller-provided buffer to collect all entity ids without heap allocation.
+    pub fn collect_all_ids(&self, out: &mut Vec<EntityId>) {
+        out.clear();
+        for &id in self.rows.keys() {
+            out.push(id);
+        }
     }
 
     pub fn count_mobs(&self) -> usize {

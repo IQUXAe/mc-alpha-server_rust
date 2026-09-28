@@ -277,11 +277,17 @@ fn encode_spawn(e: &TrackedEntity) -> Vec<u8> {
 #[derive(Clone, Debug, Default)]
 pub struct Tracker {
     entries: HashMap<EntityId, Entry>,
+    fresh_scratch: Vec<EntityId>,
+    gone_scratch: Vec<EntityId>,
 }
 
 impl Tracker {
     pub fn new() -> Self {
-        Self { entries: HashMap::new() }
+        Self {
+            entries: HashMap::new(),
+            fresh_scratch: Vec::new(),
+            gone_scratch: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, e: &TrackedEntity) {
@@ -305,7 +311,17 @@ impl Tracker {
     /// Currently tracked entity ids (the server retires entries whose
     /// rows died or vanished, emitting destroy packets via `remove`).
     pub fn tracked_ids(&self) -> Vec<EntityId> {
-        self.entries.keys().copied().collect()
+        let mut out = Vec::with_capacity(self.entries.len());
+        self.collect_tracked_ids(&mut out);
+        out
+    }
+
+    /// Reuses caller-provided buffer to collect tracked ids without allocation.
+    pub fn collect_tracked_ids(&self, out: &mut Vec<EntityId>) {
+        out.clear();
+        for &id in self.entries.keys() {
+            out.push(id);
+        }
     }
 
     /// Current watchers of an entity (mirrors `TrackerEntry.trackingPlayers`;
@@ -419,29 +435,39 @@ impl Tracker {
             return;
         }
         // Membership pass.
-        let watching: Vec<EntityId> = self.entries[&e.id].tracking.iter().copied().collect();
-        let mut fresh = Vec::new();
-        let mut gone = Vec::new();
-        for o in observers {
-            if !o.alive {
-                continue;
-            }
-            let in_range = tracker_in_range(o.pos[0], o.pos[2], self.entries[&e.id].last_fixed[0], self.entries[&e.id].last_fixed[2], self.entries[&e.id].range);
-            let seen = chunk_visible(o.id, e.id);
-            let already = watching.contains(&o.id);
-            if in_range && seen && !already && o.id != e.id {
-                fresh.push(o.id);
-            } else if (!in_range || !seen) && already {
-                gone.push(o.id);
+        self.fresh_scratch.clear();
+        self.gone_scratch.clear();
+        {
+            let entry = &self.entries[&e.id];
+            for o in observers {
+                if !o.alive {
+                    continue;
+                }
+                let in_range = tracker_in_range(
+                    o.pos[0],
+                    o.pos[2],
+                    entry.last_fixed[0],
+                    entry.last_fixed[2],
+                    entry.range,
+                );
+                let seen = chunk_visible(o.id, e.id);
+                let already = entry.tracking.contains(&o.id);
+                if in_range && seen && !already && o.id != e.id {
+                    self.fresh_scratch.push(o.id);
+                } else if (!in_range || !seen) && already {
+                    self.gone_scratch.push(o.id);
+                }
             }
         }
-        for pid in fresh {
+        for i in 0..self.fresh_scratch.len() {
+            let pid = self.fresh_scratch[i];
             if let Some(entry) = self.entries.get_mut(&e.id) {
                 entry.tracking.insert(pid);
             }
             self.send_spawn_to(e.id, e, pid, out);
         }
-        for pid in gone {
+        for i in 0..self.gone_scratch.len() {
+            let pid = self.gone_scratch[i];
             if let Some(entry) = self.entries.get_mut(&e.id) {
                 entry.tracking.remove(&pid);
             }

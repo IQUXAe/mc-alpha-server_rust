@@ -129,4 +129,15 @@ pub struct Server {
     pub listener: Option<mio::net::TcpListener>,
     pub chunk_worker: Option<chunk_worker::ChunkGenWorker>,
     pub pending_chunk_gens: HashSet<(i32, i32)>,
+    pub tracker_scratch: TrackerScratch,
+}
+
+#[derive(Default)]
+pub struct TrackerScratch {
+    pub live_ids: Vec<EntityId>,
+    pub gone_ids: Vec<EntityId>,
+    pub observers: Vec<crate::tracker::Observer>,
+    pub tracked: Vec<crate::tracker::TrackedEntity>,
+    pub chunks: HashMap<EntityId, (i32, i32)>,
+    pub out: Vec<crate::tracker::Outbox>,
 }

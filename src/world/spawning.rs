@@ -169,25 +169,24 @@ impl World {
             && !self.touching_liquid(id)
     }
 
-    /// Player anchor positions for the spawn passes (mirrors
-    /// `gatherPlayerPositions`: every joined player, dead or not).
-    fn spawn_anchors(&self) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-        let mut rows: Vec<(EntityId, [f64; 3])> = Vec::new();
-        for oid in self.entities.all_ids() {
-            if let Some(Entity::Player(p)) = self.entities.get(oid) {
-                rows.push((oid, p.living.body.pos));
+    /// Update player anchor positions for the spawn passes into caller-provided buffers
+    /// (mirrors `gatherPlayerPositions`: every joined player, dead or not).
+    fn update_spawn_anchors(&mut self, anchors: &mut (Vec<f64>, Vec<f64>, Vec<f64>)) {
+        self.spawn_anchor_rows.clear();
+        for (&oid, e) in self.entities.iter() {
+            if let Entity::Player(p) = e {
+                self.spawn_anchor_rows.push((oid, p.living.body.pos));
             }
         }
-        rows.sort_by_key(|(oid, _)| *oid);
-        let mut xs = Vec::with_capacity(rows.len());
-        let mut ys = Vec::with_capacity(rows.len());
-        let mut zs = Vec::with_capacity(rows.len());
-        for (_, pos) in rows {
-            xs.push(pos[0]);
-            ys.push(pos[1]);
-            zs.push(pos[2]);
+        self.spawn_anchor_rows.sort_unstable_by_key(|(oid, _)| *oid);
+        anchors.0.clear();
+        anchors.1.clear();
+        anchors.2.clear();
+        for (_, pos) in &self.spawn_anchor_rows {
+            anchors.0.push(pos[0]);
+            anchors.1.push(pos[1]);
+            anchors.2.push(pos[2]);
         }
-        (xs, ys, zs)
     }
 
     /// Hostile spawn pass (mirrors `World::spawnHostileMobs`).
@@ -196,9 +195,20 @@ impl World {
             return 0;
         }
         self.update_skylight_subtracted();
-        let (px, py, pz) = self.spawn_anchors();
+        let mut anchors = std::mem::take(&mut self.spawn_anchors);
+        self.update_spawn_anchors(&mut anchors);
         let count = self.entities.count_mobs() as i32;
-        crate::mob_spawning::spawn_hostile(self, &px, &py, &pz, count, self.spawn, WORLD_HEIGHT)
+        let spawned = crate::mob_spawning::spawn_hostile(
+            self,
+            &anchors.0,
+            &anchors.1,
+            &anchors.2,
+            count,
+            self.spawn,
+            WORLD_HEIGHT,
+        );
+        self.spawn_anchors = anchors;
+        spawned
     }
 
     /// Passive spawn pass (mirrors `World::spawnPassiveMobs`).
@@ -207,9 +217,20 @@ impl World {
             return 0;
         }
         self.update_skylight_subtracted();
-        let (px, py, pz) = self.spawn_anchors();
+        let mut anchors = std::mem::take(&mut self.spawn_anchors);
+        self.update_spawn_anchors(&mut anchors);
         let count = self.entities.count_animals() as i32;
-        crate::mob_spawning::spawn_passive(self, &px, &py, &pz, count, self.spawn, WORLD_HEIGHT)
+        let spawned = crate::mob_spawning::spawn_passive(
+            self,
+            &anchors.0,
+            &anchors.1,
+            &anchors.2,
+            count,
+            self.spawn,
+            WORLD_HEIGHT,
+        );
+        self.spawn_anchors = anchors;
+        spawned
     }
 
     /// Item pickup sweep (mirrors the in-loop pickup: ready items within

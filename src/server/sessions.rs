@@ -137,6 +137,7 @@ impl Server {
             listener: None,
             chunk_worker: Some(crate::server::chunk_worker::ChunkGenWorker::start(world_seed)),
             pending_chunk_gens: HashSet::new(),
+            tracker_scratch: crate::server::TrackerScratch::default(),
         })
     }
 

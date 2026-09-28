@@ -213,6 +213,12 @@ pub struct World {
     pub(crate) rng: JavaRandom,
     /// Breakdown of the last [`World::tick_world`] by phase.
     pub last_tick_stats: TickStats,
+    /// Scratch buffer for spawn anchor coordinate projections across ticks.
+    pub(crate) spawn_anchors: (Vec<f64>, Vec<f64>, Vec<f64>),
+    /// Scratch buffer for collecting and sorting player positions in spawn passes.
+    pub(crate) spawn_anchor_rows: Vec<(EntityId, [f64; 3])>,
+    /// Scratch buffer for random block tick chunk coordinates across ticks.
+    pub(crate) random_tick_keys: Vec<(i32, i32)>,
 }
 
 impl std::fmt::Debug for World {
@@ -270,6 +276,9 @@ impl World {
             tracker: Tracker::new(),
             rng: JavaRandom::new(seed),
             last_tick_stats: TickStats::default(),
+            spawn_anchors: (Vec::new(), Vec::new(), Vec::new()),
+            spawn_anchor_rows: Vec::new(),
+            random_tick_keys: Vec::new(),
         }
     }
 
@@ -921,16 +930,21 @@ impl World {
     /// (strict `<`, first minimum wins; ids resolved by the caller).
     pub fn closest_player(&self, x: f64, y: f64, z: f64, max_dist: f64) -> Option<EntityId> {
         let mut best: Option<(EntityId, f64)> = None;
-        let mut ids: Vec<EntityId> = self.entities.alive_ids();
-        ids.sort_unstable();
-        for id in ids {
-            let e = self.entities.get(id)?;
-            if !matches!(e, crate::entity::table::Entity::Player(_)) {
+        let max_dist_sq = max_dist * max_dist;
+        for (&id, e) in self.entities.iter() {
+            if e.body().dead || !matches!(e, crate::entity::table::Entity::Player(_)) {
                 continue;
             }
             let d = e.body().distance_sq(x, y, z);
-            if d < max_dist * max_dist && best.map(|(_, b)| d < b).unwrap_or(true) {
-                best = Some((id, d));
+            if d < max_dist_sq {
+                match best {
+                    None => best = Some((id, d)),
+                    Some((best_id, best_d)) => {
+                        if d < best_d || (d == best_d && id < best_id) {
+                            best = Some((id, d));
+                        }
+                    }
+                }
             }
         }
         best.map(|(id, _)| id)
