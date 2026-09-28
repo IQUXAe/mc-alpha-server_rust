@@ -41,9 +41,24 @@ pub struct ChunkStore {
 }
 
 impl ChunkStore {
+    /// Default LevelDB options tuned for embedded / low-memory router profiles:
+    /// 512 KB write buffer and 512 KB block cache instead of default 4MB + 4MB.
+    pub fn default_options() -> rusty_leveldb::Options {
+        rusty_leveldb::Options {
+            create_if_missing: true,
+            write_buffer_size: 512 * 1024,
+            block_cache_capacity_bytes: 512 * 1024,
+            ..Default::default()
+        }
+    }
+
     /// Open (creating) the database at `path` (the `db` directory itself).
     pub fn open(path: &str) -> Result<Self, String> {
-        let opts = rusty_leveldb::Options { create_if_missing: true, ..Default::default() };
+        Self::open_with_options(path, Self::default_options())
+    }
+
+    /// Open (creating) the database at `path` with custom LevelDB options.
+    pub fn open_with_options(path: &str, opts: rusty_leveldb::Options) -> Result<Self, String> {
         rusty_leveldb::DB::open(path, opts)
             .map(|db| Self { db })
             .map_err(|e| e.to_string())
