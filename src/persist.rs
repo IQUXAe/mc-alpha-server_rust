@@ -44,10 +44,20 @@ impl ChunkStore {
     /// Default LevelDB options tuned for embedded / low-memory router profiles:
     /// 512 KB write buffer and 512 KB block cache instead of default 4MB + 4MB.
     pub fn default_options() -> rusty_leveldb::Options {
+        let write_buffer_size = std::env::var("ALPHA_LEVELDB_WRITE_BUFFER_KB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|kb| kb * 1024)
+            .unwrap_or(512 * 1024);
+        let block_cache_capacity_bytes = std::env::var("ALPHA_LEVELDB_CACHE_KB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|kb| kb * 1024)
+            .unwrap_or(512 * 1024);
         rusty_leveldb::Options {
             create_if_missing: true,
-            write_buffer_size: 512 * 1024,
-            block_cache_capacity_bytes: 512 * 1024,
+            write_buffer_size,
+            block_cache_capacity_bytes,
             ..Default::default()
         }
     }
@@ -1259,6 +1269,13 @@ mod tests {
         store.put_chunk(0, 0, b"chunk_payload").unwrap();
         assert!(store.flush().is_ok());
         assert_eq!(store.get_chunk(0, 0).unwrap(), b"chunk_payload");
+    }
+
+    #[test]
+    fn test_chunk_store_default_and_env_options() {
+        let opts = ChunkStore::default_options();
+        assert_eq!(opts.write_buffer_size, 512 * 1024);
+        assert_eq!(opts.block_cache_capacity_bytes, 512 * 1024);
     }
 }
 
