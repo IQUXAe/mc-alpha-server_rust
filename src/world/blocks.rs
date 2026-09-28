@@ -1281,7 +1281,7 @@ impl World {
             .collect();
         for (cx, cz) in drop {
             self.spill_chunk(cx, cz);
-            if let Some(mut chunk) = self.chunks.remove(&(cx, cz)) {
+            if let Some(chunk) = self.chunks.remove(&(cx, cz)) {
                 chunk.clear_compressed_cache();
                 self.unloaded.insert((cx, cz), chunk);
             }

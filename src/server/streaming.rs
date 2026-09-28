@@ -212,6 +212,7 @@ impl Server {
                         data,
                     ));
                 });
+                chunk.clear_compressed_cache();
             }
             // Tile entities ride the chunk like C++ (row order is map
             // order on both sides).

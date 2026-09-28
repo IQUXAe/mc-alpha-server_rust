@@ -201,15 +201,15 @@ impl Chunk {
     }
 
     #[inline]
-    fn invalidate_cache(&mut self) {
+    fn invalidate_cache(&self) {
         if let Ok(mut lock) = self.cached_map_compressed.lock() {
             *lock = None;
         }
     }
 
-    /// Explicitly clear the cached compressed map to free memory (e.g. on chunk unload).
+    /// Explicitly clear the cached compressed map to free memory (e.g. on chunk unload or after streaming).
     #[inline]
-    pub fn clear_compressed_cache(&mut self) {
+    pub fn clear_compressed_cache(&self) {
         self.invalidate_cache();
     }
 
