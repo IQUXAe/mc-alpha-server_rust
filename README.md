@@ -134,7 +134,7 @@ In Minecraft Alpha 1.2.6, mining relies on tight synchronization between client 
 - **Anti-Cheat & Desync Tolerance**:
   - The server verifies that the player has accumulated sufficient mining work (`cur_damage >= 0.70`).
   - To prevent **false rollbacks** when a player is jumping or swimming (where airborne/underwater penalties slow client mining speed), the server also tracks ground-equivalent progress (`ground_damage >= 0.70`).
-  - The background server tick (`dig_tick`) advances progress up to 0.95 to account for network jitter, but **never harvests blocks in the background**. Harvesting is strictly client-packet driven so blocks never vanish prematurely without break animations.
+  - The background server tick (`dig_tick`) advances progress up to 0.80 (for both `cur_damage` and `ground_damage`) to account for network jitter without ever nearing the break threshold, and **never harvests blocks in the background**. Harvesting is strictly client-packet driven so blocks never vanish prematurely without break animations.
   - Instant break cheats (0 ticks) and speed mining cheats (2x–5x speed) are strictly rejected and rolled back via `Packet 53 (BlockChange)`.
 
 ---
