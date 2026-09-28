@@ -8,7 +8,7 @@ pub const MILLISECONDS_PER_TICK: i32 = 50;
 
 pub const VIEW_DISTANCE_MIN: i32 = 3;
 pub const VIEW_DISTANCE_MAX: i32 = 15;
-pub const VIEW_DISTANCE_DEFAULT: i32 = 10;
+pub const VIEW_DISTANCE_DEFAULT: i32 = 6;
 
 pub const CHUNKS_PER_TICK: i32 = 15;
 /// Fresh chunk generations per tick per player (a cold generate costs
@@ -58,7 +58,7 @@ mod tests {
     fn view_distance() {
         assert_eq!(VIEW_DISTANCE_MIN, 3);
         assert_eq!(VIEW_DISTANCE_MAX, 15);
-        assert_eq!(VIEW_DISTANCE_DEFAULT, 10);
+        assert_eq!(VIEW_DISTANCE_DEFAULT, 6);
         const { assert!(VIEW_DISTANCE_MIN <= VIEW_DISTANCE_DEFAULT) };
         const { assert!(VIEW_DISTANCE_DEFAULT <= VIEW_DISTANCE_MAX) };
     }
