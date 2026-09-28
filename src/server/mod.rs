@@ -133,6 +133,7 @@ pub struct Server {
     pub cids_scratch: Vec<ConnId>,
     pub health_scratch: Vec<(ConnId, i8)>,
     pub sent_tiles_scratch: HashSet<(i32, i32, i32)>,
+    pub store_missing: HashSet<(i32, i32)>,
 }
 
 #[derive(Default)]

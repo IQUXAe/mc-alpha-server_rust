@@ -101,7 +101,6 @@ impl World {
                         self.chunks.insert((nx, nz), Box::new(c));
                     }
                 }
-                self.light_dirty.insert((nx, nz));
                 canvas_set.insert((nx, nz));
             }
         }

@@ -97,14 +97,21 @@ impl Server {
         }
 
         // Drain any completed background chunk generations.
-        if let Some(ref worker) = self.chunk_worker {
-            while let Ok(raw) = worker.resp_rx.try_recv() {
-                self.pending_chunk_gens.remove(&(raw.cx, raw.cz));
-                if !self.world.has_chunk(raw.cx, raw.cz) && !self.world.recall_chunk(raw.cx, raw.cz) {
-                    let _ = self.world.load_chunk_from(&mut self.store, raw.cx, raw.cz);
-                    if !self.world.has_chunk(raw.cx, raw.cz) {
-                        self.world.insert_chunk_boxed(raw.chunk);
-                    }
+        let completed: Vec<_> = match self.chunk_worker {
+            Some(ref worker) => {
+                let mut list = Vec::new();
+                while let Ok(raw) = worker.resp_rx.try_recv() {
+                    list.push(raw);
+                }
+                list
+            }
+            None => Vec::new(),
+        };
+        for raw in completed {
+            self.pending_chunk_gens.remove(&(raw.cx, raw.cz));
+            if !self.world.has_chunk(raw.cx, raw.cz) && !self.world.recall_chunk(raw.cx, raw.cz) {
+                if !self.load_chunk(raw.cx, raw.cz) {
+                    self.world.insert_chunk_boxed(raw.chunk);
                 }
             }
         }
@@ -116,6 +123,7 @@ impl Server {
         // Skipped chunks stay queued for the next ticks.
         let mut sent_now = 0;
         let mut generated = 0;
+        let mut deferred_count = 0;
         let mut i = 0;
         while i < stream.queue.len() && sent_now < CHUNKS_PER_TICK as usize {
             let (qx, qz) = stream.queue[i];
@@ -124,7 +132,7 @@ impl Server {
                 for dz in -1..=1 {
                     let (bx, bz) = (qx + dx, qz + dz);
                     if !self.world.has_chunk(bx, bz) && !self.world.recall_chunk(bx, bz) {
-                        let _ = self.world.load_chunk_from(&mut self.store, bx, bz);
+                        let _ = self.load_chunk(bx, bz);
                     }
                     if self
                         .world
@@ -138,8 +146,7 @@ impl Server {
                         for cdz in 0..=1 {
                             let (nx, nz) = (bx + cdx, bz + cdz);
                             if !self.world.has_chunk(nx, nz) && !self.world.recall_chunk(nx, nz) {
-                                let _ = self.world.load_chunk_from(&mut self.store, nx, nz);
-                                if !self.world.has_chunk(nx, nz) {
+                                if !self.load_chunk(nx, nz) {
                                     if let Some(ref worker) = self.chunk_worker {
                                         if !self.pending_chunk_gens.contains(&(nx, nz))
                                             && self.pending_chunk_gens.len() < 64
@@ -171,10 +178,18 @@ impl Server {
                 }
             }
             if deferred {
+                deferred_count += 1;
+                if deferred_count >= 8
+                    && (generated >= CHUNK_GEN_PER_TICK || self.pending_chunk_gens.len() >= 64)
+                {
+                    break;
+                }
                 i += 1;
                 continue;
             }
-            self.world.refresh_light();
+            if !self.world.light_dirty.is_empty() {
+                self.world.refresh_light();
+            }
             let populated = self
                 .world
                 .chunk_ref(qx, qz)

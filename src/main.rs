@@ -117,10 +117,9 @@ fn main() {
         })
         .ok();
 
-    // Microsecond accounting (50ms ticks).
-    const TICK_MICROS: i64 = 50_000;
-    let mut last = Instant::now();
-    let mut lag: i64 = 0;
+    // Fixed-timestep tick loop (20 TPS = 50ms ticks).
+    let tick_duration = Duration::from_millis(50);
+    let mut next_tick = Instant::now();
     loop {
         while let Ok(line) = console_rx.try_recv() {
             server.queue_console(line);
@@ -129,31 +128,31 @@ fn main() {
             server.shutdown();
             break;
         }
+
         let now = Instant::now();
-        let mut elapsed = now.saturating_duration_since(last).as_micros() as i64;
-        last = now;
-        if elapsed > 2_000_000 {
-            log::warning(
-                "Can't keep up! Did the system time change, or is the server overloaded?",
-            );
-            elapsed = 2_000_000;
-        }
-        lag += elapsed;
-        while lag >= TICK_MICROS {
-            lag -= TICK_MICROS;
-            server.tick();
-        }
-        if !server.running {
-            server.shutdown();
-            break;
+        if now >= next_tick {
+            let behind = now.duration_since(next_tick);
+            if behind > Duration::from_secs(2) {
+                log::warning(
+                    "Can't keep up! Did the system time change, or is the server overloaded?",
+                );
+                next_tick = now;
+            }
+            while next_tick <= now {
+                next_tick += tick_duration;
+                server.tick();
+                if !server.running {
+                    server.shutdown();
+                    break;
+                }
+            }
+            if !server.running {
+                break;
+            }
         }
 
-        // Event-driven wait: poll network for remaining time until next tick.
-        let poll_timeout = if lag >= TICK_MICROS {
-            Duration::ZERO
-        } else {
-            Duration::from_micros((TICK_MICROS - lag) as u64)
-        };
+        let now = Instant::now();
+        let poll_timeout = next_tick.saturating_duration_since(now);
         server.poll_network(poll_timeout);
     }
     log::info("Waiting for background threads to finish saving...");

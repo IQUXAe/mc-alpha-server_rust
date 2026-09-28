@@ -71,21 +71,43 @@ impl PlaySession {
             if dig_on_click(input) {
                 self.harvest(ctx, x, y, z);
             } else {
-                self.dig.cur_damage = 0.0;
-                self.dig.target_x = x;
-                self.dig.target_y = y;
-                self.dig.target_z = z;
-                self.dig.has_target = true;
+                let same_target = self.dig.has_target
+                    && self.dig.target_x == x
+                    && self.dig.target_y == y
+                    && self.dig.target_z == z;
+                if !same_target {
+                    self.dig.cur_damage = 0.0;
+                    self.dig.initial_cooldown = 0;
+                    self.dig.target_x = x;
+                    self.dig.target_y = y;
+                    self.dig.target_z = z;
+                    self.dig.has_target = true;
+                }
             }
         } else if status == 2 {
             crate::player::digging::dig_cancel(&mut self.dig);
         } else if status == 1 {
             if !protected || self.is_op(ctx) {
                 let bid = ctx.world.get_block_id(x, y, z);
-                let input = self.dig_input(ctx, bid as i32);
-                let done = dig_on_tick(&mut self.dig, x, y, z, input);
-                if done {
-                    self.harvest(ctx, x, y, z);
+                if bid > 0 {
+                    let same_target = self.dig.has_target
+                        && self.dig.target_x == x
+                        && self.dig.target_y == y
+                        && self.dig.target_z == z;
+                    if !same_target {
+                        self.dig.cur_damage = 0.0;
+                        self.dig.initial_cooldown = 0;
+                        self.dig.target_x = x;
+                        self.dig.target_y = y;
+                        self.dig.target_z = z;
+                        self.dig.has_target = true;
+                    }
+                    let input = self.dig_input(ctx, bid as i32);
+                    let done = dig_on_tick(&mut self.dig, x, y, z, input);
+                    self.dig_ticked_this_tick = true;
+                    if done {
+                        self.harvest(ctx, x, y, z);
+                    }
                 }
             }
         } else if status == 3 && dist_sq < 256.0 {
@@ -204,6 +226,7 @@ impl PlaySession {
         // Ice leaves water behind when the cell below is solid/liquid
         // (Java BlockIce.onBlockRemoval).
         if removed {
+            crate::player::digging::dig_cancel(&mut self.dig);
             if bid == 46 {
                 ctx.world.ignite_tnt(x, y, z, 80);
                 return;
@@ -222,6 +245,57 @@ impl PlaySession {
             if mining_can_harvest(bid as i32, harvest_held_id) {
                 ctx.world.drop_block_for(bid, meta, x, y, z);
             }
+        }
+    }
+
+    /// Progress block digging damage on server tick when the client is actively
+    /// digging a latched target block (Alpha client does not send status 1 every tick).
+    pub(crate) fn dig_tick(&mut self, ctx: &mut SessionCtx) {
+        if self.dig_ticked_this_tick {
+            self.dig_ticked_this_tick = false;
+            return;
+        }
+        if !self.dig.has_target {
+            return;
+        }
+        let (x, y, z) = (self.dig.target_x, self.dig.target_y, self.dig.target_z);
+        if !(0..crate::world::WORLD_HEIGHT).contains(&y) {
+            crate::player::digging::dig_cancel(&mut self.dig);
+            return;
+        }
+        let me = self.player;
+        let (px, py, pz) = match ctx.world.entities.get(me) {
+            Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+            None => {
+                crate::player::digging::dig_cancel(&mut self.dig);
+                return;
+            }
+        };
+        let dist_sq = (px - (x as f64 + 0.5)).powi(2)
+            + (py - (y as f64 + 0.5)).powi(2)
+            + (pz - (z as f64 + 0.5)).powi(2);
+        if dist_sq > 36.0 {
+            crate::player::digging::dig_cancel(&mut self.dig);
+            return;
+        }
+        let protected = {
+            let sp = ctx.world.spawn;
+            crate::session::is_spawn_protected(x, z, sp, ctx.spawn_protection)
+        };
+        if protected && !self.is_op(ctx) {
+            crate::player::digging::dig_cancel(&mut self.dig);
+            return;
+        }
+        let bid = ctx.world.get_block_id(x, y, z);
+        if bid == 0 {
+            crate::player::digging::dig_cancel(&mut self.dig);
+            return;
+        }
+        self.sync_held(ctx.world);
+        let input = self.dig_input(ctx, bid as i32);
+        let done = dig_on_tick(&mut self.dig, x, y, z, input);
+        if done {
+            self.harvest(ctx, x, y, z);
         }
     }
 }

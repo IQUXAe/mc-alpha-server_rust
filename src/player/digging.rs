@@ -53,6 +53,7 @@ pub fn dig_state_new() -> DigState {
 pub fn dig_cancel(s: &mut DigState) {
     s.cur_damage = 0.0;
     s.initial_cooldown = 0;
+    s.has_target = false;
 }
 
 /// Start-of-dig predicate (mirrors `ItemInWorldManager::onBlockClicked`).

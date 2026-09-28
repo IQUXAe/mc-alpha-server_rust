@@ -22,6 +22,7 @@ pub struct PlaySession {
     pub player: EntityId,
     pub outbox: Vec<Vec<u8>>,
     pub dig: DigState,
+    pub dig_ticked_this_tick: bool,
     pub has_moved: bool,
     pub last: [f64; 3],
     pub held_id: i32,
@@ -43,6 +44,7 @@ impl PlaySession {
             player,
             outbox: Vec::new(),
             dig: dig_state_new(),
+            dig_ticked_this_tick: false,
             has_moved: false,
             last: [0.0; 3],
             held_id: 0,
@@ -237,11 +239,12 @@ impl PlaySession {
     }
 
     /// Per-tick upkeep (mirrors the handler `tick` minus chunk streaming:
-    /// keep-alive every 20 ticks).
-    pub fn tick(&mut self, _ctx: &mut SessionCtx) -> Option<SessionOutcome> {
+    /// keep-alive every 20 ticks, block digging damage tick).
+    pub fn tick(&mut self, ctx: &mut SessionCtx) -> Option<SessionOutcome> {
         if self.gone {
             return None;
         }
+        self.dig_tick(ctx);
         self.keepalive_tick += 1;
         if self.keepalive_tick.is_multiple_of(20) {
             self.outbox.push(pkt_keepalive());

@@ -1900,4 +1900,126 @@
         let _ = std::fs::remove_file(&path2);
     }
 
+    #[test]
+    fn test_continuous_digging_status_0_preserves_damage_and_completes() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        if let Some(e) = w.entities.get_mut(player) {
+            e.body_mut().on_ground = true;
+        }
+        w.set_block_id(3, 64, 4, 3); // dirt (takes ~15 ticks with bare hands on ground)
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // 1. Initial status 0 latches target
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+        assert!(sess.dig.has_target);
+        assert_eq!(sess.dig.cur_damage, 0.0);
+
+        // 2. Server ticks advance damage without status 1 packets
+        for _ in 0..5 {
+            sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        }
+        let dmg_after_5 = sess.dig.cur_damage;
+        assert!(dmg_after_5 > 0.0, "damage must accumulate on server tick");
+
+        // 3. Client re-sends status 0 every 5 ticks while holding LMB.
+        // It must NOT reset accumulated damage!
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+        assert_eq!(sess.dig.cur_damage, dmg_after_5, "status 0 on same target must preserve cur_damage");
+
+        // 4. Tick further until damage >= 0.70
+        for _ in 0..6 {
+            sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        }
+        assert!(sess.dig.cur_damage >= 0.70, "damage must reach >= 0.70 threshold: {}", sess.dig.cur_damage);
+
+        // 5. Client sends status 3 to finish
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        // Block must be broken and digging target cleared
+        assert_eq!(w.get_block_id(3, 64, 4), 0, "block must be harvested");
+        assert!(!sess.dig.has_target, "dig target must be cleared after harvest");
+        assert_eq!(sess.dig.cur_damage, 0.0);
+    }
+
+    #[test]
+    fn test_digging_target_switch_and_cancel() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        w.set_block_id(3, 64, 4, 3);
+        w.set_block_id(3, 64, 5, 3);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // Start block A
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+        sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        assert!(sess.dig.cur_damage > 0.0);
+
+        // Switch to block B: damage must reset
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 5, face: 1 },
+        );
+        assert_eq!(sess.dig.cur_damage, 0.0, "switching target must reset damage");
+        assert_eq!(sess.dig.target_z, 5);
+
+        // Cancel with status 2
+        sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        assert!(sess.dig.cur_damage > 0.0);
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 2, x: 0, y: 0, z: 0, face: 0 },
+        );
+        assert!(!sess.dig.has_target);
+        assert_eq!(sess.dig.cur_damage, 0.0);
+    }
+
+    #[test]
+    fn test_status_1_prevents_double_tick_in_same_server_tick() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        w.set_block_id(3, 64, 4, 3);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // Status 0 to latch target
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        // Status 1 ticks damage once and sets dig_ticked_this_tick
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 1, x: 3, y: 64, z: 4, face: 1 },
+        );
+        let dmg_after_status_1 = sess.dig.cur_damage;
+        assert!(dmg_after_status_1 > 0.0);
+
+        // sess.tick() in the same server tick must NOT advance damage again
+        sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        assert_eq!(sess.dig.cur_damage, dmg_after_status_1, "must not double-tick in same server tick");
+
+        // Next server tick WILL advance damage
+        sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        assert!(sess.dig.cur_damage > dmg_after_status_1, "subsequent tick must advance damage");
+    }
+
 

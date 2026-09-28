@@ -114,6 +114,7 @@ impl Server {
                 }
                 Some(blob) => match self.store.put_chunk(cx, cz, &blob) {
                     Ok(()) => {
+                        self.store_missing.remove(&(cx, cz));
                         self.world.unloaded.remove(&(cx, cz));
                         // Tiles ride in the blob just written; drop the
                         // memory copy like vanilla unloads its TileEntities
@@ -173,6 +174,7 @@ impl Server {
                 continue;
             }
             if self.world.save_chunk_to(&mut self.store, cx, cz) {
+                self.store_missing.remove(&(cx, cz));
                 if let Some(c) = self.world.chunk_ref_mut(cx, cz) {
                     c.clear_modified();
                 }

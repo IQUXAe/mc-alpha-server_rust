@@ -141,7 +141,20 @@ impl Server {
             cids_scratch: Vec::new(),
             health_scratch: Vec::new(),
             sent_tiles_scratch: HashSet::new(),
+            store_missing: HashSet::new(),
         })
+    }
+
+    /// Load chunk from store with negative caching (avoids repeatedly querying LevelDB for missing chunks).
+    pub(crate) fn load_chunk(&mut self, cx: i32, cz: i32) -> bool {
+        if self.store_missing.contains(&(cx, cz)) {
+            return false;
+        }
+        let ok = self.world.load_chunk_from(&mut self.store, cx, cz);
+        if !ok {
+            self.store_missing.insert((cx, cz));
+        }
+        ok
     }
 
     /// Fresh-world spawn search (mirrors `findSafeSpawnPoint`: random
