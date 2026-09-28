@@ -20,6 +20,7 @@ use crate::player::mining::mining_check_hardness;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DigState {
     pub cur_damage: f32,
+    pub ground_damage: f32,
     pub initial_cooldown: i32,
     pub target_x: i32,
     pub target_y: i32,
@@ -41,6 +42,7 @@ pub struct DigInput {
 pub fn dig_state_new() -> DigState {
     DigState {
         cur_damage: 0.0,
+        ground_damage: 0.0,
         initial_cooldown: 0,
         target_x: 0,
         target_y: 0,
@@ -52,6 +54,7 @@ pub fn dig_state_new() -> DigState {
 /// Reset digging progress (mirrors `ItemInWorldManager::cancelRemoving`).
 pub fn dig_cancel(s: &mut DigState) {
     s.cur_damage = 0.0;
+    s.ground_damage = 0.0;
     s.initial_cooldown = 0;
     s.has_target = false;
 }
@@ -101,6 +104,7 @@ pub fn dig_on_tick(
     let same_target = s.has_target && s.target_x == x && s.target_y == y && s.target_z == z;
     if !same_target {
         s.cur_damage = 0.0;
+        s.ground_damage = 0.0;
         s.target_x = x;
         s.target_y = y;
         s.target_z = z;
@@ -123,8 +127,16 @@ pub fn dig_on_tick(
         return false;
     }
     s.cur_damage += hardness_tick;
+    let ground_hardness_tick = mining_check_hardness(
+        input.block_id,
+        input.held_item_id,
+        false,
+        true,
+    );
+    s.ground_damage += ground_hardness_tick;
     if s.cur_damage >= 1.0 - 1e-4 {
         s.cur_damage = 0.0;
+        s.ground_damage = 0.0;
         s.initial_cooldown = 5;
         return true;
     }

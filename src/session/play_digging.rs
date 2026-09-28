@@ -78,6 +78,7 @@ impl PlaySession {
                     && self.dig.target_z == z;
                 if !same_target {
                     self.dig.cur_damage = 0.0;
+                    self.dig.ground_damage = 0.0;
                     self.dig.initial_cooldown = 0;
                     self.dig.target_x = x;
                     self.dig.target_y = y;
@@ -97,6 +98,7 @@ impl PlaySession {
                         && self.dig.target_z == z;
                     if !same_target {
                         self.dig.cur_damage = 0.0;
+                        self.dig.ground_damage = 0.0;
                         self.dig.initial_cooldown = 0;
                         self.dig.target_x = x;
                         self.dig.target_y = y;
@@ -132,11 +134,11 @@ impl PlaySession {
                         false,
                         true,
                     );
-                    if hardness_tick > 0.0
-                        && (self.dig.cur_damage >= 0.35
-                            || self.dig.cur_damage + hardness_tick >= 0.70
-                            || self.dig.cur_damage + ground_hardness_tick >= 0.35)
-                    {
+                    let ok = self.dig.cur_damage >= 0.70
+                        || self.dig.ground_damage >= 0.70
+                        || (hardness_tick > 0.0 && self.dig.cur_damage + hardness_tick >= 0.70)
+                        || (ground_hardness_tick > 0.0 && self.dig.ground_damage + ground_hardness_tick >= 0.70);
+                    if ok {
                         self.harvest(ctx, x, y, z);
                     }
                 }
@@ -294,9 +296,25 @@ impl PlaySession {
         }
         self.sync_held(ctx.world);
         let input = self.dig_input(ctx, bid as i32);
-        let done = dig_on_tick(&mut self.dig, x, y, z, input);
-        if done {
-            self.harvest(ctx, x, y, z);
+        let hardness_tick = crate::player::mining::mining_check_hardness(
+            input.block_id,
+            input.held_item_id,
+            input.in_water,
+            input.on_ground,
+        );
+        let ground_hardness_tick = crate::player::mining::mining_check_hardness(
+            input.block_id,
+            input.held_item_id,
+            false,
+            true,
+        );
+        if hardness_tick > 0.0 {
+            // Keep damage progressing during network jitter up to 0.95 without
+            // ever harvesting in the background. Harvesting must be driven by
+            // client packet synchronization (status 1 / status 3) so that
+            // crack animations and break particles play naturally on the client.
+            self.dig.cur_damage = (self.dig.cur_damage + hardness_tick).min(0.95);
+            self.dig.ground_damage += ground_hardness_tick;
         }
     }
 }

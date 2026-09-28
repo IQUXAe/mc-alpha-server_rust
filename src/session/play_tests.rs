@@ -2023,14 +2023,14 @@
     }
 
     #[test]
-    fn test_status_3_completion_with_relaxed_damage() {
+    fn test_status_3_completion_with_balanced_anticheat_threshold() {
         let mut w = floor_world();
         let ops = no_ops();
         let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
         if let Some(e) = w.entities.get_mut(player) {
             e.body_mut().on_ground = true;
         }
-        w.set_block_id(3, 64, 4, 3); // dirt
+        w.set_block_id(3, 64, 4, 3); // dirt (takes 15 ticks bare hands)
         let mut sess = PlaySession::new(player);
         let mut bc = Vec::new();
 
@@ -2039,20 +2039,32 @@
             PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
         );
 
-        // Dig for 6 ticks -> damage reaches ~0.40 (>= 0.35)
+        // Dig for 6 ticks -> damage reaches ~0.40 (< 0.70)
         for _ in 0..6 {
             sess.tick(&mut ctx(&mut w, &ops, &mut bc));
         }
-        assert!(sess.dig.cur_damage >= 0.35, "cur_damage should be >= 0.35: {}", sess.dig.cur_damage);
-        assert!(sess.dig.cur_damage < 0.70, "cur_damage should be < 0.70: {}", sess.dig.cur_damage);
+        assert!(sess.dig.cur_damage < 0.70, "cur_damage after 6 ticks must be < 0.70: {}", sess.dig.cur_damage);
 
-        // Status 3 must now succeed with relaxed threshold
+        // Status 3 must be REJECTED at 0.40 (anti-cheat prevents fastbreak)
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
+        );
+        assert_eq!(w.get_block_id(3, 64, 4), 3, "block must not break prematurely at < 0.70");
+
+        // Dig 5 more ticks (total 11 ticks) -> damage reaches ~0.73 (>= 0.70)
+        for _ in 0..5 {
+            sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        }
+        assert!(sess.dig.cur_damage >= 0.70, "cur_damage after 11 ticks must be >= 0.70: {}", sess.dig.cur_damage);
+
+        // Status 3 now completes legitimately
         sess.pump(
             &mut ctx(&mut w, &ops, &mut bc),
             PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
         );
 
-        assert_eq!(w.get_block_id(3, 64, 4), 0, "block must be harvested on status 3");
+        assert_eq!(w.get_block_id(3, 64, 4), 0, "block must be harvested on status 3 when threshold reached");
         assert!(!sess.dig.has_target);
         assert_eq!(sess.dig.cur_damage, 0.0);
     }
@@ -2074,7 +2086,7 @@
             PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
         );
 
-        // Dig only 2 ticks -> damage is ~0.13 (< 0.35)
+        // Dig only 2 ticks -> damage is ~0.13 (< 0.70)
         for _ in 0..2 {
             sess.tick(&mut ctx(&mut w, &ops, &mut bc));
         }
@@ -2092,8 +2104,8 @@
         assert!(sess.dig.has_target, "has_target must remain true after rejected status 3");
         assert_eq!(sess.dig.cur_damage, dmg_before, "damage must be preserved after rejected status 3");
 
-        // Continuing to dig finishes the block
-        for _ in 0..6 {
+        // Continuing to dig finishes the block (another 9 ticks -> total 11 ticks, damage >= 0.70)
+        for _ in 0..9 {
             sess.tick(&mut ctx(&mut w, &ops, &mut bc));
         }
         sess.pump(
@@ -2101,6 +2113,43 @@
             PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
         );
         assert_eq!(w.get_block_id(3, 64, 4), 0, "block must be harvested after further digging");
+    }
+
+    #[test]
+    fn test_status_3_jumping_player_no_false_rollback() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        // Player is airborne (on_ground = false), so cur_damage accumulates at 0.2x speed
+        if let Some(e) = w.entities.get_mut(player) {
+            e.body_mut().on_ground = false;
+        }
+        w.set_block_id(3, 64, 4, 3); // dirt
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        // Dig for 12 ticks while jumping.
+        // cur_damage accumulates 12 * (0.0667 / 5) = ~0.16
+        // BUT ground_damage accumulates 12 * 0.0667 = ~0.80 (>= 0.70)
+        for _ in 0..12 {
+            sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        }
+        assert!(sess.dig.cur_damage < 0.70, "airborne cur_damage is low: {}", sess.dig.cur_damage);
+        assert!(sess.dig.ground_damage >= 0.70, "ground_damage must be >= 0.70: {}", sess.dig.ground_damage);
+
+        // Status 3 must succeed without false rollback because ground_damage >= 0.70!
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        assert_eq!(w.get_block_id(3, 64, 4), 0, "airborne block must be harvested on status 3 via ground_damage tolerance");
+        assert!(!sess.dig.has_target);
     }
 
     #[test]
