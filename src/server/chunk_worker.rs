@@ -4,11 +4,12 @@
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{Builder, JoinHandle};
 
-/// Raw chunk terrain output from the background worker.
+/// Output from the background worker: a fully constructed Box<Chunk> with
+/// terrain generated, height map built, skylight calculated, and pre-compressed.
 pub struct GeneratedRawChunk {
     pub cx: i32,
     pub cz: i32,
-    pub blocks: Box<[u8; 32768]>,
+    pub chunk: Box<crate::chunk::Chunk>,
 }
 
 /// Background worker running terrain generation off-thread.
@@ -31,21 +32,24 @@ impl ChunkGenWorker {
                 use crate::generator::{generate_chunk, ChunkProvider};
 
                 let mut gen = ChunkProvider::new(seed);
+                let mut biomes = [MobSpawnerBase::DEFAULT; 256];
+                let mut temps = [0.0f64; 256];
+                let mut humids = [0.0f64; 256];
                 while let Ok((cx, cz)) = req_rx.recv() {
-                    let mut blocks = Box::new([0u8; 32768]);
-                    let mut biomes = [MobSpawnerBase::DEFAULT; 256];
-                    let mut temps = [0.0f64; 256];
-                    let mut humids = [0.0f64; 256];
+                    let mut chunk = Box::new(crate::chunk::Chunk::new(cx, cz));
                     generate_chunk(
                         &mut gen,
                         cx,
                         cz,
-                        &mut blocks,
+                        chunk.blocks_mut(),
                         &mut biomes,
                         &mut temps,
                         &mut humids,
                     );
-                    if resp_tx.send(GeneratedRawChunk { cx, cz, blocks }).is_err() {
+                    chunk.generate_height_map();
+                    chunk.generate_skylight_map();
+                    let _ = chunk.map_compressed();
+                    if resp_tx.send(GeneratedRawChunk { cx, cz, chunk }).is_err() {
                         break;
                     }
                 }
@@ -94,6 +98,6 @@ mod tests {
             &mut humids,
         );
 
-        assert_eq!(*result.blocks, *sync_blocks);
+        assert_eq!(result.chunk.blocks(), &*sync_blocks);
     }
 }

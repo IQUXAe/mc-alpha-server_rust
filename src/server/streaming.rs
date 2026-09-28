@@ -103,11 +103,7 @@ impl Server {
                 if !self.world.has_chunk(raw.cx, raw.cz) && !self.world.recall_chunk(raw.cx, raw.cz) {
                     let _ = self.world.load_chunk_from(&mut self.store, raw.cx, raw.cz);
                     if !self.world.has_chunk(raw.cx, raw.cz) {
-                        const ZERO_META: [u8; 32768] = [0u8; 32768];
-                        let mut c = crate::chunk::Chunk::new(raw.cx, raw.cz);
-                        c.load_arrays(&raw.blocks, &ZERO_META);
-                        c.generate_skylight_map();
-                        self.world.insert_chunk(c);
+                        self.world.insert_chunk_boxed(raw.chunk);
                     }
                 }
             }
@@ -190,15 +186,17 @@ impl Server {
             }
             play.outbox.push(pkt_pre_chunk(qx, qz, true));
             if let Some(chunk) = self.world.chunk_ref(qx, qz) {
-                play.outbox.push(pkt_map_chunk(
-                    qx * 16,
-                    0,
-                    qz * 16,
-                    16,
-                    128,
-                    16,
-                    &chunk.map_compressed(),
-                ));
+                chunk.with_map_compressed(|data| {
+                    play.outbox.push(pkt_map_chunk(
+                        qx * 16,
+                        0,
+                        qz * 16,
+                        16,
+                        128,
+                        16,
+                        data,
+                    ));
+                });
             }
             // Tile entities ride the chunk like C++ (row order is map
             // order on both sides).

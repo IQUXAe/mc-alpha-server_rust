@@ -207,6 +207,25 @@ impl Chunk {
         }
     }
 
+    /// Explicitly clear the cached compressed map to free memory (e.g. on chunk unload).
+    #[inline]
+    pub fn clear_compressed_cache(&mut self) {
+        self.invalidate_cache();
+    }
+
+    /// Reference to raw chunk blocks array.
+    #[inline]
+    pub fn blocks(&self) -> &[u8; CHUNK_VOLUME] {
+        &self.blocks
+    }
+
+    /// Mutable reference to raw chunk blocks array. Invalidates cached compression.
+    #[inline]
+    pub fn blocks_mut(&mut self) -> &mut [u8; CHUNK_VOLUME] {
+        self.invalidate_cache();
+        &mut self.blocks
+    }
+
     /// Index formula matching Alpha exactly: `x << 11 | z << 7 | y`.
     ///
     /// Callers must bounds-check first; the value is meaningless for OOB
@@ -425,14 +444,12 @@ impl Chunk {
         raw
     }
 
-    /// zlib-compressed map payload at level 1 (mirrors the
-    /// Compressed tail of chunk data;
-    /// empty on I/O failure like the other codecs here).
-    /// Result is cached until chunk blocks or lighting change.
-    pub fn map_compressed(&self) -> Vec<u8> {
+    /// View the cached or freshly-compressed chunk map data via closure,
+    /// avoiding intermediate `Vec<u8>` cloning.
+    pub fn with_map_compressed<R, F: FnOnce(&[u8]) -> R>(&self, f: F) -> R {
         if let Ok(guard) = self.cached_map_compressed.lock() {
             if let Some(ref cached) = *guard {
-                return cached.clone();
+                return f(cached);
             }
         }
         use std::io::Read;
@@ -440,14 +457,25 @@ impl Chunk {
         let mut encoder =
             flate2::read::ZlibEncoder::new(raw.as_slice(), flate2::Compression::new(1));
         let mut out = Vec::new();
-        if encoder.read_to_end(&mut out).is_err() {
-            return Vec::new();
+        if encoder.read_to_end(&mut out).is_ok() {
+            if let Ok(mut guard) = self.cached_map_compressed.lock() {
+                *guard = Some(out);
+                if let Some(ref cached) = *guard {
+                    return f(cached);
+                }
+            }
         }
-        if let Ok(mut guard) = self.cached_map_compressed.lock() {
-            *guard = Some(out.clone());
-        }
-        out
+        f(&[])
     }
+
+    /// zlib-compressed map payload at level 1 (mirrors the
+    /// Compressed tail of chunk data;
+    /// empty on I/O failure like the other codecs here).
+    /// Result is cached until chunk blocks or lighting change.
+    pub fn map_compressed(&self) -> Vec<u8> {
+        self.with_map_compressed(|data| data.to_vec())
+    }
+
 
     /// Mirrors `getSavedLightValue`: `0` = sky, anything else = block.
     pub fn get_saved_light_value(&self, light_type: i32, x: i32, y: i32, z: i32) -> u8 {
@@ -1042,5 +1070,21 @@ mod tests {
         assert!(chunk.cached_map_compressed.lock().unwrap().is_some());
         chunk.generate_skylight_map();
         assert!(chunk.cached_map_compressed.lock().unwrap().is_none());
+
+        // with_map_compressed reads without cloning
+        let len = chunk.with_map_compressed(|data| data.len());
+        assert!(len > 0);
+        assert!(chunk.cached_map_compressed.lock().unwrap().is_some());
+
+        // clear_compressed_cache frees memory
+        chunk.clear_compressed_cache();
+        assert!(chunk.cached_map_compressed.lock().unwrap().is_none());
+
+        // blocks_mut invalidates cache
+        let _ = chunk.map_compressed();
+        assert!(chunk.cached_map_compressed.lock().unwrap().is_some());
+        chunk.blocks_mut()[0] = 7;
+        assert!(chunk.cached_map_compressed.lock().unwrap().is_none());
+        assert_eq!(chunk.blocks()[0], 7);
     }
 }
