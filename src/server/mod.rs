@@ -82,19 +82,31 @@ pub const MAX_PACKETS_PER_TICK: usize = 50;
 pub const LOGIN_ATTEMPTS_MAX: u32 = 5;
 /// Sliding window for the per-IP login throttle, in ticks.
 pub const LOGIN_WINDOW_TICKS: u64 = 200;
+/// Portals need this many consecutive ticks inside a portal block
+/// before travel fires (~3s, like the later vanilla dwell; Alpha has
+/// no travel at all — `BlockPortal.onEntityCollidedWithBlock` is a
+/// singleplayer-only no-op on servers).
+pub const PORTAL_DWELL_TICKS: u16 = 60;
+/// Post-travel grace ticks before portals can fire again (anti
+/// ping-pong: one stand must not bounce the player back and forth).
+pub const PORTAL_COOLDOWN_TICKS: u16 = 100;
+/// Nether coordinate scale (overworld <-> hell). Custom (vanilla Alpha
+/// has no travel); 1:8 matches the later convention and keeps far
+/// overworld builds inside int range after scaling.
+pub const NETHER_SCALE: f64 = 8.0;
 /// Opaque connection handle.
 pub type ConnId = u64;
 
-/// Chunk key for the in-memory maps (low u32 = x, high u32 = z).
+/// Chunk-map key for the in-memory maps: `(dimension, chunk_x, chunk_z)`.
+/// A triple (not the old packed `i64`) so overworld and hell chunks
+/// never alias in `sent` sets or the fan-out map.
 /// NOTE: intentionally different from the LevelDB `chunk_key_bytes`
 /// layout in persist.rs; the two key spaces never mix.
-pub fn chunk_key(x: i32, z: i32) -> i64 {
-    (x as u32 as i64) | ((z as u32 as i64) << 32)
-}
+pub type ChunkMapKey = (i32, i32, i32);
 
-/// Inverse of [`chunk_key`] (mirrors the C++ decode in the unload pass).
-pub fn chunk_of_key(key: i64) -> (i32, i32) {
-    ((key & 0xFFFF_FFFF) as u32 as i32, ((key >> 32) & 0xFFFF_FFFF) as u32 as i32)
+/// Build a [`ChunkMapKey`] from dimension + chunk coords.
+pub fn chunk_map_key(dim: i32, x: i32, z: i32) -> ChunkMapKey {
+    (dim, x, z)
 }
 
 pub const LISTENER_TOKEN: mio::Token = mio::Token(usize::MAX - 1);
@@ -104,7 +116,15 @@ pub struct Server {
     pub settings: Settings,
     pub world: World,
     pub store: ChunkStore,
+    /// Hell dimension (None when `hell-enabled=false`). Ticks alongside
+    /// the overworld; entities live in exactly one world at a time.
+    pub hell: Option<World>,
+    /// Hell chunk blobs (`{level_dir}/DIM-1/db`, like vanilla's DIM-1
+    /// loader dir). None mirrors `hell`.
+    pub hell_store: Option<ChunkStore>,
+    pub hell_enabled: bool,
     pub level_dir: String,
+    pub hell_level_dir: String,
     pub player_dir: String,
     pub ops: HashSet<String>,
     pub banned_players: BTreeSet<String>,
@@ -114,7 +134,7 @@ pub struct Server {
     pub banned_ips_path: String,
     pub sessions: HashMap<ConnId, Session>,
     pub players: HashMap<EntityId, ConnId>,
-    pub players_by_chunk: HashMap<i64, HashSet<EntityId>>,
+    pub players_by_chunk: HashMap<ChunkMapKey, HashSet<EntityId>>,
     pub next_conn: ConnId,
     pub ip_count: HashMap<String, i32>,
     /// Per-IP login throttle state: window-start tick + accepts in window.
@@ -128,12 +148,14 @@ pub struct Server {
     pub waker: std::sync::Arc<mio::Waker>,
     pub listener: Option<mio::net::TcpListener>,
     pub chunk_worker: Option<chunk_worker::ChunkGenWorker>,
-    pub pending_chunk_gens: HashSet<(i32, i32)>,
+    pub pending_chunk_gens: HashSet<(i32, i32, i32)>,
     pub tracker_scratch: TrackerScratch,
     pub cids_scratch: Vec<ConnId>,
     pub health_scratch: Vec<(ConnId, i8)>,
-    pub sent_tiles_scratch: HashSet<(i32, i32, i32)>,
+    pub sent_tiles_scratch: HashSet<(i32, i32, i32, i32)>,
     pub store_missing: HashSet<(i32, i32)>,
+    /// Negative cache for hell store misses (mirrors `store_missing`).
+    pub store_missing_hell: HashSet<(i32, i32)>,
     pub chunks_generated_this_tick: i32,
 }
 

@@ -29,6 +29,10 @@ pub struct Settings {
     pub level_name: String,
     pub seed: i64,
     pub dimension: i8,
+    /// In vanilla Alpha 1.2.6, the server exclusively runs either Nether
+    /// (`hellworld=true`, dimension -1) or Overworld (`hellworld=false`, dimension 0).
+    pub hellworld: bool,
+    pub hell_enabled: bool,
     pub auth_server_url: String,
 }
 
@@ -84,6 +88,9 @@ pub fn load_settings(cfg: &mut ServerConfig) -> Settings {
     } else {
         java_string_hash(&level_seed)
     };
+    let is_hell = cfg.get_bool("hellworld", false)
+        || cfg.get("dimension").map(|s| s.trim() == "-1").unwrap_or(false)
+        || cfg.get_bool("hell-enabled", false);
     Settings {
         server_ip: cfg.get_string("server-ip", ""),
         port: cfg.get_int("server-port", 25565),
@@ -102,7 +109,9 @@ pub fn load_settings(cfg: &mut ServerConfig) -> Settings {
             .max(1),
         level_name: cfg.get_string("level-name", "world"),
         seed,
-        dimension: if cfg.get_bool("hellworld", false) { -1 } else { 0 },
+        dimension: if is_hell { -1 } else { 0 },
+        hellworld: is_hell,
+        hell_enabled: is_hell,
         auth_server_url: cfg.get_string(
             "auth-server-url",
             crate::session::login::DEFAULT_AUTH_URL,

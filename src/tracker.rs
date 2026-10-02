@@ -29,6 +29,10 @@ pub enum TrackKind {
     Arrow,
     Boat,
     Mob { mob_type: u8 },
+    /// Generic `Packet23VehicleSpawn` by notch vehicle type id:
+    /// snowball 61, fish hook 90, fireball 65, minecart 10 (+1 chest,
+    /// +2 furnace), primed TNT 50. Same wire shape as arrow/boat.
+    Vehicle { vehicle_type: i8 },
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +90,26 @@ impl TrackedEntity {
             },
             Entity::Arrow(_) => TrackedEntity { kind: TrackKind::Arrow, ..base },
             Entity::Boat(_) => TrackedEntity { kind: TrackKind::Boat, ..base },
+            Entity::Snowball(_) => TrackedEntity {
+                kind: TrackKind::Vehicle { vehicle_type: 61 },
+                ..base
+            },
+            Entity::FishHook(_) => TrackedEntity {
+                kind: TrackKind::Vehicle { vehicle_type: 90 },
+                ..base
+            },
+            Entity::Fireball(_) => TrackedEntity {
+                kind: TrackKind::Vehicle { vehicle_type: 65 },
+                ..base
+            },
+            Entity::Minecart(m) => TrackedEntity {
+                kind: TrackKind::Vehicle { vehicle_type: 10 + m.cart_type as i8 },
+                ..base
+            },
+            Entity::Tnt(_) => TrackedEntity {
+                kind: TrackKind::Vehicle { vehicle_type: 50 },
+                ..base
+            },
             Entity::Mob(m) => TrackedEntity {
                 kind: TrackKind::Mob { mob_type: mob_type_id(m.kind) },
                 health: Some(m.living.health),
@@ -256,6 +280,13 @@ fn encode_spawn(e: &TrackedEntity) -> Vec<u8> {
         TrackKind::Boat => encode(Packet::VehicleSpawn {
             entity_id: e.id,
             vehicle_type: 1,
+            x: fx,
+            y: fy,
+            z: fz,
+        }),
+        TrackKind::Vehicle { vehicle_type } => encode(Packet::VehicleSpawn {
+            entity_id: e.id,
+            vehicle_type: *vehicle_type,
             x: fx,
             y: fy,
             z: fz,
@@ -811,6 +842,11 @@ mod tests {
             path_index: 0,
             swell_time: 0,
             swell_dir: -1,
+            slime_size: 1,
+            anger: 0,
+            waypoint: [0.0; 3],
+            has_waypoint: false,
+            shoot_cooldown: 0,
         }));
         let row = table.get(id).unwrap();
         let tracked = TrackedEntity::from_entity(row, 0, 160, 3, false).unwrap();

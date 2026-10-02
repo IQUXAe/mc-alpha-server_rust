@@ -201,7 +201,10 @@ impl Server {
         let lower = admin_normalize(name);
         self.players.keys().find_map(|eid| match self.world.entities.get(*eid) {
             Some(Entity::Player(p)) if admin_normalize(&p.username) == lower => Some(*eid),
-            _ => None,
+            _ => match self.hell.as_ref().and_then(|h| h.entities.get(*eid)) {
+                Some(Entity::Player(p)) if admin_normalize(&p.username) == lower => Some(*eid),
+                _ => None,
+            },
         })
     }
 
@@ -286,20 +289,35 @@ impl Server {
             "skeleton" => Kind::Mob(MobKind::Skeleton),
             "spider" => Kind::Mob(MobKind::Spider),
             "creeper" => Kind::Mob(MobKind::Creeper),
+            "giant" => Kind::Mob(MobKind::Giant),
+            "slime" => Kind::Mob(MobKind::Slime),
+            "ghast" => Kind::Mob(MobKind::Ghast),
+            "pigzombie" | "pigman" | "zombiepig" => Kind::Mob(MobKind::PigZombie),
             _ => {
                 log::info(&format!(
-                    "Unknown mob {raw_name}. Try pig/sheep/cow/chicken/zombie/skeleton/spider/creeper."
+                    "Unknown mob {raw_name}. Try pig/sheep/cow/chicken/zombie/skeleton/spider/creeper/giant/slime/ghast/pigzombie."
                 ));
                 return;
             }
         };
         let apos = match self.world.entities.get(anchor) {
             Some(e) => e.body().pos,
-            None => return,
+            None => match self.hell.as_ref().and_then(|h| h.entities.get(anchor)) {
+                Some(e) => e.body().pos,
+                None => return,
+            },
         };
         let anchor_name = match self.world.entities.get(anchor) {
             Some(Entity::Player(p)) => p.username.clone(),
-            _ => String::new(),
+            _ => match self.hell.as_ref().and_then(|h| h.entities.get(anchor)) {
+                Some(Entity::Player(p)) => p.username.clone(),
+                _ => String::new(),
+            },
+        };
+        let anchor_dim = if self.world.entities.get(anchor).is_some() {
+            self.world.dimension as i32
+        } else {
+            -1
         };
         let count = count.clamp(1, 64);
         for i in 0..count {
@@ -307,8 +325,37 @@ impl Server {
             let radius = 2.0 + (i % 3) as f64;
             let sx = apos[0] + angle.cos() * radius;
             let sz = apos[2] + angle.sin() * radius;
-            let ground = self.world.get_height_value(sx.floor() as i32, sz.floor() as i32) as f64;
-            let sy = apos[1].max(ground);
+            // Summon into the anchor's dimension (world methods below
+            // route on it explicitly).
+            if anchor_dim == -1 && self.hell.is_some() {
+                let Some(hell) = self.hell.as_mut() else { return };
+                let sy = apos[1];
+                let id = hell.entities.alloc_id();
+                let yaw = hell.rng_next_f32() * 360.0;
+                match kind {
+                    Kind::Mob(k) => {
+                        let mut m = MobEnt::new(id, k);
+                        m.living.body.set_position(sx, sy, sz);
+                        m.living.body.yaw = yaw;
+                        m.living.body.dimension = -1;
+                        hell.entities.insert(Entity::Mob(m));
+                    }
+                    Kind::Animal(k) => {
+                        let mut a = AnimalEnt::new(id, k);
+                        a.living.body.set_position(sx, sy, sz);
+                        a.living.body.yaw = yaw;
+                        a.living.body.dimension = -1;
+                        hell.entities.insert(Entity::Animal(a));
+                    }
+                }
+                continue;
+            }
+            let sy = if self.world.dimension == -1 {
+                apos[1]
+            } else {
+                let ground = self.world.get_height_value(sx.floor() as i32, sz.floor() as i32) as f64;
+                apos[1].max(ground)
+            };
             let id = self.world.entities.alloc_id();
             let yaw = self.world.rng_next_f32() * 360.0;
             match kind {
@@ -316,12 +363,14 @@ impl Server {
                     let mut m = MobEnt::new(id, k);
                     m.living.body.set_position(sx, sy, sz);
                     m.living.body.yaw = yaw;
+                    m.living.body.dimension = self.world.dimension;
                     self.world.entities.insert(Entity::Mob(m));
                 }
                 Kind::Animal(k) => {
                     let mut a = AnimalEnt::new(id, k);
                     a.living.body.set_position(sx, sy, sz);
                     a.living.body.yaw = yaw;
+                    a.living.body.dimension = self.world.dimension;
                     self.world.entities.insert(Entity::Animal(a));
                 }
             }

@@ -52,6 +52,21 @@
                 }
             }
         }
+        if let Some(hell) = s.hell.as_mut() {
+            hell.unload_radius = 20;
+            let (hcx, hcz) = (hell.spawn[0].div_euclid(16), hell.spawn[2].div_euclid(16));
+            for cx in hcx - 9..=hcx + 9 {
+                for cz in hcz - 9..=hcz + 9 {
+                    if !hell.has_chunk(cx, cz) {
+                        let mut c = crate::chunk::Chunk::new(cx, cz);
+                        c.is_terrain_populated = true;
+                        hell.insert_chunk(c);
+                    } else if let Some(c) = hell.chunk_ref_mut(cx, cz) {
+                        c.is_terrain_populated = true;
+                    }
+                }
+            }
+        }
         s
     }
 
@@ -174,8 +189,10 @@
                 r_skip(c, 4);
                 r_str(c);
                 r_str(c);
-                r_skip(c, 9);
-                String::new()
+                r_skip(c, 8);
+                let mut dim = [0u8; 1];
+                c.read_exact(&mut dim).unwrap();
+                format!("{}", dim[0] as i8)
             }
             2 | 3 | 255 => r_str(c),
             4 => {
@@ -1165,5 +1182,255 @@
         assert_eq!(srv.world.tick_ids.capacity(), tick_cap_before);
         assert_eq!(srv.world.pickup_items_scratch.capacity(), pickup_items_cap_before);
         assert_eq!(srv.world.pickup_players_scratch.capacity(), pickup_players_cap_before);
+    }
+
+
+    #[test]
+    fn overworld_mode_by_default() {
+        let mut srv = mk_server("");
+        assert_eq!(srv.world.dimension, 0);
+        assert_eq!(srv.settings.dimension, 0);
+        let (mut client, _cid) = pair(&mut srv);
+        client.write_all(&cli_handshake("Steve")).unwrap();
+        assert_eq!(pump_until(&mut client, &mut srv).0, 2);
+        client.write_all(&cli_login(6, "Steve")).unwrap();
+        let lp = pump_until(&mut client, &mut srv);
+        assert_eq!(lp.0, 1);
+        assert_eq!(lp.1, "0", "Packet1Login must send dimension 0");
+    }
+
+    #[test]
+    fn hellworld_property_enables_nether_mode() {
+        let mut srv = mk_server("hellworld=true\n");
+        assert_eq!(srv.world.dimension, -1);
+        assert_eq!(srv.settings.dimension, -1);
+        assert_eq!(srv.world.calculate_skylight_subtracted(), 7);
+        let (mut client, _cid) = pair(&mut srv);
+        client.write_all(&cli_handshake("Steve")).unwrap();
+        assert_eq!(pump_until(&mut client, &mut srv).0, 2);
+        client.write_all(&cli_login(6, "Steve")).unwrap();
+        let lp = pump_until(&mut client, &mut srv);
+        assert_eq!(lp.0, 1);
+        assert_eq!(lp.1, "-1", "Packet1Login must send dimension -1");
+    }
+
+    #[test]
+    fn hellworld_disabled_by_property() {
+        let mut srv = mk_server("hellworld=false\n");
+        assert_eq!(srv.world.dimension, 0);
+        assert_eq!(srv.settings.dimension, 0);
+        let (mut client, _cid) = pair(&mut srv);
+        client.write_all(&cli_handshake("Steve")).unwrap();
+        assert_eq!(pump_until(&mut client, &mut srv).0, 2);
+        client.write_all(&cli_login(6, "Steve")).unwrap();
+        let lp = pump_until(&mut client, &mut srv);
+        assert_eq!(lp.0, 1);
+        assert_eq!(lp.1, "0", "Packet1Login must send dimension 0");
+    }
+
+    #[test]
+    fn portal_collision_does_not_teleport_in_smp() {
+        let mut srv = mk_server("");
+        let (mut client, _cid) = pair(&mut srv);
+        join(&mut srv, &mut client, "Steve");
+        let eid = *srv.players.keys().next().unwrap();
+        let (px, py, pz) = match srv.world.entities.get(eid) {
+            Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+            _ => panic!("player row"),
+        };
+        let (bx, by, bz) = (px.floor() as i32, py.floor() as i32, pz.floor() as i32);
+        srv.world.set_block_id(bx, by, bz, 90);
+        srv.world.set_block_id(bx, by + 1, bz, 90);
+        // Dwell past the 60-tick threshold
+        for _ in 0..70 {
+            srv.tick();
+        }
+        // In vanilla Alpha 1.2.6 SMP, portals do not teleport
+        assert!(srv.world.entities.get(eid).is_some(), "row must stay in overworld");
+        assert_eq!(srv.world.entities.get(eid).unwrap().body().dimension, 0);
+    }
+
+    #[test]
+    fn portal_frame_validation_leaves_no_orphan_obsidian() {
+        let mut srv = mk_server("");
+        let fx = 10;
+        let iy = 64;
+        let fz = 10;
+        // Place stone at one of the frame positions:
+        srv.world.set_block_id(fx + 2, iy + 3, fz, 1);
+        let ok = srv.try_portal_frame(0, fx, iy, fz);
+        assert!(!ok, "try_portal_frame should fail when frame is obstructed by stone");
+        // Verify no obsidian was placed anywhere around the frame:
+        for ih in -1..=2 {
+            for iv in -1..=3 {
+                let b = srv.world.get_block_id(fx + ih, iy + iv, fz);
+                assert_ne!(b, 49, "no obsidian should be placed on failed portal frame");
+            }
+        }
+    }
+
+    #[test]
+    fn console_summon_nether_uses_anchor_y() {
+        let mut srv = mk_server("hellworld=true\n");
+        let (mut client, _cid) = pair(&mut srv);
+        join(&mut srv, &mut client, "Steve");
+        let eid = *srv.players.keys().next().unwrap();
+        // Move player into hell at Y = 40.0
+        if let Some(e) = srv.world.entities.get_mut(eid) {
+            e.body_mut().set_position(10.0, 40.0, 10.0);
+        }
+
+        // Summon a pigzombie targeting Steve
+        srv.queue_console("summon pigzombie 1 Steve".to_string());
+        srv.tick();
+
+        let summoned = srv.world
+            .entities
+            .alive_ids()
+            .iter()
+            .filter(|id| **id != eid)
+            .find_map(|id| srv.world.entities.get(*id))
+            .expect("pigzombie should be spawned in hell");
+
+        let sy = summoned.body().pos[1];
+        assert_eq!(sy, 40.0, "summon in hell must use player's anchor Y, not heightmap");
+        assert_eq!(summoned.body().dimension, -1);
+    }
+
+    #[test]
+    fn test_respawn_in_hellworld() {
+        let mut srv = mk_server("hellworld=true\n");
+        let (mut client, _cid) = pair(&mut srv);
+        join(&mut srv, &mut client, "Steve");
+        let eid = *srv.players.keys().next().unwrap();
+
+        // Simulate death
+        if let Some(Entity::Player(ref mut pl)) = srv.world.entities.get_mut(eid) {
+            pl.living.health = 0;
+            pl.living.body.dead = true;
+            pl.living.body.set_position(100.0, 50.0, 100.0);
+        }
+
+        // Send Respawn packet (Packet 9)
+        client.write_all(&[9u8]).unwrap();
+
+        for _ in 0..5 {
+            srv.tick();
+        }
+
+        let player = srv.world.entities.get(eid).expect("Player should be alive in world");
+        assert_eq!(player.body().dimension, -1, "Player dimension must be -1 (Hell)");
+        assert!(!player.body().dead);
+        if let Entity::Player(ref pl) = player {
+            assert_eq!(pl.living.health, 20);
+        }
+        let sp = srv.world.spawn;
+        let pos = player.body().pos;
+        assert_eq!(pos[0].floor() as i32, sp[0]);
+        assert_eq!(pos[2].floor() as i32, sp[2]);
+    }
+
+    #[test]
+    fn test_portal_placement_requires_solid_ground() {
+        let mut srv = mk_server("");
+        let fx = 20;
+        let iy = 64;
+        let fz = 20;
+
+        // Clear area around portal (make it all air, including under feet)
+        for dx in -2..=3 {
+            for dy in -2..=5 {
+                for dz in -2..=2 {
+                    srv.world.set_block_id(fx + dx, iy + dy, fz + dz, 0);
+                }
+            }
+        }
+
+        // Without solid ground under portal opening (iy - 1 is air), try_portal_frame must fail
+        assert!(!srv.try_portal_frame(0, fx, iy, fz), "Portal must fail when floor is air");
+
+        // Now place solid stone under the 4-block base (ih in -1..=2 at iy - 1)
+        for ih in -1..=2 {
+            srv.world.set_block_id(fx + ih, iy - 1, fz, 1);
+        }
+
+        // Now try_portal_frame should succeed
+        assert!(srv.try_portal_frame(0, fx, iy, fz), "Portal should succeed with solid ground under base");
+    }
+
+    #[test]
+    fn test_hellworld_block_change_broadcast_to_players() {
+        let mut srv = mk_server("hellworld=true\n");
+        let (mut client, _cid) = pair(&mut srv);
+        join(&mut srv, &mut client, "Steve");
+
+        let sp = srv.world.spawn;
+        srv.world.apply_set_notify(sp[0], 64, sp[2], 1);
+        srv.tick();
+
+        let mut has_block_change = false;
+        while let Some((id, _)) = next_pkt_opt(&mut client, Duration::from_millis(50)) {
+            if id == 53 {
+                has_block_change = true;
+                break;
+            }
+        }
+        assert!(has_block_change, "In hellworld=true, players in the chunk must receive block change updates!");
+    }
+
+    #[test]
+    fn test_hellworld_fire_extinguish_broadcasts_to_watchers() {
+        let mut srv = mk_server("hellworld=true\nspawn-protection=0\n");
+        srv.ops.insert("steve".to_string());
+        let (mut c1, _cid1) = pair(&mut srv);
+        join(&mut srv, &mut c1, "Steve");
+        let (mut c2, _cid2) = pair(&mut srv);
+        join(&mut srv, &mut c2, "Alex");
+
+        let eid = *srv.players.iter().find(|(_, &cid)| cid == _cid1).map(|(e, _)| e).unwrap();
+        let steve_pos = srv.world.entities.get(eid).unwrap().body().pos;
+        let (bx, by, bz) = (
+            steve_pos[0].floor() as i32 + 1,
+            steve_pos[1].floor() as i32 - 1,
+            steve_pos[2].floor() as i32,
+        );
+        let fire_y = by + 1;
+        // Netherrack at by, fire on top at fire_y
+        srv.world.set_block_id(bx, by, bz, 87);
+        srv.world.set_block_id(bx, fire_y, bz, 51);
+
+        // Steve clicks support block with face 1 (top) to extinguish fire: Packet 14 (status = 0, x, y, z, face = 1)
+        let mut dig_pkt = vec![14u8, 0];
+        dig_pkt.extend_from_slice(&bx.to_be_bytes());
+        dig_pkt.push(by as u8);
+        dig_pkt.extend_from_slice(&bz.to_be_bytes());
+        dig_pkt.push(1u8);
+        c1.write_all(&dig_pkt).unwrap();
+
+        for _ in 0..40 {
+            srv.tick();
+            if srv.world.get_block_id(bx, fire_y, bz) == 0 {
+                break;
+            }
+        }
+
+        assert_eq!(srv.world.get_block_id(bx, fire_y, bz), 0, "Fire must be extinguished in hellworld");
+        assert_eq!(srv.world.get_block_id(bx, by, bz), 87, "Netherrack must not be broken");
+
+        // Alex (watcher) must receive Packet 53 showing fire is extinguished
+        let mut alex_got_bc = false;
+        for _ in 0..40 {
+            srv.tick();
+            while let Some((id, _)) = next_pkt_opt(&mut c2, Duration::from_millis(50)) {
+                if id == 53 {
+                    alex_got_bc = true;
+                    break;
+                }
+            }
+            if alex_got_bc {
+                break;
+            }
+        }
+        assert!(alex_got_bc, "Watchers in hellworld must receive block change when fire is extinguished");
     }
 
