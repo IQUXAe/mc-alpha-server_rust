@@ -36,6 +36,13 @@ pub struct PlaySession {
     /// the teleported spot are stale pre-teleport traffic and are held,
     /// never kicked (this is what made respawn disconnect far travelers).
     pub teleport_wait: Option<[f64; 3]>,
+    /// Portal dwell ticks: standing in a portal block (90) counts up,
+    /// travel fires at [`crate::server::PORTAL_DWELL_TICKS`]. Reset when
+    /// leaving the portal or switching dimensions.
+    pub portal_ticks: u16,
+    /// Post-travel grace ticks (no portal pickup, mirrors the vanilla
+    /// singleplayer portal cooldown so one stand doesn't ping-pong).
+    pub travel_cooldown: u16,
 }
 
 impl PlaySession {
@@ -52,6 +59,8 @@ impl PlaySession {
             gone: false,
             last_health: 20,
             teleport_wait: None,
+            portal_ticks: 0,
+            travel_cooldown: 0,
         }
     }
 

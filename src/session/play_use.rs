@@ -339,6 +339,17 @@ impl PlaySession {
                     true
                 }
             }
+            // Minecart (328): rails only (vanilla `ItemMinecart`).
+            328 => {
+                if !ctx.world.place_minecart(x, y, z) {
+                    false
+                } else {
+                    if s.count > 0 {
+                        s.count -= 1;
+                    }
+                    true
+                }
+            }
             2256 | 2257 => {
                 if !item_record_use(&mut u, pos, s.item_id) {
                     false
@@ -448,7 +459,8 @@ impl PlaySession {
     }
 
     /// Right-click in air (mirrors `useItem`: food bites with heal,
-    /// soup to bowl, buckets, and boats via aim+throw).
+    /// soup to bowl, buckets, bows, fishing rods, snowballs, and boats
+    /// via aim+throw).
     pub(crate) fn use_item_air(&mut self, ctx: &mut SessionCtx, mut s: ItemStack) -> bool {
         let me = self.player;
         let heal = item_food_heal(s.item_id);
@@ -567,6 +579,67 @@ impl PlaySession {
             self.send_block_change(ctx.world, hx, hy, hz);
             self.send_inventory(ctx.world);
             return false;
+        }
+        if s.item_id == 261 {
+            // Bow (vanilla `ItemBow.onItemRightClick` needs an arrow 262
+            // in the inventory; SMP extension — vanilla never spawns the
+            // arrow server-side). No draw cooldown in vanilla: fire rate
+            // is gated by click rate, the 50-packet/tick cap and the
+            // arrow supply itself. One arrow per shot.
+            let mut arrow_slot: Option<usize> = None;
+            if let Some(Entity::Player(p)) = ctx.world.entities.get(me) {
+                for (i, slot) in p.inventory.main.iter().enumerate() {
+                    if let Some(a) = slot {
+                        if a.item_id == 262 && a.count > 0 {
+                            arrow_slot = Some(i);
+                            break;
+                        }
+                    }
+                }
+            }
+            let Some(ai) = arrow_slot else {
+                self.send_inventory(ctx.world);
+                return false;
+            };
+            if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
+                if let Some(mut a) = p.inventory.main[ai] {
+                    a.count -= 1;
+                    p.inventory.main[ai] = if a.count > 0 { Some(a) } else { None };
+                }
+            }
+            ctx.world.spawn_player_arrow(me);
+            self.send_inventory(ctx.world);
+            return true;
+        }
+        if s.item_id == 346 {
+            // Fishing rod: live hook out → reel it in with the vanilla
+            // outcome (yank / catch / ground wear); else cast. One hook
+            // max per player (vanilla `field_6124_at` slot).
+            let live_hook = ctx.world.entities.alive_ids().into_iter().find(|oid| {
+                matches!(
+                    ctx.world.entities.get(*oid),
+                    Some(Entity::FishHook(f)) if f.owner_id == me && !f.body.dead
+                )
+            });
+            if let Some(hook) = live_hook {
+                ctx.world.reel_fishing(me, hook);
+                self.send_inventory(ctx.world);
+                return true;
+            }
+            ctx.world.cast_fishing(me);
+            self.send_inventory(ctx.world);
+            return true;
+        }
+        if s.item_id == 332 {
+            // Snowball throw (consumes one).
+            if s.count <= 0 {
+                return false;
+            }
+            s.count -= 1;
+            ctx.world.spawn_snowball(me);
+            self.write_back_current(ctx, s);
+            self.send_inventory(ctx.world);
+            return true;
         }
         if s.item_id == 333 {
             let (pyaw, ppitch, ppos, pyoff, prev_yaw, prev_pitch, prev_pos) =

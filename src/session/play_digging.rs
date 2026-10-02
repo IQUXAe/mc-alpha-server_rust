@@ -21,7 +21,7 @@ impl PlaySession {
         x: i32,
         y: i32,
         z: i32,
-        _face: i8,
+        face: i8,
     ) -> Option<SessionOutcome> {
         self.sync_held(ctx.world);
         if !(0..crate::world::WORLD_HEIGHT).contains(&y) {
@@ -44,6 +44,46 @@ impl PlaySession {
             crate::session::is_spawn_protected(x, z, sp, ctx.spawn_protection)
         };
         if status == 0 {
+            // Extinguish fire by hand:
+            // Since BlockFire (id 51) has no bounding box, clicking fire targets
+            // the support block (x, y, z) with `face` pointing towards the fire:
+            // 0: Y-1, 1: Y+1 (common), 2: Z-1, 3: Z+1, 4: X-1, 5: X+1.
+            let (fx, fy, fz) = match face {
+                0 => (x, y - 1, z),
+                1 => (x, y + 1, z),
+                2 => (x, y, z - 1),
+                3 => (x, y, z + 1),
+                4 => (x - 1, y, z),
+                5 => (x + 1, y, z),
+                _ => (x, y, z),
+            };
+            let fire_target = if ctx.world.get_block_id(x, y, z) == 51 {
+                Some((x, y, z))
+            } else if (0..crate::world::WORLD_HEIGHT).contains(&fy)
+                && ctx.world.get_block_id(fx, fy, fz) == 51
+            {
+                Some((fx, fy, fz))
+            } else {
+                None
+            };
+            if let Some((fire_x, fire_y, fire_z)) = fire_target {
+                let fire_prot = {
+                    let sp = ctx.world.spawn;
+                    crate::session::is_spawn_protected(fire_x, fire_z, sp, ctx.spawn_protection)
+                };
+                if fire_prot && !self.is_op(ctx) {
+                    self.send_block_change(ctx.world, fire_x, fire_y, fire_z);
+                    return None;
+                }
+                ctx.world.apply_set_notify(fire_x, fire_y, fire_z, 0);
+                self.send_block_change(ctx.world, fire_x, fire_y, fire_z);
+                if fire_x != x || fire_y != y || fire_z != z {
+                    self.send_block_change(ctx.world, x, y, z);
+                }
+                crate::player::digging::dig_cancel(&mut self.dig);
+                return None;
+            }
+
             if protected && !self.is_op(ctx) {
                 self.send_block_change(ctx.world, x, y, z);
                 return None;
@@ -89,6 +129,42 @@ impl PlaySession {
         } else if status == 2 {
             crate::player::digging::dig_cancel(&mut self.dig);
         } else if status == 1 {
+            let (fx, fy, fz) = match face {
+                0 => (x, y - 1, z),
+                1 => (x, y + 1, z),
+                2 => (x, y, z - 1),
+                3 => (x, y, z + 1),
+                4 => (x - 1, y, z),
+                5 => (x + 1, y, z),
+                _ => (x, y, z),
+            };
+            let fire_target = if ctx.world.get_block_id(x, y, z) == 51 {
+                Some((x, y, z))
+            } else if (0..crate::world::WORLD_HEIGHT).contains(&fy)
+                && ctx.world.get_block_id(fx, fy, fz) == 51
+            {
+                Some((fx, fy, fz))
+            } else {
+                None
+            };
+            if let Some((fire_x, fire_y, fire_z)) = fire_target {
+                let fire_prot = {
+                    let sp = ctx.world.spawn;
+                    crate::session::is_spawn_protected(fire_x, fire_z, sp, ctx.spawn_protection)
+                };
+                if fire_prot && !self.is_op(ctx) {
+                    self.send_block_change(ctx.world, fire_x, fire_y, fire_z);
+                    return None;
+                }
+                ctx.world.apply_set_notify(fire_x, fire_y, fire_z, 0);
+                self.send_block_change(ctx.world, fire_x, fire_y, fire_z);
+                if fire_x != x || fire_y != y || fire_z != z {
+                    self.send_block_change(ctx.world, x, y, z);
+                }
+                crate::player::digging::dig_cancel(&mut self.dig);
+                return None;
+            }
+
             if !protected || self.is_op(ctx) {
                 let bid = ctx.world.get_block_id(x, y, z);
                 if bid > 0 {
@@ -105,11 +181,22 @@ impl PlaySession {
                         self.dig.target_z = z;
                         self.dig.has_target = true;
                     }
-                    let input = self.dig_input(ctx, bid as i32);
-                    let done = dig_on_tick(&mut self.dig, x, y, z, input);
-                    self.dig_ticked_this_tick = true;
-                    if done {
+                    if same_target && (self.dig.cur_damage >= 1.0 || self.dig.ground_damage >= 1.0) {
+                        // Client did not send status 3, but continued sending status 1 past completion.
+                        // Fallback harvest to support synthetic test clients.
                         self.harvest(ctx, x, y, z);
+                        crate::player::digging::dig_cancel(&mut self.dig);
+                    } else {
+                        let input = self.dig_input(ctx, bid as i32);
+                        let done = dig_on_tick(&mut self.dig, x, y, z, input);
+                        self.dig_ticked_this_tick = true;
+                        if done {
+                            // Target reached 1.0: mark ready for status 3, but do NOT harvest
+                            // immediately on this packet so the client has time to send status 3
+                            // and spawn break particles.
+                            self.dig.cur_damage = 1.0;
+                            self.dig.ground_damage = 1.0;
+                        }
                     }
                 }
             }
@@ -140,6 +227,7 @@ impl PlaySession {
                         || (ground_hardness_tick > 0.0 && self.dig.ground_damage + ground_hardness_tick >= 0.70);
                     if ok {
                         self.harvest(ctx, x, y, z);
+                        crate::player::digging::dig_cancel(&mut self.dig);
                     }
                 }
             }

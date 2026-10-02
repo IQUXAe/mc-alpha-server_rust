@@ -60,6 +60,18 @@ impl PlaySession {
         if matches!(ctx.world.entities.get(target), Some(Entity::Arrow(_))) {
             return None;
         }
+        // Thrown shots, primed TNT and falling blocks are not
+        // interactable (vanilla has no use path for them either).
+        if matches!(
+            ctx.world.entities.get(target),
+            Some(Entity::Snowball(_))
+                | Some(Entity::FishHook(_))
+                | Some(Entity::Fireball(_))
+                | Some(Entity::Tnt(_))
+                | Some(Entity::Falling(_))
+        ) {
+            return None;
+        }
         if let Some(Entity::Player(_)) = ctx.world.entities.get(target) {
             if !ctx.pvp {
                 return None;
@@ -151,6 +163,25 @@ impl PlaySession {
                 ctx.world.entities.update_rider_position(target);
                 return None;
             }
+            // Minecart mount toggle (same rider rules as boats; carts
+            // carry a single rider).
+            if matches!(ctx.world.entities.get(target), Some(Entity::Minecart(_))) {
+                let rider =
+                    ctx.world.entities.get(target).map(|e| e.body().ridden_by).unwrap_or(-1);
+                if rider >= 0 && rider != me {
+                    let rider_is_player =
+                        matches!(ctx.world.entities.get(rider), Some(Entity::Player(_)));
+                    if rider_is_player {
+                        return None;
+                    }
+                    ctx.world.entities.mount(rider, None);
+                }
+                let riding =
+                    ctx.world.entities.get(me).map(|e| e.body().riding).unwrap_or(-1);
+                ctx.world.entities.mount(me, if riding == target { None } else { Some(target) });
+                ctx.world.entities.update_rider_position(target);
+                return None;
+            }
             return None;
         }
         // Left click: melee with the selected stack.
@@ -168,6 +199,10 @@ impl PlaySession {
         }
         if matches!(ctx.world.entities.get(target), Some(Entity::Boat(_))) {
             ctx.world.damage_boat(target, damage);
+            return None;
+        }
+        if matches!(ctx.world.entities.get(target), Some(Entity::Minecart(_))) {
+            ctx.world.damage_minecart(target, damage);
             return None;
         }
         ctx.world.attack_living(target, damage, Some(me));

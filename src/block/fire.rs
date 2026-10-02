@@ -283,7 +283,7 @@ mod tests {
         block_fire_tick(&mut w, 51, 10, p(0, 5, 0));
         assert_eq!(w.get_block_id(1, 5, 0), 51);
 
-        // 5. TNT catches, clears, and detonates (seed opens with
+        // 5. TNT catches, clears, and primes a visible entity (seed opens with
         // next_int(300) < 100, then next_int(2) == 1).
         let mut w = harness(0);
         stage(
@@ -292,7 +292,18 @@ mod tests {
         );
         block_fire_tick(&mut w, 51, 10, p(0, 5, 0));
         assert_eq!(w.get_block_id(1, 5, 0), 0);
-        assert_eq!(w.pending_tnt, vec![(1, 5, 0, 80)]);
+        let primed: Vec<_> = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .filter_map(|id| match w.entities.get(id) {
+                Some(crate::entity::table::Entity::Tnt(t)) => Some((t.body.pos, t.fuse)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(primed.len(), 1);
+        assert_eq!(primed[0].1, 80);
+        assert!((primed[0].0[0] - 1.5).abs() < 1e-9);
 
         // 6. Encouraged air next to the fire ignites through the spread loop
         // (air at +1 with planks at +2; seed opens with next_int(100) <= 5).

@@ -2070,6 +2070,46 @@
     }
 
     #[test]
+    fn test_damage_reaching_1_does_not_destroy_block_until_status_3() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        if let Some(e) = w.entities.get_mut(player) {
+            e.body_mut().on_ground = true;
+        }
+        w.set_block_id(3, 64, 4, 3); // dirt (takes 15 ticks bare hands)
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        // Send status 1 packets across 15 ticks so damage reaches 1.0
+        for _ in 0..15 {
+            sess.pump(
+                &mut ctx(&mut w, &ops, &mut bc),
+                PacketData::BlockDig { status: 1, x: 3, y: 64, z: 4, face: 1 },
+            );
+            sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        }
+
+        // Damage reached 1.0, but block must STILL be present (not prematurely destroyed)
+        // so client can play break particles and call sendBlockRemoved!
+        assert!(sess.dig.cur_damage >= 1.0, "cur_damage must be >= 1.0: {}", sess.dig.cur_damage);
+        assert_eq!(w.get_block_id(3, 64, 4), 3, "block must remain intact at damage 1.0 until status 3");
+
+        // Client sends status 3
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        assert_eq!(w.get_block_id(3, 64, 4), 0, "block must be harvested on status 3");
+    }
+
+    #[test]
     fn test_status_3_rejection_preserves_damage_and_target() {
         let mut w = floor_world();
         let ops = no_ops();
@@ -2198,4 +2238,269 @@
     }
 
 
+
+
+    // ---- bow / fishing / snowball / minecart (SMP extensions) ----
+
+    fn give_main(w: &mut World, id: EntityId, slot: usize, item: i32, count: i32) {
+        if let Some(Entity::Player(p)) = w.entities.get_mut(id) {
+            p.inventory.main[slot] = Some(ItemStack::new(item, count, 0));
+            p.inventory.current = 0;
+        }
+    }
+
+    #[test]
+    fn test_bow_shoots_and_consumes_arrow() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        give_main(&mut w, player, 0, 261, 1);
+        give_main(&mut w, player, 1, 262, 5);
+        // current is 0 (bow).
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+        let bow = match w.entities.get(player) {
+            Some(Entity::Player(p)) => p.inventory.main[0].unwrap(),
+            _ => unreachable!(),
+        };
+        assert!(sess.use_item_air(&mut ctx(&mut w, &ops, &mut bc), bow));
+        // One arrow entity, one arrow consumed, no cooldown (vanilla).
+        // (Spam is gated by click rate + the 50-packet/tick cap.)
+        let arrows = w.entities.alive_ids().into_iter().filter(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::Arrow(_)))
+        }).count();
+        assert_eq!(arrows, 1);
+        let left = match w.entities.get(player) {
+            Some(Entity::Player(p)) => p.inventory.main[1].map(|s| s.count).unwrap_or(0),
+            _ => 0,
+        };
+        assert_eq!(left, 4);
+        // Immediate second shot works too (no vanilla cooldown).
+        let bow2 = match w.entities.get(player) {
+            Some(Entity::Player(p)) => p.inventory.main[0].unwrap(),
+            _ => unreachable!(),
+        };
+        assert!(sess.use_item_air(&mut ctx(&mut w, &ops, &mut bc), bow2));
+        let left2 = match w.entities.get(player) {
+            Some(Entity::Player(p)) => p.inventory.main[1].map(|s| s.count).unwrap_or(0),
+            _ => 0,
+        };
+        assert_eq!(left2, 3);
+    }
+
+    #[test]
+    fn test_bow_needs_arrow() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        give_main(&mut w, player, 0, 261, 1);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+        let bow = match w.entities.get(player) {
+            Some(Entity::Player(p)) => p.inventory.main[0].unwrap(),
+            _ => unreachable!(),
+        };
+        assert!(!sess.use_item_air(&mut ctx(&mut w, &ops, &mut bc), bow));
+    }
+
+    #[test]
+    fn test_fishing_cast_and_reel() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        give_main(&mut w, player, 0, 346, 1);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+        let rod = match w.entities.get(player) {
+            Some(Entity::Player(p)) => p.inventory.main[0].unwrap(),
+            _ => unreachable!(),
+        };
+        assert!(sess.use_item_air(&mut ctx(&mut w, &ops, &mut bc), rod));
+        let hooks = w.entities.alive_ids().into_iter().filter(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::FishHook(_)))
+        }).count();
+        assert_eq!(hooks, 1);
+        // Second right-click reels in (no second hook).
+        let rod2 = match w.entities.get(player) {
+            Some(Entity::Player(p)) => p.inventory.main[0].unwrap(),
+            _ => unreachable!(),
+        };
+        assert!(sess.use_item_air(&mut ctx(&mut w, &ops, &mut bc), rod2));
+        let hooks2 = w.entities.alive_ids().into_iter().filter(|oid| {
+            matches!(
+                w.entities.get(*oid),
+                Some(Entity::FishHook(f)) if !f.body.dead
+            )
+        }).count();
+        assert_eq!(hooks2, 0);
+    }
+
+    #[test]
+    fn test_snowball_throw_consumes() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        give_main(&mut w, player, 0, 332, 3);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+        let ball = match w.entities.get(player) {
+            Some(Entity::Player(p)) => p.inventory.main[0].unwrap(),
+            _ => unreachable!(),
+        };
+        assert!(sess.use_item_air(&mut ctx(&mut w, &ops, &mut bc), ball));
+        let left = match w.entities.get(player) {
+            Some(Entity::Player(p)) => p.inventory.main[0].map(|s| s.count).unwrap_or(0),
+            _ => 0,
+        };
+        assert_eq!(left, 2);
+    }
+
+    #[test]
+    fn test_minecart_places_on_rails_only() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        // Rails at (4,64,4).
+        w.set_block_id(4, 64, 4, 66);
+        give_main(&mut w, player, 0, 328, 2);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+        // On-rail click places.
+        let out = sess.place(
+            &mut ctx(&mut w, &ops, &mut bc),
+            328, 4, 64, 4, 1,
+        );
+        assert!(out.is_none());
+        let carts = w.entities.alive_ids().into_iter().filter(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::Minecart(_)))
+        }).count();
+        assert_eq!(carts, 1);
+    }
+
+    #[test]
+    fn test_extinguish_fire_by_hand_on_support_block_face_1() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 2.0, 64.0, 2.0);
+        // Netherrack at (2, 63, 2), fire on top at (2, 64, 2)
+        w.set_block_id(2, 63, 2, 87);
+        w.set_block_id(2, 64, 2, 51);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // Click support block (2, 63, 2) with face 1 (top face)
+        let out = sess.dig(&mut ctx(&mut w, &ops, &mut bc), 0, 2, 63, 2, 1);
+        assert!(out.is_none());
+
+        // Fire must be extinguished (air = 0)
+        assert_eq!(w.get_block_id(2, 64, 2), 0, "Fire should be extinguished");
+        // Underlying block must remain intact
+        assert_eq!(w.get_block_id(2, 63, 2), 87, "Netherrack should not be harvested");
+        // Dig target should NOT be active
+        assert!(!sess.dig.has_target, "Should not latch dig target on fire extinguish");
+        // Block change packet for (2, 64, 2) must be sent
+        let has_bc = sess.outbox.iter().any(|pkt| {
+            pkt.first() == Some(&53) && pkt.len() >= 11
+        });
+        assert!(has_bc, "BlockChange packet must be sent for extinguished fire");
+    }
+
+    #[test]
+    fn test_extinguish_fire_by_hand_direct_click() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 2.0, 64.0, 2.0);
+        w.set_block_id(2, 64, 2, 51);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        let out = sess.dig(&mut ctx(&mut w, &ops, &mut bc), 0, 2, 64, 2, 1);
+        assert!(out.is_none());
+        assert_eq!(w.get_block_id(2, 64, 2), 0, "Direct clicked fire should be extinguished");
+        assert!(!sess.dig.has_target);
+    }
+
+    #[test]
+    fn test_extinguish_fire_by_hand_side_face() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 2.0, 64.0, 2.0);
+        // Wood at (3, 64, 2), fire at (2, 64, 2) (face 4 is X-1 from wood)
+        w.set_block_id(3, 64, 2, 17);
+        w.set_block_id(2, 64, 2, 51);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        let out = sess.dig(&mut ctx(&mut w, &ops, &mut bc), 0, 3, 64, 2, 4);
+        assert!(out.is_none());
+        assert_eq!(w.get_block_id(2, 64, 2), 0, "Fire on side face should be extinguished");
+        assert_eq!(w.get_block_id(3, 64, 2), 17, "Wood should remain untouched");
+    }
+
+    #[test]
+    fn test_digging_normal_block_when_no_fire() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 2.0, 64.0, 2.0);
+        w.set_block_id(2, 63, 2, 1);
+        w.set_block_id(2, 64, 2, 0); // No fire
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        let out = sess.dig(&mut ctx(&mut w, &ops, &mut bc), 0, 2, 63, 2, 1);
+        assert!(out.is_none());
+        assert_eq!(w.get_block_id(2, 63, 2), 1);
+        assert!(sess.dig.has_target, "Normal block should start being dug");
+        assert_eq!(sess.dig.target_x, 2);
+        assert_eq!(sess.dig.target_y, 63);
+        assert_eq!(sess.dig.target_z, 2);
+    }
+
+    #[test]
+    fn test_extinguish_fire_by_hand_syncs_support_block_if_different() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 2.0, 64.0, 2.0);
+        // Netherrack at (2, 63, 2), fire on top at (2, 64, 2)
+        w.set_block_id(2, 63, 2, 87);
+        w.set_block_id(2, 64, 2, 51);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        sess.dig(&mut ctx(&mut w, &ops, &mut bc), 0, 2, 63, 2, 1);
+
+        // sess.outbox should contain block changes for BOTH (2, 64, 2) and (2, 63, 2)
+        let block_change_coords: Vec<(i32, i8, i32)> = sess.outbox.iter().filter_map(|pkt| {
+            if pkt.first() == Some(&53) && pkt.len() >= 11 {
+                let x = i32::from_be_bytes([pkt[1], pkt[2], pkt[3], pkt[4]]);
+                let y = pkt[5] as i8;
+                let z = i32::from_be_bytes([pkt[6], pkt[7], pkt[8], pkt[9]]);
+                Some((x, y, z))
+            } else {
+                None
+            }
+        }).collect();
+
+        assert!(block_change_coords.contains(&(2, 64, 2)), "Fire block change must be in outbox");
+        assert!(block_change_coords.contains(&(2, 63, 2)), "Support block change must be in outbox");
+    }
+
+    #[test]
+    fn test_extinguish_fire_by_hand_status_1_sweeping() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 2.0, 64.0, 2.0);
+        w.set_block_id(2, 63, 2, 87);
+        w.set_block_id(2, 64, 2, 51);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // Send status = 1 directly (sweeping cursor over fire with mouse held down)
+        let out = sess.dig(&mut ctx(&mut w, &ops, &mut bc), 1, 2, 63, 2, 1);
+        assert!(out.is_none());
+
+        assert_eq!(w.get_block_id(2, 64, 2), 0, "Fire must be extinguished on status 1 as well");
+        assert_eq!(w.get_block_id(2, 63, 2), 87, "Netherrack must remain intact");
+        assert!(!sess.dig.has_target, "Dig target must not latch onto netherrack while fire is present");
+    }
 
