@@ -99,6 +99,10 @@ pub struct PendingCreature {
     pub saddled: bool,
     pub sheared: bool,
     pub egg_timer: i32,
+    /// Slime size (`EntitySlime` NBT `Size` + 1); 1 for other kinds.
+    pub slime_size: u8,
+    /// PigZombie anger (`EntityPigZombie` NBT `Anger`); 0 otherwise.
+    pub anger: i32,
 }
 
 /// Serialized boat waiting for its chunk to load (mirrors `ChunkBoatData`).
@@ -111,6 +115,18 @@ pub struct PendingBoat {
     pub time_since_hit: i32,
     pub damage_taken: i32,
     pub forward_dir: i32,
+}
+
+/// Serialized minecart waiting for its chunk to load (mirrors `ChunkMinecartData`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PendingMinecart {
+    pub pos: [f64; 3],
+    pub motion: [f64; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub cart_type: i32,
+    pub damage_taken: i32,
+    pub time_since_hit: i32,
 }
 
 /// Owned chunk data + lighting (no `World`, no entities, no I/O).
@@ -130,6 +146,7 @@ pub struct Chunk {
     pub pending_animals: Vec<PendingCreature>,
     pub pending_monsters: Vec<PendingCreature>,
     pub pending_boats: Vec<PendingBoat>,
+    pub pending_minecarts: Vec<PendingMinecart>,
     blocks: [u8; CHUNK_VOLUME],
     data: NibbleArray,
     skylight: NibbleArray,
@@ -149,6 +166,7 @@ impl Clone for Chunk {
             pending_animals: self.pending_animals.clone(),
             pending_monsters: self.pending_monsters.clone(),
             pending_boats: self.pending_boats.clone(),
+            pending_minecarts: self.pending_minecarts.clone(),
             blocks: self.blocks,
             data: self.data.clone(),
             skylight: self.skylight.clone(),
@@ -175,6 +193,7 @@ impl std::fmt::Debug for Chunk {
             .field("pending_animals", &self.pending_animals.len())
             .field("pending_monsters", &self.pending_monsters.len())
             .field("pending_boats", &self.pending_boats.len())
+            .field("pending_minecarts", &self.pending_minecarts.len())
             .finish_non_exhaustive()
     }
 }
@@ -191,6 +210,7 @@ impl Chunk {
             pending_animals: Vec::new(),
             pending_monsters: Vec::new(),
             pending_boats: Vec::new(),
+            pending_minecarts: Vec::new(),
             blocks: [0u8; CHUNK_VOLUME],
             data: NibbleArray::with_nibbles(CHUNK_VOLUME),
             skylight: NibbleArray::with_nibbles(CHUNK_VOLUME),
@@ -526,6 +546,12 @@ impl Chunk {
         self.is_modified = false;
     }
 
+    /// Clear all skylight values to zero (used for dimensions with no sky, e.g. Hell).
+    pub fn clear_skylight(&mut self) {
+        self.skylight = crate::nibble::NibbleArray::with_nibbles(CHUNK_VOLUME);
+        self.invalidate_cache();
+    }
+
     fn recalculate_height_column(&mut self, x: i32, z: i32) {
         if !Self::column_in_bounds(x, z) {
             return;
@@ -727,6 +753,79 @@ impl Chunk {
                     }
                 }
                 i += 1;
+            }
+        }
+
+        self.is_modified = true;
+    }
+
+    /// Generate only blocklight map without skylight (for worlds with no sky, e.g. Hell).
+    pub fn generate_blocklight_map(&mut self) {
+        self.invalidate_cache();
+        let mut block_queue: VecDeque<LightNode> = VecDeque::new();
+        for x in 0..CHUNK_SIZE_X {
+            for z in 0..CHUNK_SIZE_Z {
+                for y in 0..CHUNK_SIZE_Y {
+                    let id = self.get_block_id(x, y, z);
+                    let emission = light_value(id);
+                    let emit_byte = if emission < 0 {
+                        0u8
+                    } else if emission > 15 {
+                        15u8
+                    } else {
+                        emission as u8
+                    };
+                    self.blocklight.set_nibble(x, y, z, emit_byte);
+                    if emission > 0 {
+                        block_queue.push_back(LightNode { x, y, z });
+                    }
+                }
+            }
+        }
+        self.skylight = crate::nibble::NibbleArray::with_nibbles(CHUNK_VOLUME);
+
+        while let Some(node) = block_queue.pop_front() {
+            let current_light =
+                i32::from(self.get_saved_light_value(BLOCK_LIGHT, node.x, node.y, node.z));
+            if current_light <= 1 {
+                continue;
+            }
+            const OFFSETS: [(i32, i32, i32); 6] = [
+                (-1, 0, 0),
+                (1, 0, 0),
+                (0, -1, 0),
+                (0, 1, 0),
+                (0, 0, -1),
+                (0, 0, 1),
+            ];
+            for &(dx, dy, dz) in &OFFSETS {
+                let nx = node.x + dx;
+                let ny = node.y + dy;
+                let nz = node.z + dz;
+                if Self::in_bounds(nx, ny, nz) {
+                    let id = self.get_block_id(nx, ny, nz);
+                    if is_transparent(id) {
+                        let opacity = bfs_opacity(id);
+                        let neighbor_light =
+                            i32::from(self.get_saved_light_value(BLOCK_LIGHT, nx, ny, nz));
+                        let new_light = current_light - opacity;
+                        if new_light > neighbor_light {
+                            let byte = if new_light < 0 {
+                                0u8
+                            } else if new_light > 15 {
+                                15u8
+                            } else {
+                                new_light as u8
+                            };
+                            self.blocklight.set_nibble(nx, ny, nz, byte);
+                            block_queue.push_back(LightNode {
+                                x: nx,
+                                y: ny,
+                                z: nz,
+                            });
+                        }
+                    }
+                }
             }
         }
 

@@ -199,6 +199,10 @@ pub(crate) fn mob_string_id(kind: MobKind) -> String {
         MobKind::Zombie => "Zombie",
         MobKind::Skeleton => "Skeleton",
         MobKind::Creeper => "Creeper",
+        MobKind::Giant => "Giant",
+        MobKind::Slime => "Slime",
+        MobKind::Ghast => "Ghast",
+        MobKind::PigZombie => "PigZombie",
     }
     .to_string()
 }
@@ -220,6 +224,10 @@ pub(crate) fn mob_kind_of(id: &str) -> Option<MobKind> {
         "Zombie" => Some(MobKind::Zombie),
         "Skeleton" => Some(MobKind::Skeleton),
         "Creeper" => Some(MobKind::Creeper),
+        "Giant" => Some(MobKind::Giant),
+        "Slime" => Some(MobKind::Slime),
+        "Ghast" => Some(MobKind::Ghast),
+        "PigZombie" => Some(MobKind::PigZombie),
         _ => None,
     }
 }
@@ -240,6 +248,8 @@ pub(crate) fn pending_creature(
     saddled: bool,
     sheared: bool,
     egg_timer: i32,
+    slime_size: u8,
+    anger: i32,
 ) -> crate::chunk::PendingCreature {
     crate::chunk::PendingCreature {
         string_id,
@@ -252,6 +262,8 @@ pub(crate) fn pending_creature(
         saddled,
         sheared,
         egg_timer,
+        slime_size,
+        anger,
     }
 }
 

@@ -124,6 +124,9 @@ pub fn material_of(material_id: u8) -> Material {
 pub struct World {
     pub seed: i64,
     pub time: i64,
+    /// Dimension id: 0 overworld, -1 hell (mirrors
+    /// `WorldProvider.field_6165_g`, sent in `Packet1Login`).
+    pub dimension: i32,
     /// Current skylight subtraction (0..=11, mirrors `World.skylightSubtracted`).
     pub skylight_subtracted: u8,
     pub spawn: [i32; 3],
@@ -207,6 +210,9 @@ pub struct World {
     /// Terrain generator, built lazily (eleven octave tables; tests that
     /// never generate pay nothing; skipped in `Debug` dumps).
     pub(crate) generator: Option<crate::generator::ChunkProvider>,
+    /// Hell terrain generator (seven octave tables, like `generator`).
+    /// `None` until the first hell chunk generates.
+    pub(crate) hell_generator: Option<crate::hell_gen::HellProvider>,
     pub(crate) chunks: HashMap<(i32, i32), Box<Chunk>>,
     pub entities: EntityTable,
     pub tracker: Tracker,
@@ -254,6 +260,7 @@ impl World {
         World {
             seed,
             time: 0,
+            dimension: 0,
             skylight_subtracted: 0,
             spawn: [0, 64, 0],
             level_name: "world".to_string(),
@@ -279,6 +286,7 @@ impl World {
             torch_burnouts: Vec::new(),
             populating: false,
             generator: None,
+            hell_generator: None,
             chunks: HashMap::new(),
             entities: EntityTable::new(),
             tracker: Tracker::new(),
@@ -294,8 +302,32 @@ impl World {
         }
     }
 
+    /// Stamp a fresh row with this world's dimension (portal/mixed-world
+    /// hygiene: rows must never claim the wrong world).
+    pub(crate) fn stamp_dim(&mut self, id: EntityId) {
+        let dim = self.dimension;
+        if let Some(e) = self.entities.get_mut(id) {
+            e.body_mut().dimension = dim;
+        }
+    }
+
     pub fn insert_chunk(&mut self, chunk: Chunk) {
         self.chunks.insert((chunk.x_position, chunk.z_position), Box::new(chunk));
+    }
+
+    /// Fresh hell world (dimension -1, fixed dim skylight, bloodStone
+    /// spawn search done by the server slice).
+    pub fn new_hell(seed: i64) -> Self {
+        let mut w = Self::new(seed);
+        w.dimension = -1;
+        w.skylight_subtracted = 7;
+        w
+    }
+
+    /// True for the hell dimension (no day cycle, no passive mobs,
+    /// hell-only spawn tables and generation).
+    pub fn is_hell(&self) -> bool {
+        self.dimension == -1
     }
 
     pub fn insert_chunk_boxed(&mut self, chunk: Box<Chunk>) {
@@ -489,21 +521,31 @@ impl World {
         if dirty.is_empty() {
             return;
         }
-        let mut regen_set = dirty.clone();
-        for &(cx, cz) in &dirty {
-            for dx in -1..=1 {
-                for dz in -1..=1 {
-                    if self.chunks.contains_key(&(cx + dx, cz + dz)) {
-                        regen_set.insert((cx + dx, cz + dz));
+        let regen_set = if self.dimension == -1 {
+            for &(cx, cz) in &dirty {
+                if let Some(c) = self.chunks.get_mut(&(cx, cz)) {
+                    c.generate_blocklight_map();
+                }
+            }
+            dirty
+        } else {
+            let mut regen_set = dirty.clone();
+            for &(cx, cz) in &dirty {
+                for dx in -1..=1 {
+                    for dz in -1..=1 {
+                        if self.chunks.contains_key(&(cx + dx, cz + dz)) {
+                            regen_set.insert((cx + dx, cz + dz));
+                        }
                     }
                 }
             }
-        }
-        for &(cx, cz) in &regen_set {
-            if let Some(c) = self.chunks.get_mut(&(cx, cz)) {
-                c.generate_skylight_map();
+            for &(cx, cz) in &regen_set {
+                if let Some(c) = self.chunks.get_mut(&(cx, cz)) {
+                    c.generate_skylight_map();
+                }
             }
-        }
+            regen_set
+        };
         self.propagate_cross_chunk_light(&regen_set);
     }
 
@@ -519,79 +561,88 @@ impl World {
             (0, 0, -1),
             (0, 0, 1),
         ];
-        for kind in [0u8, 1u8] {
+        let kinds: &[u8] = if self.dimension == -1 { &[1u8] } else { &[0u8, 1u8] };
+        for &kind in kinds {
             let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::new();
             for &(cx, cz) in chunks_to_check {
-                if !self.chunks.contains_key(&(cx, cz)) {
+                let Some(chunk_a) = self.chunks.get(&(cx, cz)) else {
                     continue;
-                }
-                if self.chunks.contains_key(&(cx + 1, cz)) {
+                };
+                if let Some(chunk_b) = self.chunks.get(&(cx + 1, cz)) {
                     let xa = cx * 16 + 15;
                     let xb = xa + 1;
-                    for z in (cz * 16)..(cz * 16 + 16) {
+                    for lz in 0..16 {
+                        let gz = cz * 16 + lz;
                         for y in 0..WORLD_HEIGHT {
-                            let la = self.saved_light_value(kind, xa, y, z) as i32;
-                            let lb = self.saved_light_value(kind, xb, y, z) as i32;
+                            let la = chunk_a.get_saved_light_value(kind as i32, 15, y, lz) as i32;
+                            let lb = chunk_b.get_saved_light_value(kind as i32, 0, y, lz) as i32;
                             if la > lb + 1 {
-                                queue.push_back((xa, y, z));
+                                queue.push_back((xa, y, gz));
                             } else if lb > la + 1 {
-                                queue.push_back((xb, y, z));
+                                queue.push_back((xb, y, gz));
                             }
                         }
                     }
                 }
-                if self.chunks.contains_key(&(cx - 1, cz))
-                    && !chunks_to_check.contains(&(cx - 1, cz))
-                {
-                    let xa = cx * 16 - 1;
-                    let xb = xa + 1;
-                    for z in (cz * 16)..(cz * 16 + 16) {
-                        for y in 0..WORLD_HEIGHT {
-                            let la = self.saved_light_value(kind, xa, y, z) as i32;
-                            let lb = self.saved_light_value(kind, xb, y, z) as i32;
-                            if la > lb + 1 {
-                                queue.push_back((xa, y, z));
-                            } else if lb > la + 1 {
-                                queue.push_back((xb, y, z));
+                if !chunks_to_check.contains(&(cx - 1, cz)) {
+                    if let Some(chunk_b) = self.chunks.get(&(cx - 1, cz)) {
+                        let xa = cx * 16;
+                        let xb = xa - 1;
+                        for lz in 0..16 {
+                            let gz = cz * 16 + lz;
+                            for y in 0..WORLD_HEIGHT {
+                                let la = chunk_a.get_saved_light_value(kind as i32, 0, y, lz) as i32;
+                                let lb = chunk_b.get_saved_light_value(kind as i32, 15, y, lz) as i32;
+                                if la > lb + 1 {
+                                    queue.push_back((xa, y, gz));
+                                } else if lb > la + 1 {
+                                    queue.push_back((xb, y, gz));
+                                }
                             }
                         }
                     }
                 }
-                if self.chunks.contains_key(&(cx, cz + 1)) {
+                if let Some(chunk_b) = self.chunks.get(&(cx, cz + 1)) {
                     let za = cz * 16 + 15;
                     let zb = za + 1;
-                    for x in (cx * 16)..(cx * 16 + 16) {
+                    for lx in 0..16 {
+                        let gx = cx * 16 + lx;
                         for y in 0..WORLD_HEIGHT {
-                            let la = self.saved_light_value(kind, x, y, za) as i32;
-                            let lb = self.saved_light_value(kind, x, y, zb) as i32;
+                            let la = chunk_a.get_saved_light_value(kind as i32, lx, y, 15) as i32;
+                            let lb = chunk_b.get_saved_light_value(kind as i32, lx, y, 0) as i32;
                             if la > lb + 1 {
-                                queue.push_back((x, y, za));
+                                queue.push_back((gx, y, za));
                             } else if lb > la + 1 {
-                                queue.push_back((x, y, zb));
+                                queue.push_back((gx, y, zb));
                             }
                         }
                     }
                 }
-                if self.chunks.contains_key(&(cx, cz - 1))
-                    && !chunks_to_check.contains(&(cx, cz - 1))
-                {
-                    let za = cz * 16 - 1;
-                    let zb = za + 1;
-                    for x in (cx * 16)..(cx * 16 + 16) {
-                        for y in 0..WORLD_HEIGHT {
-                            let la = self.saved_light_value(kind, x, y, za) as i32;
-                            let lb = self.saved_light_value(kind, x, y, zb) as i32;
-                            if la > lb + 1 {
-                                queue.push_back((x, y, za));
-                            } else if lb > la + 1 {
-                                queue.push_back((x, y, zb));
+                if !chunks_to_check.contains(&(cx, cz - 1)) {
+                    if let Some(chunk_b) = self.chunks.get(&(cx, cz - 1)) {
+                        let za = cz * 16;
+                        let zb = za - 1;
+                        for lx in 0..16 {
+                            let gx = cx * 16 + lx;
+                            for y in 0..WORLD_HEIGHT {
+                                let la = chunk_a.get_saved_light_value(kind as i32, lx, y, 0) as i32;
+                                let lb = chunk_b.get_saved_light_value(kind as i32, lx, y, 15) as i32;
+                                if la > lb + 1 {
+                                    queue.push_back((gx, y, za));
+                                } else if lb > la + 1 {
+                                    queue.push_back((gx, y, zb));
+                                }
                             }
                         }
                     }
                 }
             }
             while let Some((x, y, z)) = queue.pop_front() {
-                let cur = self.saved_light_value(kind, x, y, z) as i32;
+                let (cx, cz, lx, lz) = Self::chunk_of(x, z);
+                let cur = match self.chunks.get(&(cx, cz)) {
+                    Some(c) => c.get_saved_light_value(kind as i32, lx, y, lz) as i32,
+                    None => continue,
+                };
                 if cur <= 1 {
                     continue;
                 }
@@ -600,22 +651,20 @@ impl World {
                     if !(0..WORLD_HEIGHT).contains(&ny) {
                         continue;
                     }
-                    let (ncx, ncz, lx, lz) = Self::chunk_of(nx, nz);
-                    if !self.chunks.contains_key(&(ncx, ncz)) {
-                        continue;
-                    }
-                    let id = self.get_block_id(nx, ny, nz);
-                    let op = block_properties_get(id as u32).light_opacity;
-                    if op >= 15 {
-                        continue;
-                    }
-                    let step = op.max(1);
-                    let new_light = cur - step;
-                    if new_light > self.saved_light_value(kind, nx, ny, nz) as i32 {
-                        if let Some(c) = self.chunks.get_mut(&(ncx, ncz)) {
-                            c.set_light_value(kind as i32, lx, ny, lz, new_light as u8);
+                    let (ncx, ncz, nlx, nlz) = Self::chunk_of(nx, nz);
+                    if let Some(c) = self.chunks.get_mut(&(ncx, ncz)) {
+                        let id = c.get_block_id(nlx, ny, nlz);
+                        let op = block_properties_get(id as u32).light_opacity;
+                        if op >= 15 {
+                            continue;
                         }
-                        queue.push_back((nx, ny, nz));
+                        let step = op.max(1);
+                        let new_light = cur - step;
+                        let neighbor_light = c.get_saved_light_value(kind as i32, nlx, ny, nlz) as i32;
+                        if new_light > neighbor_light {
+                            c.set_light_value(kind as i32, nlx, ny, nlz, new_light as u8);
+                            queue.push_back((nx, ny, nz));
+                        }
                     }
                 }
             }
@@ -650,7 +699,12 @@ impl World {
 
     /// Calculate skylight subtracted for `self.time` (`0..=11`), mirroring
     /// `World::calculateSkylightSubtracted(1.0F)` and `WorldProvider::func_4089_a`.
+    /// Hell (`WorldProviderHell::func_4089_a` returns a constant `0.5`)
+    /// has fixed dim light instead of a day cycle.
     pub fn calculate_skylight_subtracted(&self) -> u8 {
+        if self.dimension == -1 {
+            return 7;
+        }
         let t = self.time.rem_euclid(24000) as f32;
         let mut angle = (t + 1.0) / 24000.0 - 0.25;
         if angle < 0.0 {

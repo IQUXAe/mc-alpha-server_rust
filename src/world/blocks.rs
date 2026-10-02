@@ -169,6 +169,12 @@ impl World {
                     .entry((x, y, z))
                     .or_insert_with(|| TileData::Sign(crate::tile_entity::sign::sign_create()));
             }
+            // Rails shape themselves on placement (`onBlockAdded` sets
+            // the meta sentinel then refreshes with the powered flag).
+            66 => {
+                let powered = self.is_block_powered(x, y, z);
+                crate::block::tracks::track_refresh(self, x, y, z, powered);
+            }
             _ => {}
         }
         match bid {
@@ -285,6 +291,8 @@ impl World {
                 self.apply_set_notify(x, y, z, 0);
                 self.recalculate_redstone_around(x, y, z);
             }
+            // Rails: drop when unsupported, else reshape (`BlockMinecartTrack`).
+            66 => crate::block::tracks::track_neighbor(self, x, y, z),
             78 => self.snow_neighbor(x, y, z),
             81 => {
                 block_cactus_neighbor(
@@ -1347,6 +1355,8 @@ impl World {
                     a.saddled,
                     a.sheared,
                     a.egg_timer,
+                    1,
+                    0,
                 )),
                 Entity::Mob(m) => chunk.pending_monsters.push(pending_creature(
                     mob_string_id(m.kind),
@@ -1354,6 +1364,8 @@ impl World {
                     false,
                     false,
                     0,
+                    m.slime_size,
+                    m.anger,
                 )),
                 Entity::Boat(b) => chunk.pending_boats.push(crate::chunk::PendingBoat {
                     pos: b.body.pos,
@@ -1363,6 +1375,15 @@ impl World {
                     time_since_hit: b.time_since_hit,
                     damage_taken: b.damage_taken,
                     forward_dir: b.forward_dir,
+                }),
+                Entity::Minecart(c) => chunk.pending_minecarts.push(crate::chunk::PendingMinecart {
+                    pos: c.body.pos,
+                    motion: c.body.motion,
+                    yaw: c.body.yaw,
+                    pitch: c.body.pitch,
+                    cart_type: c.cart_type,
+                    damage_taken: c.damage_taken,
+                    time_since_hit: c.time_since_hit,
                 }),
                 _ => continue,
             }
@@ -1386,6 +1407,7 @@ impl World {
         let animals = std::mem::take(&mut chunk.pending_animals);
         let monsters = std::mem::take(&mut chunk.pending_monsters);
         let boats = std::mem::take(&mut chunk.pending_boats);
+        let minecarts = std::mem::take(&mut chunk.pending_minecarts);
         for it in items {
             let id = self.entities.alloc_id();
             let mut b = Body::new(id, 0.25, 0.25, 0.125);
@@ -1413,12 +1435,19 @@ impl World {
                 a.sheared = an.sheared;
                 a.egg_timer = an.egg_timer;
                 self.entities.insert(Entity::Animal(a));
+                self.stamp_dim(id);
             }
         }
         for mo in monsters {
             if let Some(kind) = mob_kind_of(&mo.string_id) {
                 let id = self.entities.alloc_id();
                 let mut m = crate::entity::table::MobEnt::new(id, kind);
+                // Size first (resets dims/health), then the saved vitals
+                // (vanilla `readEntityFromNBT` order).
+                if kind == crate::entity::table::MobKind::Slime {
+                    m.set_slime_size(mo.slime_size.max(1));
+                }
+                m.anger = mo.anger.max(0);
                 m.living.body.set_position(mo.pos[0], mo.pos[1], mo.pos[2]);
                 m.living.body.motion = mo.motion;
                 m.living.body.yaw = mo.yaw;
@@ -1426,6 +1455,7 @@ impl World {
                 m.living.health = mo.health;
                 m.living.max_health = mo.max_health;
                 self.entities.insert(Entity::Mob(m));
+                self.stamp_dim(id);
             }
         }
         for bt in boats {
@@ -1441,6 +1471,23 @@ impl World {
                 damage_taken: bt.damage_taken,
                 forward_dir: bt.forward_dir,
             }));
+            self.stamp_dim(id);
+        }
+        for mc in minecarts {
+            let id = self.entities.alloc_id();
+            let mut b = Body::new(id, 0.98, 0.7, 0.0);
+            b.set_position(mc.pos[0], mc.pos[1], mc.pos[2]);
+            b.motion = mc.motion;
+            b.yaw = mc.yaw;
+            b.pitch = mc.pitch;
+            b.step_height = 1.0;
+            self.entities.insert(Entity::Minecart(crate::entity::table::MinecartEnt {
+                body: b,
+                cart_type: mc.cart_type,
+                damage_taken: mc.damage_taken,
+                time_since_hit: mc.time_since_hit,
+            }));
+            self.stamp_dim(id);
         }
     }
 }

@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 
 use crate::chunk::{
-    Chunk, PendingBoat, PendingCreature, PendingItem, CHUNK_AREA, CHUNK_NIBBLE_BYTES, CHUNK_VOLUME,
+    Chunk, PendingBoat, PendingCreature, PendingItem, PendingMinecart, CHUNK_AREA, CHUNK_NIBBLE_BYTES, CHUNK_VOLUME,
 };
 use crate::entity::table::Entity;
 use crate::inventory::ItemStack;
@@ -324,6 +324,7 @@ pub fn encode_chunk_blob(world: &World, cx: i32, cz: i32, zstd: bool) -> Option<
     let mut animal_rows: Vec<PendingCreature> = chunk.pending_animals.clone();
     let mut monster_rows: Vec<PendingCreature> = chunk.pending_monsters.clone();
     let mut boat_rows: Vec<PendingBoat> = chunk.pending_boats.clone();
+    let mut minecart_rows: Vec<PendingMinecart> = chunk.pending_minecarts.clone();
     let mut live: Vec<Entity> = Vec::new();
     for oid in world.entities.alive_ids() {
         if let Some(e) = world.entities.get(oid) {
@@ -349,6 +350,8 @@ pub fn encode_chunk_blob(world: &World, cx: i32, cz: i32, zstd: bool) -> Option<
                 saddled: a.saddled,
                 sheared: a.sheared,
                 egg_timer: a.egg_timer,
+                slime_size: 1,
+                anger: 0,
             }),
             Entity::Mob(m) => monster_rows.push(PendingCreature {
                 string_id: crate::world::mob_string_id(m.kind),
@@ -361,6 +364,8 @@ pub fn encode_chunk_blob(world: &World, cx: i32, cz: i32, zstd: bool) -> Option<
                 saddled: false,
                 sheared: false,
                 egg_timer: 0,
+                slime_size: m.slime_size,
+                anger: m.anger,
             }),
             Entity::Boat(b) => boat_rows.push(PendingBoat {
                 pos: b.body.pos,
@@ -370,6 +375,15 @@ pub fn encode_chunk_blob(world: &World, cx: i32, cz: i32, zstd: bool) -> Option<
                 time_since_hit: b.time_since_hit,
                 damage_taken: b.damage_taken,
                 forward_dir: b.forward_dir,
+            }),
+            Entity::Minecart(c) => minecart_rows.push(PendingMinecart {
+                pos: c.body.pos,
+                motion: c.body.motion,
+                yaw: c.body.yaw,
+                pitch: c.body.pitch,
+                cart_type: c.cart_type,
+                damage_taken: c.damage_taken,
+                time_since_hit: c.time_since_hit,
             }),
             _ => {}
         }
@@ -398,6 +412,10 @@ pub fn encode_chunk_blob(world: &World, cx: i32, cz: i32, zstd: bool) -> Option<
         m.insert("Saddle".to_string(), NbtTag::Byte(if c.saddled { 1 } else { 0 }));
         m.insert("Sheared".to_string(), NbtTag::Byte(if c.sheared { 1 } else { 0 }));
         m.insert("EggLayTime".to_string(), NbtTag::Int(c.egg_timer));
+        // Slime `Size` (stored size-1) and pig `Anger` ride the same
+        // rows vanilla puts them on; other kinds ignore them on read.
+        m.insert("Size".to_string(), NbtTag::Int(c.slime_size as i32 - 1));
+        m.insert("Anger".to_string(), NbtTag::Short(c.anger as i16));
         entities.push(NbtTag::Compound(NbtCompound { map: m }));
     }
     for b in &boat_rows {
@@ -409,6 +427,17 @@ pub fn encode_chunk_blob(world: &World, cx: i32, cz: i32, zstd: bool) -> Option<
         m.insert("TimeSinceHit".to_string(), NbtTag::Int(b.time_since_hit));
         m.insert("DamageTaken".to_string(), NbtTag::Int(b.damage_taken));
         m.insert("ForwardDirection".to_string(), NbtTag::Int(b.forward_dir));
+        entities.push(NbtTag::Compound(NbtCompound { map: m }));
+    }
+    for c in &minecart_rows {
+        let mut m = BTreeMap::new();
+        m.insert("id".to_string(), NbtTag::String("Minecart".to_string()));
+        m.insert("Pos".to_string(), dbl_list(c.pos));
+        m.insert("Motion".to_string(), dbl_list(c.motion));
+        m.insert("Rotation".to_string(), rot_list(c.yaw, c.pitch));
+        m.insert("Type".to_string(), NbtTag::Int(c.cart_type));
+        m.insert("DamageTaken".to_string(), NbtTag::Int(c.damage_taken));
+        m.insert("TimeSinceHit".to_string(), NbtTag::Int(c.time_since_hit));
         entities.push(NbtTag::Compound(NbtCompound { map: m }));
     }
     level.insert("Entities".to_string(), NbtTag::List(NbtList { tag_type: 10, elements: entities }));
@@ -445,6 +474,7 @@ pub struct DecodedChunk {
     pub animals: Vec<PendingCreature>,
     pub monsters: Vec<PendingCreature>,
     pub boats: Vec<PendingBoat>,
+    pub minecarts: Vec<PendingMinecart>,
 }
 
 /// Single tile-entity compound (shared by chunk blobs and packet 59).
@@ -613,6 +643,7 @@ pub fn decode_chunk_blob(bytes: &[u8], cx: i32, cz: i32) -> Option<DecodedChunk>
     let mut animals = Vec::new();
     let mut monsters = Vec::new();
     let mut boats = Vec::new();
+    let mut minecarts = Vec::new();
     if let Some(NbtTag::List(l)) = level.map.get("Entities") {
         for elem in &l.elements {
             let NbtTag::Compound(c) = elem else { continue };
@@ -648,6 +679,15 @@ pub fn decode_chunk_blob(bytes: &[u8], cx: i32, cz: i32) -> Option<DecodedChunk>
                     damage_taken: get_int(&c.map, "DamageTaken"),
                     forward_dir: get_int(&c.map, "ForwardDirection"),
                 }),
+                "Minecart" => minecarts.push(PendingMinecart {
+                    pos,
+                    motion,
+                    yaw,
+                    pitch,
+                    cart_type: get_int(&c.map, "Type"),
+                    damage_taken: get_int(&c.map, "DamageTaken"),
+                    time_since_hit: get_int(&c.map, "TimeSinceHit"),
+                }),
                 _ => {
                     let creature = PendingCreature {
                         string_id: id.clone(),
@@ -660,6 +700,8 @@ pub fn decode_chunk_blob(bytes: &[u8], cx: i32, cz: i32) -> Option<DecodedChunk>
                         saddled: get_byte(&c.map, "Saddle") != 0,
                         sheared: get_byte(&c.map, "Sheared") != 0,
                         egg_timer: get_int(&c.map, "EggLayTime"),
+                        slime_size: (get_int(&c.map, "Size") + 1).clamp(1, 4) as u8,
+                        anger: get_short(&c.map, "Anger") as i32,
                     };
                     // Animal ids are the pig-90 family; the rest are mobs
                     // (unknown ids are dropped by the restore step).
@@ -690,6 +732,7 @@ pub fn decode_chunk_blob(bytes: &[u8], cx: i32, cz: i32) -> Option<DecodedChunk>
         animals,
         monsters,
         boats,
+        minecarts,
     })
 }
 
@@ -921,6 +964,7 @@ impl World {
         chunk.pending_animals = d.animals;
         chunk.pending_monsters = d.monsters;
         chunk.pending_boats = d.boats;
+        chunk.pending_minecarts = d.minecarts;
         chunk.clear_modified();
         self.insert_chunk(chunk);
         // Tiles replace this chunk's cells.
@@ -1112,6 +1156,15 @@ mod tests {
         zombie.living.health = 11;
         w.entities.insert(Entity::Mob(zombie));
         w.spawn_item_entity(280, 2, 0, 10.5, 64.2, 4.5);
+        let mid = w.entities.alloc_id();
+        let mut cart = crate::entity::table::MinecartEnt {
+            body: crate::entity::table::Body::new(mid, 0.98, 0.7, 0.0),
+            cart_type: 0,
+            damage_taken: 10,
+            time_since_hit: 5,
+        };
+        cart.body.set_position(12.5, 64.0, 4.5);
+        w.entities.insert(Entity::Minecart(cart));
         let pid = w.entities.alloc_id();
         let mut p = PlayerEnt::new(pid, "Steve");
         p.living.body.set_position(11.5, 64.0, 4.5);
@@ -1145,6 +1198,7 @@ mod tests {
         let mut sheep_ok = false;
         let mut zombie_ok = false;
         let mut sticks_ok = false;
+        let mut cart_ok = false;
         for oid in w2.entities.alive_ids() {
             match w2.entities.get(oid).unwrap() {
                 Entity::Animal(a) if a.kind == AnimalKind::Sheep => {
@@ -1156,10 +1210,13 @@ mod tests {
                 Entity::Item(e) if e.item_id == 280 => {
                     sticks_ok = e.count == 2;
                 }
+                Entity::Minecart(c) => {
+                    cart_ok = c.damage_taken == 10 && c.time_since_hit == 5;
+                }
                 _ => {}
             }
         }
-        assert!(sheep_ok && zombie_ok && sticks_ok);
+        assert!(sheep_ok && zombie_ok && sticks_ok && cart_ok);
         // Re-encode is byte-stable (idempotent codec).
         let blob2 = encode_chunk_blob(&w2, 0, 0, false).unwrap();
         assert_eq!(blob, blob2);
