@@ -158,13 +158,21 @@ impl World {
     }
 
     /// Fresh-target scan (mirrors `acquireTarget`): closest live player in
-    /// range that passes the aggro gate.
+    /// range that passes the aggro gate. Pigmen stay neutral while calm
+    /// (`anger == 0`); ghasts scan 100 blocks (vanilla waypoint aggro).
     fn acquire_target(&self, id: EntityId, kind: MobKind) -> Option<EntityId> {
+        if kind == MobKind::PigZombie {
+            let angry = matches!(self.entities.get(id), Some(Entity::Mob(m)) if m.anger > 0);
+            if !angry {
+                return None;
+            }
+        }
         let (px, py, pz) = match self.entities.get(id) {
             Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
             None => return None,
         };
-        let near = self.closest_player(px, py, pz, CREATURE_TARGET_RANGE)?;
+        let range = if kind == MobKind::Ghast { 100.0 } else { CREATURE_TARGET_RANGE };
+        let near = self.closest_player(px, py, pz, range)?;
         if !self.target_alive(near) || !self.mob_aggro_ok(kind, id) {
             return None;
         }
@@ -854,6 +862,160 @@ impl World {
         false
     }
 
+    /// Slime hop mover (mirrors `EntitySlime.func_152_d`): face the
+    /// nearest player in 16 (or wander), hop on a 10+rand20 timer
+    /// (/3 when a target is near) with jump velocity `0.42*size` and
+    /// forward lunge, gravity between hops, touch damage `size` inside
+    /// `0.6*size`. Slimes take no fall damage and never pathfind.
+    /// The shared `attack_cooldown` doubles as the hop timer.
+    fn tick_slime_hop(&mut self, id: EntityId) {
+        let (size, on_ground) = match self.entities.get(id) {
+            Some(Entity::Mob(m)) => (m.slime_size.max(1), m.living.body.on_ground),
+            _ => return,
+        };
+        let target = self.closest_player_of(id, 16.0);
+        if on_ground {
+            // Face the target (vanilla `faceEntity`), else keep heading.
+            if let (Some(me), Some(t)) = (self.entities.get(id), target.and_then(|t| self.entities.get(t))) {
+                let (dx, dz) = (t.body().pos[0] - me.body().pos[0], t.body().pos[2] - me.body().pos[2]);
+                if dx * dx + dz * dz > 1e-6 {
+                    let yaw = (dz.atan2(dx) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
+                    if let Some(e) = self.entities.get_mut(id) {
+                        e.body_mut().yaw = yaw;
+                    }
+                }
+            }
+            let ready = matches!(self.entities.get(id), Some(Entity::Mob(m)) if m.attack_cooldown == 0);
+            if ready {
+                if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
+                    let mut wait = 10 + self.rng.next_int_bound(20);
+                    if target.is_some() {
+                        wait /= 3;
+                    }
+                    m.attack_cooldown = wait;
+                    let yaw_r = m.living.body.yaw * (std::f32::consts::PI / 180.0);
+                    let lunge = 0.4 * size as f32;
+                    m.living.body.motion[0] = (-yaw_r.sin() * lunge) as f64;
+                    m.living.body.motion[2] = (yaw_r.cos() * lunge) as f64;
+                    m.living.body.motion[1] = 0.42;
+                }
+            }
+        }
+        // Gravity + move (no fall damage for slimes).
+        if let Some(e) = self.entities.get_mut(id) {
+            let b = e.body_mut();
+            b.motion[1] -= 0.08;
+            if b.motion[1] < -3.92 {
+                b.motion[1] = -3.92;
+            }
+        }
+        let (mx, my, mz) = match self.entities.get(id) {
+            Some(e) => (e.body().motion[0], e.body().motion[1], e.body().motion[2]),
+            None => return,
+        };
+        self.move_body(id, mx, my, mz);
+        // Touch damage (vanilla `onCollideWithPlayer`).
+        if size > 1 {
+            if let Some(t) = target {
+                let d2 = match (self.entities.get(id), self.entities.get(t)) {
+                    (Some(a), Some(b)) => {
+                        let (dx, dy, dz) = (
+                            b.body().pos[0] - a.body().pos[0],
+                            b.body().pos[1] - a.body().pos[1],
+                            b.body().pos[2] - a.body().pos[2],
+                        );
+                        dx * dx + dy * dy + dz * dz
+                    }
+                    _ => f64::MAX,
+                };
+                let reach = 0.6 * size as f64;
+                if d2 < reach * reach {
+                    self.attack_living(t, size as i32, Some(id));
+                }
+            }
+        }
+    }
+
+    /// Closest live player within `range` of `id` (shared by slime hop).
+    fn closest_player_of(&self, id: EntityId, range: f64) -> Option<EntityId> {
+        let (px, py, pz) = match self.entities.get(id) {
+            Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+            None => return None,
+        };
+        self.closest_player(px, py, pz, range)
+    }
+
+    /// Ghast flight (mirrors `EntityGhast.func_152_d`): drift toward a
+    /// waypoint re-picked inside 1 / outside 60 blocks (±16 cube),
+    /// accel 0.1 along the leg, no gravity, face of travel, fireball
+    /// volley at the 100-block target inside 64 with LOS.
+    fn tick_ghast(&mut self, id: EntityId) {
+        let target = self.refresh_mob_target(id, MobKind::Ghast);
+        let (px, py, pz) = match self.entities.get(id) {
+            Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+            None => return,
+        };
+        let need_wp = match self.entities.get(id) {
+            Some(Entity::Mob(m)) if m.has_waypoint => {
+                let (dx, dy, dz) = (
+                    m.waypoint[0] - px,
+                    m.waypoint[1] - py,
+                    m.waypoint[2] - pz,
+                );
+                let d = (dx * dx + dy * dy + dz * dz).sqrt();
+                !(1.0..=60.0).contains(&d)
+            }
+            _ => true,
+        };
+        if need_wp {
+            let nx = px + (self.rng.next_float() as f64 * 2.0 - 1.0) * 16.0;
+            let ny = (py + (self.rng.next_float() as f64 * 2.0 - 1.0) * 16.0).clamp(4.0, 120.0);
+            let nz = pz + (self.rng.next_float() as f64 * 2.0 - 1.0) * 16.0;
+            if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
+                m.waypoint = [nx, ny, nz];
+                m.has_waypoint = true;
+            }
+        }
+        // Steer (vanilla `func_4046_a` always true here: open sky assumed,
+        // the waypoint cube keeps ghasts inside loaded hell).
+        if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
+            let (dx, dy, dz) = (m.waypoint[0] - px, m.waypoint[1] - py, m.waypoint[2] - pz);
+            let d = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
+            m.living.body.motion[0] += dx / d * 0.1;
+            m.living.body.motion[1] += dy / d * 0.1;
+            m.living.body.motion[2] += dz / d * 0.1;
+            if m.living.body.motion[0] != 0.0 || m.living.body.motion[2] != 0.0 {
+                m.living.body.yaw = (m.living.body.motion[2].atan2(m.living.body.motion[0]) * 180.0
+                    / std::f64::consts::PI) as f32
+                    - 90.0;
+            }
+        }
+        let (mx, my, mz) = match self.entities.get(id) {
+            Some(e) => (e.body().motion[0], e.body().motion[1], e.body().motion[2]),
+            None => return,
+        };
+        self.move_body(id, mx, my, mz);
+        // Volley at the acquired target (cooldown gate + LOS inside).
+        if let Some(t) = target {
+            let d2 = match (self.entities.get(id), self.entities.get(t)) {
+                (Some(a), Some(b)) => {
+                    let (dx, dy, dz) = (
+                        b.body().pos[0] - a.body().pos[0],
+                        b.body().pos[1] - a.body().pos[1],
+                        b.body().pos[2] - a.body().pos[2],
+                    );
+                    ((dx * dx + dy * dy + dz * dz) as f32).sqrt()
+                }
+                _ => f32::MAX,
+            };
+            let mut snap = match self.creature_snapshot(id) {
+                Some(s) => s,
+                None => return,
+            };
+            let _ = self.mob_attack(id, MobKind::Ghast, t, d2, &mut snap);
+        }
+    }
+
     /// Mob tick (mirrors `EntityMob::tick`): living maintenance, cooldown
     /// and burn schedule, daylight ignition, AI, heading move with fall
     /// damage, and neighbor shoves. Like C++, the AI and move still run
@@ -904,6 +1066,30 @@ impl World {
             self.attack_living(id, 1, None);
         }
         self.check_daylight_burn(id, kind);
+        // Pigman anger ticks down (vanilla `field_4106_a`); speed follows
+        // mood (0.95 hunting, 0.5 wandering — `EntityPigZombie.onUpdate`).
+        if kind == MobKind::PigZombie {
+            if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
+                if m.anger > 0 {
+                    m.anger -= 1;
+                }
+                m.living.move_speed = if m.target.is_some() { 0.95 } else { 0.5 };
+            }
+        }
+        // Slimes hop instead of walking, ghasts fly: custom movers below
+        // replace the ground heading for those kinds.
+        if kind == MobKind::Slime {
+            self.tick_slime_hop(id);
+            self.push_neighbors(id, ids);
+            self.entities.update_rider_position(id);
+            return;
+        }
+        if kind == MobKind::Ghast {
+            self.tick_ghast(id);
+            self.push_neighbors(id, ids);
+            self.entities.update_rider_position(id);
+            return;
+        }
         let in_liquid = self.touching_liquid(id);
         let (strafe, forward) = self.update_mob_ai(id, kind, in_liquid);
         if let Some(dist) = self.move_creature_heading(id, strafe, forward) {

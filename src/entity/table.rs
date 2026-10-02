@@ -14,6 +14,11 @@ use crate::aabb::AxisAlignedBB;
 
 pub type EntityId = i32;
 pub const NO_ENTITY: EntityId = -1;
+/// Hell entity-id base: hell rows migrated from the overworld keep
+/// their small ids, while fresh hell allocs start here so the two
+/// tables (both starting at 1) never collide in the global
+/// `players` map. Stable across restarts (re-applied on open).
+pub const HELL_ID_BASE: EntityId = 1_000_000_000;
 
 fn next_id(counter: &mut EntityId) -> EntityId {
     let id = *counter;
@@ -121,6 +126,19 @@ pub enum MobKind {
     Zombie,
     Skeleton,
     Creeper,
+    /// Giant zombie (`EntityZombieSimple`, type 53): 6x zombie dims,
+    /// 10x health, strength 50. Never spawns naturally (vanilla has no
+    /// spawn rule for it); `/summon giant` only.
+    Giant,
+    /// Slime (`EntitySlime`, type 55): size 1/2/4 (`1 << rand(3)`),
+    /// dims/health scale with size, splits on death.
+    Slime,
+    /// Ghast (`EntityGhast`, type 56): 4x4 flyer, fire-immune, shoots
+    /// fireballs. Hell only.
+    Ghast,
+    /// Zombie pigman (`EntityPigZombie`, type 57): zombie stats, fire
+    /// immune, neutral until provoked (anger timer). Hell only.
+    PigZombie,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,40 +150,68 @@ pub enum AnimalKind {
 }
 
 /// Mob body size (width, height): Java defaults 0.6x1.8 (Entity.java:36-37);
-/// only spider/zombie override. Creeper keeps the default 1.8 height.
+/// Giant is 6x zombie (3.6x10.8, `EntityZombieSimple`), Ghast 4x4,
+/// slimes scale with size (0.6*size, see [`mob_dims_for`]).
 pub fn mob_dims(kind: MobKind) -> (f32, f32) {
+    mob_dims_for(kind, 1)
+}
+
+/// Sized dims for slimes (`EntitySlime.func_160_c`: `0.6*size` square).
+pub fn mob_dims_for(kind: MobKind, slime_size: u8) -> (f32, f32) {
     match kind {
         MobKind::Zombie => (0.6, 1.8),
         MobKind::Skeleton => (0.6, 1.8),
         MobKind::Spider => (1.4, 0.9),
         MobKind::Creeper => (0.6, 1.8),
+        MobKind::Giant => (3.6, 10.8),
+        MobKind::Slime => (0.6 * slime_size as f32, 0.6 * slime_size as f32),
+        MobKind::Ghast => (4.0, 4.0),
+        MobKind::PigZombie => (0.6, 1.8),
     }
 }
 
 /// Base move speed: living default 0.7 (EntityLiving.java:57); zombie 0.5,
-/// spider 0.8; skeleton/creeper keep 0.7.
+/// spider 0.8; skeleton/creeper keep 0.7. Giant lumbers at 0.5 like a
+/// zombie; pigmen walk 0.5 (0.95 enraged — handled in AI, not here).
 pub fn mob_base_speed(kind: MobKind) -> f32 {
     match kind {
         MobKind::Zombie => 0.5,
         MobKind::Skeleton => 0.7,
         MobKind::Spider => 0.8,
         MobKind::Creeper => 0.7,
+        MobKind::Giant => 0.5,
+        MobKind::Slime => 0.7,
+        MobKind::Ghast => 0.5,
+        MobKind::PigZombie => 0.5,
     }
 }
 
-/// Attack reach mirroring `getAttackReach` (skeleton shoots at 10, the
-/// rest melee at 2.5). Also drives the chase-speed switch in `updateAI`.
+/// Attack reach mirroring `getAttackReach` (skeleton shoots at 10, ghast
+/// shoots fireballs at 64, the rest melee at 2.5). Also drives the chase-speed switch in `updateAI`.
 pub fn mob_attack_reach(kind: MobKind) -> f32 {
     match kind {
         MobKind::Skeleton => 10.0,
+        MobKind::Ghast => 64.0,
         _ => 2.5,
     }
 }
 
-/// Daylight combustion mirroring `burnsInDaylight` (zombies and skeletons
-/// only; spiders gate aggro on brightness instead, creepers ignore it).
+/// Daylight combustion mirroring `burnsInDaylight` (zombies, skeletons
+/// and giants only; spiders gate aggro on brightness instead, creepers,
+/// slimes, ghasts and pigmen ignore it).
 pub fn mob_burns_in_daylight(kind: MobKind) -> bool {
-    matches!(kind, MobKind::Zombie | MobKind::Skeleton)
+    matches!(kind, MobKind::Zombie | MobKind::Skeleton | MobKind::Giant)
+}
+
+/// Melee strength: vanilla `field_404_af` (zombie-line 5 here per the
+/// established `zombie_punch`; giant 50 per `EntityZombieSimple`;
+/// slime hits with its size; pigmen hit like zombies).
+pub fn mob_melee_damage(kind: MobKind, slime_size: u8) -> i32 {
+    match kind {
+        MobKind::Giant => 50,
+        MobKind::Slime => slime_size.max(1) as i32,
+        _ => 5,
+    }
 }
 
 /// Animal body size mirroring the C++ constructors (pig 0.9x0.9, sheep and
@@ -178,13 +224,17 @@ pub fn animal_dims(kind: AnimalKind) -> (f32, f32) {
         AnimalKind::Chicken => (0.3, 0.4),
     }
 }
-/// Mob network type ids (mirrors `getMobTypeId`).
+/// Mob network type ids (mirrors `getMobTypeId` + `EntityList`).
 pub fn mob_type_id(kind: MobKind) -> u8 {
     match kind {
         MobKind::Spider => 52,
         MobKind::Zombie => 54,
         MobKind::Skeleton => 51,
         MobKind::Creeper => 50,
+        MobKind::Giant => 53,
+        MobKind::Slime => 55,
+        MobKind::Ghast => 56,
+        MobKind::PigZombie => 57,
     }
 }
 
@@ -269,6 +319,73 @@ pub struct BoatEnt {
     pub forward_dir: i32,
 }
 
+/// Thrown snowball (`EntitySnowball`, type 11): gravity projectile,
+/// damage 0 + knockback on living hits. Tracked 64/5 with velocity
+/// (vanilla has the tracker branch, so other players see it).
+#[derive(Clone, Debug)]
+pub struct SnowballEnt {
+    pub body: Body,
+    pub owner_id: EntityId,
+    pub ticks_in_air: i32,
+}
+
+/// Fishing hook (`EntityFish`): cast from the rod, falls with light
+/// gravity, bobs in water, nibbles on a 1/500 roll, sticks in blocks.
+/// Reeling with an active nibble catches a fish; reeling a hooked
+/// entity yanks it. Tracked 64/5 (vanilla tracker branch exists).
+/// One live hook per player max.
+#[derive(Clone, Debug)]
+pub struct FishHookEnt {
+    pub body: Body,
+    pub owner_id: EntityId,
+    pub ticks_in_air: i32,
+    /// Nibble window ticks left (`field_4124_am`): set 10+rand(30) on a
+    /// 1/500 water roll with a motion dip. Reeling inside the window
+    /// catches the fish.
+    pub nibble_ticks: i32,
+    /// Hooked entity id (`field c`): follows its position, yanked on reel.
+    pub hooked_id: EntityId,
+    /// Stuck-in-block cell (`inTile` + xyzTile); 1200-tick life there.
+    pub stuck_tile: [i32; 3],
+    pub stuck_in: i32,
+    pub stuck: bool,
+    pub shake: i32,
+}
+
+/// Ghast fireball (`EntityFireball`): straight-flying incendiary
+/// projectile, explodes at radius 1 on contact. Vanilla has no tracker
+/// branch for it, so it rides the arrow channel (visible as an arrow —
+/// documented divergence, dodgeable beats invisible).
+#[derive(Clone, Debug)]
+pub struct FireballEnt {
+    pub body: Body,
+    pub owner_id: EntityId,
+    pub ticks_in_air: i32,
+}
+
+/// Rideable minecart (`EntityMinecart`, type 40): rolls on rails (66),
+/// pushable, boardable. Tracked 160/5 with velocity.
+#[derive(Clone, Debug)]
+pub struct MinecartEnt {
+    pub body: Body,
+    /// Cart flavor 0/1/2 (rideable/chest/furnace). Only rideable carts
+    /// spawn from items; chest/furnace flavors are NBT/persist only.
+    pub cart_type: i32,
+    /// Break damage (`damage_taken > 40` shatters like boats).
+    pub damage_taken: i32,
+    pub time_since_hit: i32,
+}
+
+/// Primed TNT block (`EntityTNTPrimed`, type 20): 80-tick fuse after
+/// hand ignition (10..30 chained), blasts at radius 4. Tracked 160/10
+/// with velocity (vanilla branch). Replaces the invisible
+/// `pending_tnt` stand-in with a visible, dodgeable fuse.
+#[derive(Clone, Debug)]
+pub struct TntEnt {
+    pub body: Body,
+    pub fuse: i32,
+}
+
 #[derive(Clone, Debug)]
 pub struct FallingEnt {
     pub body: Body,
@@ -293,6 +410,19 @@ pub struct MobEnt {
     /// while the target stays close, explodes at 30.
     pub swell_time: i32,
     pub swell_dir: i32,
+    /// Slime size 1/2/4 (`EntitySlime.field_403_ad = 1 << rand(3)`;
+    /// dims + max health scale with it). Ignored for other kinds.
+    pub slime_size: u8,
+    /// PigZombie anger ticks (`EntityPigZombie.field_4106_a`): set to
+    /// 400+rand(400) when hurt, counts down; the pigman only hunts
+    /// while angry (neutral otherwise).
+    pub anger: i32,
+    /// Ghast waypoint (`field_4098_b/c/d`): drift target, re-picked
+    /// when closer than 1 or farther than 60.
+    pub waypoint: [f64; 3],
+    pub has_waypoint: bool,
+    /// Ghast fireball cooldown ticks (vanilla `field_4103_aj`-style gate).
+    pub shoot_cooldown: i32,
 }
 
 impl MobEnt {
@@ -304,6 +434,16 @@ impl MobEnt {
         living.move_speed = mob_base_speed(kind);
         living.body.step_height = 0.5; // EntityLiving ctor (players stay 0.0 like EntityPlayerMP)
         living.max_hurt_resist = 20; // EntityLiving.java:6 (mobs never change it)
+        if kind == MobKind::Giant {
+            // `EntityZombieSimple`: 10x health.
+            living.health = 200;
+            living.max_health = 200;
+        }
+        if kind == MobKind::Ghast || kind == MobKind::PigZombie {
+            // `field_9079_ae`: fire/lava immunity marker (enforced by
+            // kind checks at the ignition sites, not read directly).
+            living.body.fire_resistance = 0;
+        }
         Self {
             living,
             kind,
@@ -316,7 +456,27 @@ impl MobEnt {
             path_index: 0,
             swell_time: 0,
             swell_dir: -1,
+            slime_size: 1,
+            anger: 0,
+            waypoint: [0.0; 3],
+            has_waypoint: false,
+            shoot_cooldown: 0,
         }
+    }
+
+    /// Resize a slime (`EntitySlime.func_160_c`): dims `0.6*size`,
+    /// health `size*size`, box re-seated on the feet position.
+    pub fn set_slime_size(&mut self, size: u8) {
+        let size = size.clamp(1, 4);
+        self.slime_size = size;
+        let (w, h) = mob_dims_for(MobKind::Slime, size);
+        let pos = self.living.body.pos;
+        self.living.body.width = w;
+        self.living.body.height = h;
+        self.living.body.set_position(pos[0], pos[1], pos[2]);
+        let hp = (size as i16) * (size as i16);
+        self.living.health = hp;
+        self.living.max_health = hp;
     }
 }
 
@@ -444,6 +604,11 @@ pub enum Entity {
     Mob(MobEnt),
     Animal(AnimalEnt),
     Player(PlayerEnt),
+    Snowball(SnowballEnt),
+    FishHook(FishHookEnt),
+    Fireball(FireballEnt),
+    Minecart(MinecartEnt),
+    Tnt(TntEnt),
 }
 
 impl Entity {
@@ -456,6 +621,11 @@ impl Entity {
             Entity::Mob(e) => &e.living.body,
             Entity::Animal(e) => &e.living.body,
             Entity::Player(e) => &e.living.body,
+            Entity::Snowball(e) => &e.body,
+            Entity::FishHook(e) => &e.body,
+            Entity::Fireball(e) => &e.body,
+            Entity::Minecart(e) => &e.body,
+            Entity::Tnt(e) => &e.body,
         }
     }
 
@@ -468,6 +638,11 @@ impl Entity {
             Entity::Mob(e) => &mut e.living.body,
             Entity::Animal(e) => &mut e.living.body,
             Entity::Player(e) => &mut e.living.body,
+            Entity::Snowball(e) => &mut e.body,
+            Entity::FishHook(e) => &mut e.body,
+            Entity::Fireball(e) => &mut e.body,
+            Entity::Minecart(e) => &mut e.body,
+            Entity::Tnt(e) => &mut e.body,
         }
     }
 
@@ -505,6 +680,16 @@ impl EntityTable {
 
     pub fn alloc_id(&mut self) -> EntityId {
         next_id(&mut self.next_id)
+    }
+
+    /// Move the allocator past `id` so a row migrated from another
+    /// dimension keeps its id without future collisions. Used by
+    /// portal travel (both tables start at 1; hell allocs live above
+    /// [`HELL_ID_BASE`]).
+    pub fn reserve_id(&mut self, id: EntityId) {
+        if id >= self.next_id {
+            self.next_id = id.wrapping_add(1);
+        }
     }
 
     pub fn insert(&mut self, entity: Entity) -> EntityId {

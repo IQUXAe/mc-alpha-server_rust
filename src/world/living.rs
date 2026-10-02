@@ -1,7 +1,7 @@
 //! Damage pipeline, death/drops and living/player ticks on [`World`].
 //! Split out of `world.rs`; behavior unchanged.
 
-use crate::entity::table::{AnimalKind, Entity, EntityId, LivingBody, MobKind};
+use crate::entity::table::{AnimalKind, Entity, EntityId, LivingBody, MobEnt, MobKind};
 use crate::material::Material;
 use crate::math_helper::floor_double;
 use crate::world::World;
@@ -95,6 +95,11 @@ impl World {
             r.died = r.health <= 0;
         }
         let died = r.died;
+        let is_player_attacker = attacker
+            .map(|a| matches!(self.entities.get(a), Some(Entity::Player(_))))
+            .unwrap_or(false);
+        let mut alert_pigzombies = false;
+        let mut alert_pos = [0.0; 3];
         match self.entities.get_mut(id) {
             Some(Entity::Mob(m)) => {
                 m.living.health = r.health;
@@ -107,14 +112,27 @@ impl World {
                 }
                 // Java EntityMobs.attackEntity (lines 35-38): set target to attacker
                 // when damaged by another entity that isn't rider/vehicle.
+                // Pigmen only retaliate while angry: any hurt sets
+                // 400+rand(400) anger (`EntityPigZombie`), and the target
+                // sticks only while anger lasts (gated in acquire).
                 if let Some(atk_id) = attacker {
                     if atk_id != id
                         && atk_id != m.living.body.ridden_by
                         && atk_id != m.living.body.riding
                     {
-                        m.target = Some(atk_id);
-                        m.path.clear();
-                        m.path_index = 0;
+                        if m.kind == MobKind::PigZombie {
+                            m.anger = 400 + self.rng.next_int_bound(400);
+                            if is_player_attacker {
+                                alert_pigzombies = true;
+                                alert_pos = m.living.body.pos;
+                            }
+                        }
+                        let provoked = m.kind != MobKind::PigZombie || m.anger > 0;
+                        if provoked {
+                            m.target = Some(atk_id);
+                            m.path.clear();
+                            m.path_index = 0;
+                        }
                     }
                 }
             }
@@ -139,6 +157,28 @@ impl World {
                 }
             }
             _ => return,
+        }
+        if alert_pigzombies {
+            if let Some(atk_id) = attacker {
+                for oid in self.entities.alive_ids() {
+                    if oid != id {
+                        if let Some(Entity::Mob(m)) = self.entities.get_mut(oid) {
+                            if m.kind == MobKind::PigZombie {
+                                let opos = m.living.body.pos;
+                                if (opos[0] - alert_pos[0]).abs() <= 32.0
+                                    && (opos[1] - alert_pos[1]).abs() <= 32.0
+                                    && (opos[2] - alert_pos[2]).abs() <= 32.0
+                                {
+                                    m.anger = 400 + self.rng.next_int_bound(400);
+                                    m.target = Some(atk_id);
+                                    m.path.clear();
+                                    m.path_index = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         if !matches!(self.entities.get(id), Some(Entity::Player(_))) {
             self.mark_chunk_modified(
@@ -246,6 +286,36 @@ impl World {
                         let record = if self.rng.next_int_bound(2) == 0 { 2256 } else { 2257 };
                         self.spawn_item_entity(record, 1, 0, px, py, pz);
                     }
+                }
+            }
+            // Slime split (`EntitySlime.setEntityDead`): damage deaths
+            // (`health <= 0`, not despawns) of size>1 spawn 4 children at
+            // half size around the corpse. No player cap needed: sizes
+            // halve, so depth is bounded by log2(size) <= 2.
+            let split = match self.entities.get(id) {
+                Some(Entity::Mob(m))
+                    if m.kind == MobKind::Slime && m.slime_size > 1 && m.living.health <= 0 =>
+                {
+                    Some((m.slime_size, m.living.body.pos))
+                }
+                _ => None,
+            };
+            if let Some((size, pos)) = split {
+                let child_size = size / 2;
+                for i in 0..4 {
+                    let ox = ((i % 2) as f64 - 0.5) * size as f64 / 4.0;
+                    let oz = ((i / 2) as f64 - 0.5) * size as f64 / 4.0;
+                    let nid = self.entities.alloc_id();
+                    let mut child = MobEnt::new(nid, MobKind::Slime);
+                    child.set_slime_size(child_size);
+                    child.living.body.set_position(pos[0] + ox, pos[1] + 0.5, pos[2] + oz);
+                    child.living.body.yaw = self.rng.next_float() * 360.0;
+                    self.entities.insert(Entity::Mob(child));
+                    self.stamp_dim(nid);
+                    self.mark_chunk_modified(
+                        (pos[0].floor() as i32) >> 4,
+                        (pos[2].floor() as i32) >> 4,
+                    );
                 }
             }
         }
@@ -420,6 +490,22 @@ impl World {
                 crate::entity::table::MobKind::Zombie => (288, self.rng.next_int_bound(3)),
                 crate::entity::table::MobKind::Skeleton => (262, self.rng.next_int_bound(3)),
                 crate::entity::table::MobKind::Creeper => (289, self.rng.next_int_bound(3)),
+                // `EntityZombieSimple` has no `getDropItemId` override:
+                // the `EntityLiving` default (0) drops nothing.
+                crate::entity::table::MobKind::Giant => (0, 0),
+                // `EntitySlime.getDropItemId`: slimeBall (341) only at
+                // size 1, else nothing (the split children carry value).
+                crate::entity::table::MobKind::Slime => {
+                    if m.slime_size == 1 {
+                        (341, self.rng.next_int_bound(3))
+                    } else {
+                        (0, 0)
+                    }
+                }
+                // `EntityGhast.getDropItemId`: gunpowder (289).
+                crate::entity::table::MobKind::Ghast => (289, self.rng.next_int_bound(3)),
+                // `EntityPigZombie.getDropItemId`: cooked pork (320).
+                crate::entity::table::MobKind::PigZombie => (320, self.rng.next_int_bound(3)),
             },
             Some(Entity::Animal(a)) => match a.kind {
                 crate::entity::table::AnimalKind::Sheep => (0, 0),
@@ -577,12 +663,20 @@ impl World {
         })
         .unwrap_or(false);
         if in_lava {
-            self.attack_living(id, 4, None);
-            match self.entities.get_mut(id) {
-                Some(Entity::Mob(m)) => m.living.body.fire = m.living.body.fire.max(600),
-                Some(Entity::Animal(a)) => a.living.body.fire = a.living.body.fire.max(600),
-                Some(Entity::Player(p)) => p.living.body.fire = p.living.body.fire.max(600),
-                _ => {}
+            // Fire-immune kinds (ghast/pigman) skip lava damage+ignition.
+            let immune = matches!(
+                self.entities.get(id),
+                Some(Entity::Mob(m))
+                    if matches!(m.kind, crate::entity::table::MobKind::Ghast | crate::entity::table::MobKind::PigZombie)
+            );
+            if !immune {
+                self.attack_living(id, 4, None);
+                match self.entities.get_mut(id) {
+                    Some(Entity::Mob(m)) => m.living.body.fire = m.living.body.fire.max(600),
+                    Some(Entity::Animal(a)) => a.living.body.fire = a.living.body.fire.max(600),
+                    Some(Entity::Player(p)) => p.living.body.fire = p.living.body.fire.max(600),
+                    _ => {}
+                }
             }
         }
         let (alive, opaque, water, air, hurt, attack, resist) = match self.entities.get(id) {

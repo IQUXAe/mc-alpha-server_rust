@@ -10,8 +10,26 @@ use crate::world::{World, has_collision_box, has_collision_id};
 use crate::world::ai::CreatureSnap;
 
 /// Creeper blast radius (mirrors the Alpha inline `explode`).
-const CREEPER_BLAST_RADIUS: f32 = 3.0;
+pub(crate) const CREEPER_BLAST_RADIUS: f32 = 3.0;
+/// Hard cap on destroyed cells per blast (hardening; vanilla is
+/// uncapped). A radius-4 blast yields ~10^2 cells; chains of dozens
+/// stay far below. Without a cap one player chaining a field of TNT
+/// stalls the 50ms tick for everyone (block loop + per-cell packets).
+pub const MAX_BLAST_CELLS: usize = 8192;
 /// Fire block id placed by explosions.
+/// Look direction from yaw/pitch degrees (mirrors the player-aim math
+/// in `ItemBoat`/`EntityArrow`: x=-sin(yaw)cos(pitch), y=-sin(pitch),
+/// z=cos(yaw)cos(pitch)).
+fn look_dir(yaw: f32, pitch: f32) -> [f64; 3] {
+    let yr = yaw as f64 * std::f64::consts::PI / 180.0;
+    let pr = pitch as f64 * std::f64::consts::PI / 180.0;
+    [
+        -yr.sin() * pr.cos(),
+        -pr.sin(),
+        yr.cos() * pr.cos(),
+    ]
+}
+
 impl World {
     /// Line of sight (mirrors `canEntitySee` → `rayTraceBlocks` with
     /// `includeLiquids = false`): the same DDA walk, blocked by any
@@ -304,16 +322,32 @@ impl World {
         snap: &mut CreatureSnap,
     ) -> Option<EntityId> {
         match kind {
-            MobKind::Zombie => self.zombie_punch(id, target, dist),
+            MobKind::Zombie | MobKind::Giant | MobKind::PigZombie => {
+                self.zombie_punch(id, kind, target, dist)
+            }
             MobKind::Skeleton => self.skeleton_volley(id, target, dist, snap),
             MobKind::Spider => self.spider_attack(id, target, dist, snap),
             MobKind::Creeper => self.creeper_swell(id, target, dist, snap),
+            MobKind::Slime => self.slime_touch(id, target, dist),
+            MobKind::Ghast => self.ghast_volley(id, target, dist),
         }
     }
 
     /// Base melee (mirrors `EntityMob::attackTarget`): in-reach, vertical
-    /// overlap, cooldown-gated strength-5 poke.
-    fn zombie_punch(&mut self, id: EntityId, target: EntityId, dist: f32) -> Option<EntityId> {
+    /// overlap, cooldown-gated. Strength by kind (`mob_melee_damage`:
+    /// zombie-line 5, giant 50).
+    fn zombie_punch(
+        &mut self,
+        id: EntityId,
+        kind: MobKind,
+        target: EntityId,
+        dist: f32,
+    ) -> Option<EntityId> {
+        let size = match self.entities.get(id) {
+            Some(Entity::Mob(m)) => m.slime_size,
+            _ => 1,
+        };
+        let damage = crate::entity::table::mob_melee_damage(kind, size);
         let (overlap, ready) = match (self.entities.get(id), self.entities.get(target)) {
             (Some(s), Some(t)) => (
                 t.body().bounding_box.max_y > s.body().bounding_box.min_y
@@ -326,9 +360,660 @@ impl World {
             if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
                 m.attack_cooldown = 20;
             }
-            self.attack_living(target, 5, Some(id));
+            self.attack_living(target, damage, Some(id));
         }
         Some(target)
+    }
+
+    /// Slime touch damage (mirrors `EntitySlime` contact): reach-2.5
+    /// strength-size poke with the same cooldown gate as the base melee.
+    fn slime_touch(&mut self, id: EntityId, target: EntityId, dist: f32) -> Option<EntityId> {
+        self.zombie_punch(id, MobKind::Slime, target, dist)
+    }
+
+    /// Ghast volley: loose a fireball at the victim's eye on a 100+rand40
+    /// cooldown when inside 64 blocks with line of sight (vanilla
+    /// `field_4103_aj` gate + `worldObj.playSoundAtEntity("mob.ghast.fireattack")`
+    /// equivalent is client-side on the spawn packet).
+    fn ghast_volley(&mut self, id: EntityId, target: EntityId, dist: f32) -> Option<EntityId> {
+        if dist > 64.0 {
+            return Some(target);
+        }
+        let ready = matches!(
+            self.entities.get(id),
+            Some(Entity::Mob(m)) if m.attack_cooldown == 0
+        );
+        if !ready {
+            return Some(target);
+        }
+        if !self.attack_los(id, target) {
+            return Some(target);
+        }
+        if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
+            m.attack_cooldown = 100 + (self.rng.next_int_bound(40));
+        }
+        self.spawn_fireball(id, target);
+        Some(target)
+    }
+
+    /// Shared thrown-projectile sweep (blocks + living): nearest
+    /// collidable block cell, plus nearest living/player row intersecting
+    /// the motion box (owner skipped while young). Bounded by the
+    /// motion-box scan like the arrow sweep (no unbounded loops).
+    fn projectile_sweep(
+        &self,
+        id: EntityId,
+        owner: EntityId,
+        grace_ticks: i32,
+        ticks_in_air: i32,
+    ) -> (Option<EntityId>, Option<(i32, i32, i32)>) {
+        let (pos, motion, bbox) = match self.entities.get(id) {
+            Some(e) => (e.body().pos, e.body().motion, e.body().bounding_box),
+            None => return (None, None),
+        };
+        let sweep = bbox.add_coord(motion[0], motion[1], motion[2]).expand(1.0, 1.0, 1.0);
+        let (min_x, min_y, min_z) = (
+            floor_double(sweep.min_x), floor_double(sweep.min_y), floor_double(sweep.min_z),
+        );
+        let (max_x, max_y, max_z) = (
+            floor_double(sweep.max_x), floor_double(sweep.max_y), floor_double(sweep.max_z),
+        );
+        let mut block_hit: Option<(i32, i32, i32)> = None;
+        let mut best = f64::MAX;
+        for x in min_x..=max_x {
+            for y in min_y..=max_y {
+                for z in min_z..=max_z {
+                    let bid = self.get_block_id(x, y, z);
+                    if bid == 0 {
+                        continue;
+                    }
+                    let props = block_properties_get(bid as u32);
+                    if !has_collision_box(props.block_type) || !has_collision_id(bid) {
+                        continue;
+                    }
+                    let d = (x as f64 + 0.5 - pos[0]).powi(2)
+                        + (y as f64 + 0.5 - pos[1]).powi(2)
+                        + (z as f64 + 0.5 - pos[2]).powi(2);
+                    if d < best {
+                        best = d;
+                        block_hit = Some((x, y, z));
+                    }
+                }
+            }
+        }
+        let mut entity_hit: Option<EntityId> = None;
+        let mut cands: Vec<EntityId> = Vec::new();
+        for oid in self.entities.alive_ids() {
+            if oid == id || oid == owner && ticks_in_air < grace_ticks {
+                continue;
+            }
+            // Projectiles don't hit items, other shots, or vehicles.
+            if let Some(o) = self.entities.get(oid) {
+                if !matches!(
+                    o,
+                    Entity::Mob(_) | Entity::Animal(_) | Entity::Player(_)
+                ) {
+                    continue;
+                }
+                if sweep.intersects_with(&o.body().bounding_box) {
+                    cands.push(oid);
+                }
+            }
+        }
+        cands.sort_unstable();
+        for oid in cands {
+            let (ox, oy, oz) = match self.entities.get(oid) {
+                Some(o) => (o.body().pos[0], o.body().pos[1], o.body().pos[2]),
+                None => continue,
+            };
+            let d = (ox - pos[0]).powi(2) + (oy - pos[1]).powi(2) + (oz - pos[2]).powi(2);
+            if d < best {
+                best = d;
+                entity_hit = Some(oid);
+            }
+        }
+        (entity_hit, block_hit)
+    }
+
+    /// Snowball tick (mirrors `EntitySnowball.onUpdate`): gravity 0.03,
+    /// block impact dies, living impact deals 0 + knockback and dies.
+    /// 1200-tick lifetime like arrows.
+    pub fn tick_snowball(&mut self, id: EntityId) {
+        self.entities.tick_base(id);
+        let (owner, ticks) = match self.entities.get_mut(id) {
+            Some(Entity::Snowball(s)) => {
+                s.ticks_in_air += 1;
+                if s.ticks_in_air > 1200 {
+                    s.body.dead = true;
+                    return;
+                }
+                (s.owner_id, s.ticks_in_air)
+            }
+            _ => return,
+        };
+        let (entity_hit, block_hit) = self.projectile_sweep(id, owner, 5, ticks);
+        if let Some(v) = entity_hit {
+            // Damage 0 by design (vanilla `attackEntity(attacker, 0)`):
+            // our pipeline no-ops on non-positive amounts, so the
+            // knockback is applied explicitly in the vanilla shape
+            // (halve motion, shove 0.4 away + 0.4 up, capped).
+            self.attack_living(v, 0, Some(owner));
+            let (sx, sz) = match self.entities.get(id) {
+                Some(e) => (e.body().pos[0], e.body().pos[2]),
+                None => return,
+            };
+            if let Some(t) = self.entities.get_mut(v) {
+                let b = t.body_mut();
+                let (dx, dz) = (sx - b.pos[0], sz - b.pos[2]);
+                let d = (dx * dx + dz * dz).sqrt();
+                if d > 1e-6 {
+                    b.motion[0] = b.motion[0] * 0.5 - dx / d * 0.4;
+                    b.motion[1] = (b.motion[1] * 0.5 + 0.4).min(0.4);
+                    b.motion[2] = b.motion[2] * 0.5 - dz / d * 0.4;
+                }
+            }
+            if let Some(Entity::Snowball(s)) = self.entities.get_mut(id) {
+                s.body.dead = true;
+            }
+            return;
+        }
+        if block_hit.is_some() {
+            if let Some(Entity::Snowball(s)) = self.entities.get_mut(id) {
+                s.body.dead = true;
+            }
+            return;
+        }
+        let (mx, my, mz) = match self.entities.get(id) {
+            Some(e) => (e.body().motion[0], e.body().motion[1], e.body().motion[2]),
+            None => return,
+        };
+        self.move_body(id, mx, my, mz);
+        // Drag + gravity (vanilla tail: 0.99 air, 0.8 in water, -0.03).
+        let in_water = match self.entities.get(id) {
+            Some(e) => {
+                let bb = e.body().bounding_box;
+                crate::entity::misc::water_fraction_scan(
+                    bb.min_x, bb.min_y, bb.min_z, bb.max_x, bb.max_y, bb.max_z,
+                    |x, y, z| self.is_water(x, y, z),
+                ) > 0.0
+            }
+            None => return,
+        };
+        if let Some(Entity::Snowball(s)) = self.entities.get_mut(id) {
+            let drag = if in_water { 0.8 } else { 0.99 };
+            s.body.motion[0] *= drag;
+            s.body.motion[1] *= drag;
+            s.body.motion[2] *= drag;
+            s.body.motion[1] -= 0.03;
+        }
+    }
+
+    /// Fireball tick (mirrors `EntityFireball.onUpdate` minus the vanilla
+    /// fire trail): straight flight, radius-1 blast on any contact.
+    /// 1200-tick lifetime cap (hardening; vanilla flies until it hits).
+    pub fn tick_fireball(&mut self, id: EntityId) {
+        self.entities.tick_base(id);
+        let (owner, ticks) = match self.entities.get_mut(id) {
+            Some(Entity::Fireball(f)) => {
+                f.ticks_in_air += 1;
+                if f.ticks_in_air > 1200 {
+                    f.body.dead = true;
+                    return;
+                }
+                (f.owner_id, f.ticks_in_air)
+            }
+            _ => return,
+        };
+        let (entity_hit, block_hit) = self.projectile_sweep(id, owner, 5, ticks);
+        if entity_hit.is_some() || block_hit.is_some() {
+            let (px, py, pz) = match self.entities.get(id) {
+                Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+                None => return,
+            };
+            if let Some(e) = self.entities.get_mut(id) {
+                e.body_mut().dead = true;
+            }
+            // Incendiary like the vanilla impact (lights the crater).
+            self.blast_flaming(px, py, pz, 1.0, Some(owner), true);
+            return;
+        }
+        let (mx, my, mz) = match self.entities.get(id) {
+            Some(e) => (e.body().motion[0], e.body().motion[1], e.body().motion[2]),
+            None => return,
+        };
+        self.move_body(id, mx, my, mz);
+    }
+
+    /// Throw a snowball from a shooter's eye along its look (player
+    /// item use; speed 1.5 like the bow draw).
+    pub(crate) fn spawn_snowball(&mut self, owner: EntityId) {
+        let (pos, yaw, pitch, eye) = match self.entities.get(owner) {
+            Some(e) => (e.body().pos, e.body().yaw, e.body().pitch, Self::living_eye_height(e)),
+            None => return,
+        };
+        let dir = look_dir(yaw, pitch);
+        let nid = self.entities.alloc_id();
+        let mut b = Body::new(nid, 0.25, 0.25, 0.0);
+        b.set_position(pos[0], pos[1] + eye - 0.1, pos[2]);
+        b.motion = [dir[0] * 1.5, dir[1] * 1.5, dir[2] * 1.5];
+        self.entities.insert(Entity::Snowball(crate::entity::table::SnowballEnt {
+            body: b,
+            owner_id: owner,
+            ticks_in_air: 0,
+        }));
+        self.stamp_dim(nid);
+        self.mark_chunk_modified((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+    }
+
+    /// Player bow shot (mirrors `ItemBow.onItemRightClick` +
+    /// `EntityArrow` player ctor): eye start along the look at speed
+    /// 2.0. The session layer consumes one arrow (262) and gates the
+    /// 20-tick draw cooldown. Sound is client-side on the swing packet.
+    pub(crate) fn spawn_player_arrow(&mut self, owner: EntityId) {
+        let (pos, yaw, pitch, eye) = match self.entities.get(owner) {
+            Some(e) => (e.body().pos, e.body().yaw, e.body().pitch, Self::living_eye_height(e)),
+            None => return,
+        };
+        let dir = look_dir(yaw, pitch);
+        let nid = self.entities.alloc_id();
+        let mut b = Body::new(nid, 0.5, 0.5, 0.0);
+        b.set_position(pos[0], pos[1] + eye - 0.1, pos[2]);
+        b.yaw = yaw;
+        b.pitch = pitch;
+        b.prev_yaw = yaw;
+        b.prev_pitch = pitch;
+        b.motion = [dir[0] * 2.0, dir[1] * 2.0, dir[2] * 2.0];
+        self.entities.insert(Entity::Arrow(crate::entity::table::ArrowEnt {
+            body: b,
+            in_ground: false,
+            shake: 0,
+            ticks_in_ground: 0,
+            ticks_in_air: 0,
+            shooter_id: owner,
+            tile: [-1, -1, -1],
+            in_tile: 0,
+        }));
+        self.mark_chunk_modified((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+    }
+
+    /// Place a rideable minecart on rails (mirrors
+    /// `ItemMinecart.onItemUse`: only on top of a rail block 66, only
+    /// server-side rows here). Returns false when the target is not a
+    /// rail (caller sends the rollback).
+    pub(crate) fn place_minecart(&mut self, x: i32, y: i32, z: i32) -> bool {
+        if self.get_block_id(x, y, z) != 66 {
+            return false;
+        }
+        let nid = self.entities.alloc_id();
+        let mut b = Body::new(nid, 0.98, 0.7, 0.0);
+        b.set_position(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5);
+        b.step_height = 1.0;
+        self.entities.insert(Entity::Minecart(crate::entity::table::MinecartEnt {
+            body: b,
+            cart_type: 0,
+            damage_taken: 0,
+            time_since_hit: 0,
+        }));
+        self.stamp_dim(nid);
+        self.mark_chunk_modified(x >> 4, z >> 4);
+        true
+    }
+
+    /// Cast a fishing hook (mirrors `ItemFishingRod.onItemRightClick`
+    /// cast half): eye start, look direction at moderate speed. At most
+    /// one live hook per owner (re-cast reels the old one — session
+    /// layer enforces this before calling).
+    pub(crate) fn cast_fishing(&mut self, owner: EntityId) {
+        let (pos, yaw, pitch, eye) = match self.entities.get(owner) {
+            Some(e) => (e.body().pos, e.body().yaw, e.body().pitch, Self::living_eye_height(e)),
+            None => return,
+        };
+        let dir = look_dir(yaw, pitch);
+        let nid = self.entities.alloc_id();
+        let mut b = Body::new(nid, 0.25, 0.25, 0.0);
+        b.set_position(pos[0], pos[1] + eye - 0.1, pos[2]);
+        // Launch speed 1.5 along the look (vanilla `func_6142_a`
+        // normalizes then scales; the gaussian spread is omitted —
+        // casts stay deterministic per aim).
+        b.motion = [dir[0] * 1.5, dir[1] * 1.5, dir[2] * 1.5];
+        self.entities.insert(Entity::FishHook(crate::entity::table::FishHookEnt {
+            body: b,
+            owner_id: owner,
+            ticks_in_air: 0,
+            nibble_ticks: 0,
+            hooked_id: crate::entity::table::NO_ENTITY,
+            stuck_tile: [-1, -1, -1],
+            stuck_in: 0,
+            stuck: false,
+            shake: 0,
+        }));
+        self.stamp_dim(nid);
+        self.mark_chunk_modified((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+    }
+
+    /// Fishing hook tick (mirrors `EntityFish.onUpdate`): owner/rod/range
+    /// guards, hooked-entity follow, stuck-in-block life, block/entity
+    /// sweep (entity hits deal 0 and hook on), water buoyancy + drag,
+    /// and the 1/500 nibble roll (`nibble_ticks = 10+rand(30)` with a
+    /// motion dip the client renders as a bobber dunk). The fish itself
+    /// is awarded on REEL inside the window, not on a timer.
+    pub fn tick_fishhook(&mut self, id: EntityId) {
+        self.entities.tick_base(id);
+        let owner = match self.entities.get(id) {
+            Some(Entity::FishHook(f)) => f.owner_id,
+            _ => return,
+        };
+        // Owner guards (vanilla lines 89-95): dead, not holding a rod,
+        // or farther than 32 blocks → line snaps.
+        let owner_ok = match self.entities.get(owner) {
+            Some(Entity::Player(p)) => {
+                !p.living.body.dead
+                    && matches!(
+                        p.inventory.main.get(p.inventory.current as usize).copied().flatten(),
+                        Some(s) if s.item_id == 346
+                    )
+                    && {
+                        let (ox, oy, oz) = (p.living.body.pos[0], p.living.body.pos[1], p.living.body.pos[2]);
+                        match self.entities.get(id) {
+                            Some(e) => {
+                                let (hx, hy, hz) = (e.body().pos[0], e.body().pos[1], e.body().pos[2]);
+                                (ox - hx).powi(2) + (oy - hy).powi(2) + (oz - hz).powi(2) <= 1024.0
+                            }
+                            None => false,
+                        }
+                    }
+            }
+            _ => false,
+        };
+        if !owner_ok {
+            if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
+                f.body.dead = true;
+            }
+            return;
+        }
+        // Hooked entity: ride it (vanilla lines 96-105).
+        let hooked = match self.entities.get(id) {
+            Some(Entity::FishHook(f)) => f.hooked_id,
+            _ => return,
+        };
+        if hooked >= 0 {
+            let alive = matches!(self.entities.get(hooked), Some(e) if !e.body().dead);
+            if !alive {
+                if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
+                    f.hooked_id = crate::entity::table::NO_ENTITY;
+                }
+            } else if let (Some(hk), Some(victim)) =
+                (self.entities.get(id), self.entities.get(hooked))
+            {
+                let (hx, hy, hz) = (hk.body().pos[0], hk.body().pos[1], hk.body().pos[2]);
+                let _ = (hx, hy, hz);
+                let (vx, vy, vz, vh) = (
+                    victim.body().pos[0],
+                    victim.body().pos[1],
+                    victim.body().pos[2],
+                    victim.body().height as f64,
+                );
+                if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
+                    f.body.set_position(vx, vy + vh * 0.8, vz);
+                    f.body.motion = [0.0; 3];
+                }
+                return;
+            }
+        }
+        // Stuck-in-block life (vanilla lines 112-131): same block →
+        // 1200-tick life; changed block → pop out damped.
+        let stuck = matches!(self.entities.get(id), Some(Entity::FishHook(f)) if f.stuck);
+        if stuck {
+            let same = match self.entities.get(id) {
+                Some(Entity::FishHook(f)) => {
+                    self.get_block_id(f.stuck_tile[0], f.stuck_tile[1], f.stuck_tile[2]) as i32
+                        == f.stuck_in
+                }
+                _ => false,
+            };
+            if same {
+                let done = match self.entities.get_mut(id) {
+                    Some(Entity::FishHook(f)) => {
+                        f.ticks_in_air += 1;
+                        f.ticks_in_air >= 1200
+                    }
+                    _ => true,
+                };
+                if done {
+                    if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
+                        f.body.dead = true;
+                    }
+                }
+                return;
+            }
+            if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
+                f.stuck = false;
+                f.body.motion[0] *= self.rng.next_float() as f64 * 0.2;
+                f.body.motion[1] *= self.rng.next_float() as f64 * 0.2;
+                f.body.motion[2] *= self.rng.next_float() as f64 * 0.2;
+                f.ticks_in_air = 0;
+            }
+        } else if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
+            f.ticks_in_air += 1;
+        }
+        // Nibble countdown.
+        if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
+            if f.nibble_ticks > 0 {
+                f.nibble_ticks -= 1;
+            }
+        }
+        // Sweep: block raycast + entity box (owner grace 5 ticks).
+        let ticks = match self.entities.get(id) {
+            Some(Entity::FishHook(f)) => f.ticks_in_air,
+            _ => return,
+        };
+        let (entity_hit, block_hit) = self.projectile_sweep(id, owner, 5, ticks);
+        if let Some(v) = entity_hit {
+            // Hook the victim (vanilla `field c`), damage 0 like snowballs.
+            self.attack_living(v, 0, Some(owner));
+            if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
+                f.hooked_id = v;
+            }
+            return;
+        }
+        if let Some((hx, hy, hz)) = block_hit {
+            let in_id = self.get_block_id(hx, hy, hz) as i32;
+            if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
+                f.stuck = true;
+                f.stuck_tile = [hx, hy, hz];
+                f.stuck_in = in_id;
+                f.body.motion = [0.0; 3];
+            }
+            return;
+        }
+        // Free flight + water physics (vanilla lines 177-256).
+        let (mx, my, mz) = match self.entities.get(id) {
+            Some(e) => (e.body().motion[0], e.body().motion[1], e.body().motion[2]),
+            None => return,
+        };
+        self.move_body(id, mx, my, mz);
+        // Face of travel (smoothed like the snowball tail).
+        if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
+            let horizontal = (mx * mx + mz * mz).sqrt();
+            let yaw = (mx.atan2(mz) * 180.0 / std::f64::consts::PI) as f32;
+            let pitch = (my.atan2(horizontal) * 180.0 / std::f64::consts::PI) as f32;
+            f.body.yaw = f.body.prev_yaw + (yaw - f.body.prev_yaw) * 0.2;
+            f.body.pitch = f.body.prev_pitch + (pitch - f.body.prev_pitch) * 0.2;
+        }
+        // Water fraction over 5 vertical slices (mirrors the scan).
+        let frac = match self.entities.get(id) {
+            Some(e) => {
+                let bb = e.body().bounding_box;
+                crate::entity::misc::water_fraction_scan(
+                    bb.min_x, bb.min_y, bb.min_z, bb.max_x, bb.max_y, bb.max_z,
+                    |x, y, z| self.is_water(x, y, z),
+                )
+            }
+            None => return,
+        };
+        let on_ground = matches!(self.entities.get(id), Some(e) if e.body().on_ground);
+        let in_water_mat = self.touching_liquid(id);
+        let mut drag = 0.92f64;
+        if on_ground || in_water_mat {
+            drag = 0.5;
+        }
+        if frac > 0.0 {
+            // Nibble roll: 1/500 per wet tick → 10+rand(30) window + dip.
+            if self.rng.next_int_bound(500) == 0 {
+                if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
+                    f.nibble_ticks = self.rng.next_int_bound(30) + 10;
+                    f.body.motion[1] -= 0.2;
+                }
+            }
+        }
+        if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
+            if f.nibble_ticks > 0 {
+                let r = self.rng.next_float() as f64;
+                f.body.motion[1] -= r * r * r * 0.2;
+            }
+            let lift = frac * 2.0 - 1.0;
+            f.body.motion[1] += 0.04 * lift;
+            if frac > 0.0 {
+                drag *= 0.9;
+                f.body.motion[1] *= 0.8;
+            }
+            f.body.motion[0] *= drag;
+            f.body.motion[1] *= drag;
+            f.body.motion[2] *= drag;
+        }
+    }
+
+    /// Reel-in outcome (vanilla `func_6143_c`): hooked entity → yank
+    /// toward the owner + rod damage 3; nibble window → raw fish flown
+    /// to the owner + damage 1; stuck in ground → damage 2; else 0.
+    /// Always kills the hook and clears the owner's line.
+    /// Returns the rod damage dealt.
+    pub(crate) fn reel_fishing(&mut self, owner: EntityId, hook: EntityId) -> i32 {
+        let (hx, hy, hz) = match self.entities.get(hook) {
+            Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+            None => return 0,
+        };
+        let hooked = match self.entities.get(hook) {
+            Some(Entity::FishHook(f)) => f.hooked_id,
+            _ => crate::entity::table::NO_ENTITY,
+        };
+        let nibbling = matches!(
+            self.entities.get(hook),
+            Some(Entity::FishHook(f)) if f.nibble_ticks > 0
+        );
+        let stuck = matches!(
+            self.entities.get(hook),
+            Some(Entity::FishHook(f)) if f.stuck
+        );
+        let mut damage = 0;
+        if hooked >= 0 && matches!(self.entities.get(hooked), Some(e) if !e.body().dead) {
+            if let (Some(o), Some(_)) = (self.entities.get(owner), self.entities.get(hooked)) {
+                let (dx, dy, dz) = (
+                    o.body().pos[0] - hx,
+                    o.body().pos[1] - hy,
+                    o.body().pos[2] - hz,
+                );
+                let d = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
+                if let Some(v) = self.entities.get_mut(hooked) {
+                    let b = v.body_mut();
+                    b.motion[0] += dx * 0.1;
+                    b.motion[1] += dy * 0.1 + d.sqrt() * 0.08;
+                    b.motion[2] += dz * 0.1;
+                }
+            }
+            self.attack_living(hooked, 0, Some(owner));
+            damage = 3;
+        } else if nibbling {
+            let fish = self.spawn_item_entity(349, 1, 0, hx, hy, hz);
+            if let (Some(o), Some(_)) = (self.entities.get(owner), self.entities.get(fish)) {
+                let (dx, dy, dz) = (
+                    o.body().pos[0] - hx,
+                    o.body().pos[1] - hy,
+                    o.body().pos[2] - hz,
+                );
+                let d = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
+                if let Some(Entity::Item(it)) = self.entities.get_mut(fish) {
+                    it.body.motion[0] = dx * 0.1;
+                    it.body.motion[1] = dy * 0.1 + d.sqrt() * 0.08;
+                    it.body.motion[2] = dz * 0.1;
+                }
+            }
+            damage = 1;
+        } else if stuck {
+            damage = 2;
+        }
+        if let Some(Entity::FishHook(f)) = self.entities.get_mut(hook) {
+            f.body.dead = true;
+        }
+        if damage > 0 {
+            self.damage_held_rod(owner, damage);
+        }
+        damage
+    }
+
+    /// Wear the owner's held fishing rod by `amount` (vanilla
+    /// `damageItem` on reel/catch; rod breaks at 64 like tools).
+    fn damage_held_rod(&mut self, owner: EntityId, amount: i32) {
+        let cur = match self.entities.get(owner) {
+            Some(Entity::Player(p)) => p.inventory.current,
+            _ => return,
+        };
+        if !(0..36).contains(&cur) {
+            return;
+        }
+        let mut slot = match self.entities.get(owner) {
+            Some(Entity::Player(p)) => p.inventory.main[cur as usize],
+            _ => None,
+        };
+        if let Some(mut s) = slot {
+            if s.item_id == 346 {
+                let max = crate::item_data::item_max_damage(346);
+                crate::inventory::item_stack_damage(&mut s, amount, max);
+                slot = if s.count <= 0 || s.damage > max { None } else { Some(s) };
+            }
+        }
+        if let Some(Entity::Player(p)) = self.entities.get_mut(owner) {
+            p.inventory.main[cur as usize] = slot;
+        }
+    }
+
+    /// Ghast fireball (mirrors `EntityFireball` construction in
+    /// `EntityGhast.func_4126_a`): eye-height start, normalized aim at
+    /// the victim's eye with small spread, speed ~1.2, blast radius 1.
+    /// Tracked as vehicle 65 so victims see it coming (vanilla has no
+    /// tracker branch for it — documented in entity/table.rs).
+    pub(crate) fn spawn_fireball(&mut self, id: EntityId, target: EntityId) {
+        let (sp, eye) = match self.entities.get(id) {
+            Some(e) => (e.body().pos, e.body().height as f64 * 0.5),
+            None => return,
+        };
+        let tp = match self.entities.get(target) {
+            Some(t) => {
+                let te = Self::living_eye_height(t);
+                [t.body().pos[0], t.body().pos[1] + te, t.body().pos[2]]
+            }
+            None => return,
+        };
+        let (mut dx, mut dy, mut dz) =
+            (tp[0] - sp[0], tp[1] - (sp[1] + eye), tp[2] - sp[2]);
+        let len = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
+        // Vanilla spread: gaussian-ish jitter via rand draws.
+        dx += self.rng.next_double() * 0.2 - 0.1;
+        dy += self.rng.next_double() * 0.2 - 0.1;
+        dz += self.rng.next_double() * 0.2 - 0.1;
+        let nlen = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
+        let motion = [dx / nlen * 1.2, dy / nlen * 1.2, dz / nlen * 1.2];
+        let nid = self.entities.alloc_id();
+        let mut b = Body::new(nid, 1.0, 1.0, 0.0);
+        b.set_position(sp[0], sp[1] + eye, sp[2]);
+        b.motion = motion;
+        self.entities.insert(Entity::Fireball(crate::entity::table::FireballEnt {
+            body: b,
+            owner_id: id,
+            ticks_in_air: 0,
+        }));
+        self.stamp_dim(nid);
+        let _ = len;
     }
 
     /// Skeleton volley (mirrors `EntitySkeleton.java:30-53`): loose an arrow
@@ -626,10 +1311,15 @@ impl World {
             }
         }
         // Phase 2: 16x16x16 border raycasting with per-step resistance attenuation (Explosion.java:46-75).
+        // Hardening: stop starting new rays once the cell cap is hit
+        // (single blasts never reach it; TNT fields can't lag the tick).
         let mut destroyed = std::collections::BTreeSet::new();
-        for ix in 0..16 {
+        'rays: for ix in 0..16 {
             for iy in 0..16 {
                 for iz in 0..16 {
+                    if destroyed.len() >= MAX_BLAST_CELLS {
+                        break 'rays;
+                    }
                     if ix != 0 && ix != 15 && iy != 0 && iy != 15 && iz != 0 && iz != 15 {
                         continue;
                     }
@@ -706,7 +1396,7 @@ impl World {
         }
         for (bx, by, bz) in tnt_chain {
             let fuse = 10 + self.rng.next_int_bound(21);
-            self.pending_tnt.push((bx, by, bz, fuse));
+            self.ignite_tnt(bx, by, bz, fuse);
         }
         // Explosion.java:110-122: when isFlaming is set, 1/3 of air cells in
         // the blast volume sitting on top of an opaque/solid block ignite.
@@ -724,18 +1414,55 @@ impl World {
 
     /// Ignite TNT at a cell (mirrors `BlockTNT.onBlockDestroyedByPlayer` +
     /// `BlockFire.tryToCatchBlockOnFire` for id 46): the block vanishes at
-    /// once (no drop) and the radius-4 blast lands when the fuse burns out.
-    /// Hand-lit fuses run 80 ticks like `EntityTNTPrimed`; chained ones
-    /// pass an explicit short fuse.
+    /// once (no drop) and a visible primed entity (`EntityTNTPrimed`,
+    /// tracked 160/10) carries the fuse. Hand-lit fuses run 80 ticks,
+    /// chained ones pass an explicit short fuse.
     pub fn ignite_tnt(&mut self, x: i32, y: i32, z: i32, fuse: i32) {
         if self.get_block_id(x, y, z) == 46 {
             self.apply_set_notify(x, y, z, 0);
         }
-        self.pending_tnt.push((x, y, z, fuse));
+        let nid = self.entities.alloc_id();
+        let mut b = Body::new(nid, 0.98, 0.98, 0.0);
+        b.set_position(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5);
+        b.motion = [0.0, 0.2, 0.0];
+        self.entities.insert(Entity::Tnt(crate::entity::table::TntEnt {
+            body: b,
+            fuse,
+        }));
+        self.stamp_dim(nid);
+        self.mark_chunk_modified(x >> 4, z >> 4);
     }
 
-    /// Tick primed TNT fuses; expired ones detonate at radius 4.
-    /// Call once per world tick before entity ticks.
+    /// Tick one primed TNT entity (mirrors `EntityTNTPrimed.onUpdate`):
+    /// gravity, ground friction, fuse countdown, radius-4 blast at zero.
+    pub fn tick_tnt(&mut self, id: EntityId) {
+        self.entities.tick_base(id);
+        let (fuse_left, motion) = match self.entities.get_mut(id) {
+            Some(Entity::Tnt(t)) => {
+                t.fuse -= 1;
+                t.body.motion[1] -= 0.04;
+                t.body.motion[0] *= 0.98;
+                t.body.motion[1] *= 0.98;
+                t.body.motion[2] *= 0.98;
+                (t.fuse, (t.body.motion[0], t.body.motion[1], t.body.motion[2]))
+            }
+            _ => return,
+        };
+        self.move_body(id, motion.0, motion.1, motion.2);
+        if fuse_left <= 0 {
+            let (px, py, pz) = match self.entities.get(id) {
+                Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+                None => return,
+            };
+            if let Some(e) = self.entities.get_mut(id) {
+                e.body_mut().dead = true;
+            }
+            self.blast(px, py, pz, 4.0, None);
+        }
+    }
+
+    /// Drain legacy `pending_tnt` rows (pre-entity saves; the live path
+    /// spawns `TntEnt` directly). Kept so old in-flight fuses still boom.
     pub fn tick_primed_tnt(&mut self) {
         if self.pending_tnt.is_empty() {
             return;

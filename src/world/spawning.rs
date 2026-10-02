@@ -47,16 +47,36 @@ impl crate::mob_spawning::SpawnerWorld for World {
     ) -> Option<(i32, i32)> {
         let id = self.entities.alloc_id();
         if hostile {
-            let mkind = match kind {
-                0 => MobKind::Spider,
-                1 => MobKind::Zombie,
-                2 => MobKind::Skeleton,
-                _ => MobKind::Creeper,
+            // Hell table (`MobSpawnerHell.biomeMonsters = [Ghast,
+            // PigZombie]`); overworld keeps Spider/Zombie/Zombie/
+            // Skeleton/Creeper. Slimes substitute 1/8 of sub-y40
+            // creeper rolls (documented approximation of the vanilla
+            // low-level slime spawns; the hostile budget is unchanged).
+            let mkind = if self.dimension == -1 {
+                match kind {
+                    0 | 2 => MobKind::Ghast,
+                    _ => MobKind::PigZombie,
+                }
+            } else if kind == 3 && fy < 40.0 && self.rng.next_int_bound(8) == 0 {
+                MobKind::Slime
+            } else {
+                match kind {
+                    0 => MobKind::Spider,
+                    1 => MobKind::Zombie,
+                    2 => MobKind::Skeleton,
+                    _ => MobKind::Creeper,
+                }
             };
             let mut m = crate::entity::table::MobEnt::new(id, mkind);
+            if mkind == MobKind::Slime {
+                // `EntitySlime`: `size = 1 << rand(3)` (1/2/4).
+                let size = 1u8 << self.rng.next_int_bound(3).min(2);
+                m.set_slime_size(size);
+            }
             m.living.body.set_position(fx as f64, fy as f64, fz as f64);
             m.living.body.yaw = yaw;
             self.entities.insert(Entity::Mob(m));
+            self.stamp_dim(id);
             if !self.spawner_mob_ok(id) {
                 self.entities.remove(id);
                 return None;
@@ -77,6 +97,7 @@ impl crate::mob_spawning::SpawnerWorld for World {
                 a.egg_timer = 6000 + self.rng.next_int_bound(6000);
             }
             self.entities.insert(Entity::Animal(a));
+            self.stamp_dim(id);
             if !self.spawner_animal_ok(id) {
                 self.entities.remove(id);
                 return None;
@@ -95,6 +116,7 @@ impl crate::mob_spawning::SpawnerWorld for World {
         m.living.body.set_position(fx as f64, fy as f64, fz as f64);
         m.living.body.yaw = yaw;
         self.entities.insert(Entity::Mob(m));
+        self.stamp_dim(id);
         self.entities.mount(id, Some(host_id));
         self.mark_chunk_modified((fx.floor() as i32) >> 4, (fz.floor() as i32) >> 4);
         true
@@ -134,6 +156,21 @@ impl World {
             Some(e) => (e.body().pos[0], e.body().bounding_box.min_y, e.body().pos[2], e.body().bounding_box),
             None => return false,
         };
+        // Hell (`EntityPigZombie.getCanSpawnHere`, ghasts likewise):
+        // solidity + collision + dry only, no light gate (hell light
+        // is fixed dim, so the overworld darkness check would starve
+        // it). Ghasts additionally need a 4-wide berth (they are 4x4).
+        if self.dimension == -1 {
+            if matches!(self.entities.get(id), Some(Entity::Mob(m)) if m.kind == MobKind::Ghast) {
+                let b = bbox.expand(1.0, 1.0, 1.0);
+                if !self.colliding_boxes(&b).is_empty() {
+                    return false;
+                }
+            }
+            return self.check_no_living_collision(&bbox, Some(id))
+                && self.colliding_boxes(&bbox).is_empty()
+                && !self.touching_liquid(id);
+        }
         let (x, y, z) = (floor_double(px), floor_double(min_y), floor_double(pz));
         if self.saved_light_value(0, x, y, z) as i32 > self.rng.next_int_bound(32) {
             return false;
@@ -213,6 +250,11 @@ impl World {
 
     /// Passive spawn pass (mirrors `World::spawnPassiveMobs`).
     pub fn spawn_passive_mobs(&mut self) -> i32 {
+        // Hell has no passive table (`MobSpawnerHell.biomeCreatures`
+        // is empty); belt and suspenders alongside the spawn flag.
+        if self.dimension == -1 {
+            return 0;
+        }
         if !self.spawn_animals {
             return 0;
         }
@@ -338,6 +380,9 @@ impl World {
         let t = Instant::now();
         self.tick_furnaces();
         self.tick_mob_spawners();
+        // Primed TNT now ticks as entities (`tick_tnt` in the entity
+        // loop below); the legacy `pending_tnt` list is drained for
+        // save-compat rows only.
         self.tick_primed_tnt();
         let furnaces = t.elapsed();
         let t = Instant::now();
@@ -359,6 +404,11 @@ impl World {
                 Some(Entity::Falling(_)) => self.tick_falling(id),
                 Some(Entity::Boat(_)) => self.tick_boat(id),
                 Some(Entity::Arrow(_)) => self.tick_arrow(id),
+                Some(Entity::Snowball(_)) => self.tick_snowball(id),
+                Some(Entity::FishHook(_)) => self.tick_fishhook(id),
+                Some(Entity::Fireball(_)) => self.tick_fireball(id),
+                Some(Entity::Minecart(_)) => self.tick_minecart(id),
+                Some(Entity::Tnt(_)) => self.tick_tnt(id),
                 Some(Entity::Mob(_)) => self.tick_mob(id, &ids),
                 Some(Entity::Animal(_)) => self.tick_animal(id, &ids),
                 Some(Entity::Player(_)) => self.tick_player(id),
