@@ -73,6 +73,8 @@ fn can_stay(u: &mut ItemUseWorld, id: u8, pos: BlockPos) -> bool {
                 || w.attach_at(pos.offset(0, 0, 1))
         }
         70 | 72 => w.attach_at(pos.below()),
+        // Rails need a solid floor (`BlockMinecartTrack.canPlaceBlockAt`).
+        66 => w.attach_at(pos.below()),
         81 => crate::block::ticks::block_cactus_can_stay(w, pos),
         83 => crate::block::ticks::block_reed_can_stay(w, pos),
         85 => w.id_at(pos.below()) != 85 && w.material_at_pos(pos.below()).is_solid(),

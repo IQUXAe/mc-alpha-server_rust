@@ -6,11 +6,13 @@
 //! - `container` — chest/furnace scatter and placement rules.
 //! - `fire` — fire spread, aging, catching.
 //! - `ticks` — per-block added/neighbor/tick drivers.
+//! - `tracks` — rail shape logic (`MinecartTrackLogic`).
 
 pub mod container;
 pub mod fire;
 pub mod pos;
 pub mod table;
 pub mod ticks;
+pub mod tracks;
 
 pub use pos::{BlockPos, DropSpec};
