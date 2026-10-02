@@ -14,6 +14,7 @@ pub mod noise;
 pub mod biome;
 pub mod density;
 pub mod caves;
+pub mod hell_gen;
 pub mod decorators;
 pub mod nbt;
 pub mod chunk;

@@ -10,6 +10,10 @@ impl World {
     /// accessor, then insert/write-back with fresh height and sky maps.
     /// Populated chunks are left alone; each chunk is decorated once.
     pub fn ensure_chunk(&mut self, cx: i32, cz: i32) {
+        if self.dimension == -1 {
+            self.ensure_hell_chunk(cx, cz);
+            return;
+        }
         self.recall_chunk(cx, cz);
         if self.chunks.get(&(cx, cz)).map(|c| c.is_terrain_populated).unwrap_or(false) {
             return;
@@ -135,6 +139,56 @@ impl World {
                 }
             }
         }
+    }
+
+    /// Lazily built hell terrain generator (seven octave tables).
+    fn hell_generator(&mut self) -> &mut crate::hell_gen::HellProvider {
+        if self.hell_generator.is_none() {
+            let seed = self.seed;
+            self.hell_generator = Some(crate::hell_gen::HellProvider::new(seed));
+        }
+        self.hell_generator.as_mut().unwrap()
+    }
+
+    /// Generate and populate one hell chunk on demand: raw bloodStone
+    /// terrain for the requested chunk (no 2x2 canvas needed — hell has
+    /// no tree/dungeon spillover), then lava/fire/glowstone/mushroom
+    /// populate on the live world so neighbor lookups cross borders.
+    /// Each chunk decorates exactly once (`is_terrain_populated`).
+    pub fn ensure_hell_chunk(&mut self, cx: i32, cz: i32) {
+        self.recall_chunk(cx, cz);
+        if self.chunks.get(&(cx, cz)).map(|c| c.is_terrain_populated).unwrap_or(false) {
+            return;
+        }
+        let mut blocks = [0u8; 32768];
+        {
+            let gen = self.hell_generator();
+            crate::hell_gen::generate_hell_chunk(gen, cx, cz, &mut blocks);
+        }
+        match self.chunks.get_mut(&(cx, cz)) {
+            Some(c) => {
+                // Present but never populated (fresh all-air staging):
+                // load the generated terrain like the overworld canvas
+                // write-back does.
+                c.load_arrays(&blocks, &[0u8; 32768]);
+                c.generate_skylight_map();
+                c.is_terrain_populated = true;
+            }
+            None => {
+                let mut c = Chunk::new(cx, cz);
+                c.load_arrays(&blocks, &[0u8; 32768]);
+                c.generate_skylight_map();
+                c.is_terrain_populated = true;
+                self.chunks.insert((cx, cz), Box::new(c));
+            }
+        }
+        // Populate on the live world (deterministic per-chunk stream).
+        let mut rand = crate::random::JavaRandom::new(
+            (cx as i64)
+                .wrapping_mul(341873128712)
+                .wrapping_add((cz as i64).wrapping_mul(132897987541)),
+        );
+        crate::hell_gen::HellPopulate::populate(self, cx, cz, &mut rand);
     }
 
     /// Lazily built terrain generator (eleven octave tables; tests that
