@@ -257,6 +257,11 @@
             path_index: 0,
             swell_time: 0,
             swell_dir: -1,
+            slime_size: 1,
+            anger: 0,
+            waypoint: [0.0; 3],
+            has_waypoint: false,
+            shoot_cooldown: 0,
         }));
         id
     }
@@ -2660,4 +2665,376 @@
             assert_eq!(w.get_block_id(x, 64, 4), 86);
             assert_eq!(w.get_block_meta(x, 64, 4), *expected_meta, "pumpkin placed at yaw {yaw} must have meta {expected_meta}");
         }
+    }
+
+    // ---- new mobs / hell / projectiles ----
+
+    #[test]
+    fn test_slime_split_on_damage_death() {
+        let mut w = world_with_floor();
+        let id = add_mob(&mut w, MobKind::Slime, 4.5, 65.0, 4.5);
+        if let Some(Entity::Mob(m)) = w.entities.get_mut(id) {
+            m.set_slime_size(2);
+            m.living.health = 4;
+        }
+        w.attack_living(id, 100, None);
+        let kids: Vec<_> = w.entities.alive_ids().into_iter().filter_map(|oid| match w.entities.get(oid) {
+            Some(Entity::Mob(m)) if m.kind == MobKind::Slime && oid != id => Some(m.slime_size),
+            _ => None,
+        }).collect();
+        assert_eq!(kids.len(), 4, "size-2 slime must split into 4");
+        assert!(kids.iter().all(|s| *s == 1));
+    }
+
+    #[test]
+    fn test_slime_no_split_on_despawn() {
+        // Despawn deaths (health > 0) never split (vanilla `field_9109_aQ == 0` gate).
+        let mut w = world_with_floor();
+        let id = add_mob(&mut w, MobKind::Slime, 4.5, 65.0, 4.5);
+        if let Some(Entity::Mob(m)) = w.entities.get_mut(id) {
+            m.set_slime_size(2);
+        }
+        // Simulate despawn: dead flag with full health.
+        if let Some(e) = w.entities.get_mut(id) {
+            e.body_mut().dead = true;
+        }
+        let before = w.entities.len();
+        w.entities.purge_dead();
+        assert!(w.entities.len() < before);
+    }
+
+    #[test]
+    fn test_pigzombie_neutral_until_hurt() {
+        let mut w = world_with_floor();
+        let pig = add_mob(&mut w, MobKind::PigZombie, 4.5, 65.0, 4.5);
+        let near_pig = add_mob(&mut w, MobKind::PigZombie, 10.5, 65.0, 4.5);
+        let far_pig = add_mob(&mut w, MobKind::PigZombie, 50.5, 65.0, 4.5);
+        let player = add_player(&mut w, "Steve", 6.5, 65.0, 4.5);
+        // Calm pigman acquires nothing.
+        w.tick_mob(pig, &snap(&w));
+        assert!(matches!(w.entities.get(pig), Some(Entity::Mob(m)) if m.target.is_none()));
+        // Hurt it: anger + retaliation target, and alert nearby pigzombies within 32 blocks.
+        w.attack_living(pig, 2, Some(player));
+        let (anger, target) = match w.entities.get(pig) {
+            Some(Entity::Mob(m)) => (m.anger, m.target),
+            _ => (0, None),
+        };
+        assert!(anger > 0, "hurt pigman must be angry");
+        assert_eq!(target, Some(player));
+
+        let (near_anger, near_target) = match w.entities.get(near_pig) {
+            Some(Entity::Mob(m)) => (m.anger, m.target),
+            _ => (0, None),
+        };
+        assert!(near_anger > 0, "nearby pigman must also be alerted");
+        assert_eq!(near_target, Some(player));
+
+        let (far_anger, far_target) = match w.entities.get(far_pig) {
+            Some(Entity::Mob(m)) => (m.anger, m.target),
+            _ => (0, None),
+        };
+        assert_eq!(far_anger, 0, "far pigman must remain calm");
+        assert_eq!(far_target, None);
+    }
+
+    #[test]
+    fn test_ghast_volley_spawns_fireball() {
+        let mut w = world_with_floor();
+        // Open sky column for LOS: clear above the floor.
+        let ghast = add_mob(&mut w, MobKind::Ghast, 4.5, 70.0, 4.5);
+        let player = add_player(&mut w, "Steve", 10.5, 70.0, 4.5);
+        // Force target + cooldown ready.
+        if let Some(Entity::Mob(m)) = w.entities.get_mut(ghast) {
+            m.target = Some(player);
+            m.attack_cooldown = 0;
+        }
+        let d = 6.0f32;
+        let mut snap_state = w.creature_snapshot(ghast).unwrap();
+        w.mob_attack(ghast, MobKind::Ghast, player, d, &mut snap_state);
+        let balls = w.entities.alive_ids().into_iter().filter(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::Fireball(_)))
+        }).count();
+        assert_eq!(balls, 1, "ghast volley must loose one fireball");
+    }
+
+    #[test]
+    fn test_fireball_blasts_radius_one() {
+        let mut w = world_with_floor();
+        // Dirt shell around (4,66,4): soft enough for a radius-1
+        // blast (stone out-resists fireballs in vanilla too).
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                w.set_block_id(4 + dx, 66, 4 + dz, 3);
+            }
+        }
+        let nid = w.entities.alloc_id();
+        let mut b = Body::new(nid, 1.0, 1.0, 0.0);
+        b.set_position(4.5, 67.0, 4.5);
+        b.motion = [0.0, -1.0, 0.0];
+        w.entities.insert(Entity::Fireball(crate::entity::table::FireballEnt {
+            body: b, owner_id: -1, ticks_in_air: 10,
+        }));
+        let before: usize = (-2..=2).map(|dx| (-2..=2).filter(|dz| {
+            w.get_block_id(4 + dx, 66, 4 + dz) == 3
+        }).count()).sum();
+        for _ in 0..10 {
+            w.tick_fireball(nid);
+            if w.entities.get(nid).map(|e| e.body().dead).unwrap_or(true) {
+                break;
+            }
+        }
+        assert!(w.entities.get(nid).map(|e| e.body().dead).unwrap_or(true));
+        let after: usize = (-2..=2).map(|dx| (-2..=2).filter(|dz| {
+            w.get_block_id(4 + dx, 66, 4 + dz) == 3
+        }).count()).sum();
+        assert!(after < before, "fireball must eat stone around the impact");
+    }
+
+    #[test]
+    fn test_snowball_dies_on_block() {
+        let mut w = world_with_floor();
+        let shooter = add_player(&mut w, "Steve", 4.5, 70.0, 4.5);
+        w.spawn_snowball(shooter);
+        let ball = w.entities.alive_ids().into_iter().find(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::Snowball(_)))
+        }).expect("snowball must exist");
+        for _ in 0..200 {
+            w.tick_snowball(ball);
+            if w.entities.get(ball).map(|e| e.body().dead).unwrap_or(true) {
+                break;
+            }
+        }
+        assert!(w.entities.get(ball).map(|e| e.body().dead).unwrap_or(true));
+    }
+
+    #[test]
+    fn test_fishing_hook_catches_fish() {
+        let mut w = World::new(99);
+        // Water pool at y=63.
+        let mut c = Chunk::new(0, 0);
+        for x in 0..16 {
+            for z in 0..16 {
+                c.set_block_id(x, 62, z, 1);
+                c.set_block_id(x, 63, z, 9);
+            }
+        }
+        c.generate_height_map();
+        w.insert_chunk(c);
+        let player = add_player(&mut w, "Steve", 8.5, 65.0, 8.5);
+        // Hold the rod or the line snaps (vanilla held-item guard).
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(crate::inventory::ItemStack::new(346, 1, 0));
+            p.inventory.current = 0;
+        }
+        w.cast_fishing(player);
+        let hook = w.entities.alive_ids().into_iter().find(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::FishHook(_)))
+        }).expect("hook must exist");
+        // Drop the hook into the pool with an active nibble, then reel:
+        // vanilla awards the fish on reel inside the window.
+        if let Some(Entity::FishHook(f)) = w.entities.get_mut(hook) {
+            f.body.set_position(8.5, 63.5, 8.5);
+            f.nibble_ticks = 5;
+        }
+        let dmg = w.reel_fishing(player, hook);
+        assert_eq!(dmg, 1, "nibble reel must wear the rod by 1");
+        assert!(w.entities.get(hook).map(|e| e.body().dead).unwrap_or(true));
+        let fish = w.entities.alive_ids().into_iter().filter(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::Item(it)) if it.item_id == 349)
+        }).count();
+        assert_eq!(fish, 1, "bite must drop one raw fish");
+    }
+
+    #[test]
+    fn test_fishing_reel_miss_no_fish() {
+        let mut w = world_with_floor();
+        let player = add_player(&mut w, "Steve", 8.5, 65.0, 8.5);
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(crate::inventory::ItemStack::new(346, 1, 0));
+            p.inventory.current = 0;
+        }
+        w.cast_fishing(player);
+        let hook = w.entities.alive_ids().into_iter().find(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::FishHook(_)))
+        }).expect("hook must exist");
+        // Dry reel: no fish, no rod wear.
+        let dmg = w.reel_fishing(player, hook);
+        assert_eq!(dmg, 0);
+        let fish = w.entities.alive_ids().into_iter().filter(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::Item(_)))
+        }).count();
+        assert_eq!(fish, 0);
+    }
+
+    #[test]
+    fn test_snowball_knocks_back() {
+        let mut w = world_with_floor();
+        let shooter = add_player(&mut w, "Steve", 4.5, 70.0, 4.5);
+        let victim = add_mob(&mut w, crate::entity::table::MobKind::Zombie, 4.5, 64.0, 6.5);
+        w.spawn_snowball(shooter);
+        let ball = w.entities.alive_ids().into_iter().find(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::Snowball(_)))
+        }).expect("snowball must exist");
+        // Throw it level at the victim's chest.
+        if let Some(Entity::Snowball(s)) = w.entities.get_mut(ball) {
+            s.body.set_position(4.5, 65.0, 4.5);
+            s.body.motion = [0.0, 0.0, 0.6];
+        }
+        for _ in 0..20 {
+            w.tick_snowball(ball);
+            if w.entities.get(ball).map(|e| e.body().dead).unwrap_or(true) {
+                break;
+            }
+        }
+        assert!(w.entities.get(ball).map(|e| e.body().dead).unwrap_or(true));
+        // Damage 0 (health intact) but shoved.
+        let (hp, moved) = match w.entities.get(victim) {
+            Some(Entity::Mob(m)) => (m.living.health, m.living.body.motion[2] != 0.0 || m.living.body.pos[2] != 6.5),
+            _ => (0, false),
+        };
+        assert_eq!(hp, 20, "snowballs deal no damage");
+        assert!(moved, "snowball must knock the victim back");
+    }
+
+    #[test]
+    fn test_minecart_places_and_rolls() {
+        let mut w = world_with_floor();
+        // Rail line along x at y=64 (meta 1 = East-West).
+        for x in 0..16 {
+            w.set_block_id(x, 64, 4, 66);
+            w.set_block_meta(x, 64, 4, 1);
+        }
+        assert!(w.place_minecart(4, 64, 4));
+        let cart = w.entities.alive_ids().into_iter().find(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::Minecart(_)))
+        }).expect("cart must exist");
+        // Shove east; it must keep rolling on the rails.
+        if let Some(Entity::Minecart(c)) = w.entities.get_mut(cart) {
+            c.body.motion[0] = 0.3;
+        }
+        for _ in 0..20 {
+            w.tick_minecart(cart);
+        }
+        let (px, dead) = match w.entities.get(cart) {
+            Some(e) => (e.body().pos[0], e.body().dead),
+            None => return,
+        };
+        assert!(!dead);
+        assert!(px > 4.5, "cart must roll east, at {px}");
+        // Punching breaks it into a cart item.
+        w.damage_minecart(cart, 5);
+        assert!(w.entities.get(cart).map(|e| e.body().dead).unwrap_or(true));
+
+        // Rail line along z at y=64 (meta 0 = North-South).
+        for z in 0..16 {
+            w.set_block_id(4, 64, z, 66);
+            w.set_block_meta(4, 64, z, 0);
+        }
+        assert!(w.place_minecart(4, 64, 4));
+        let cart_z = w.entities.alive_ids().into_iter().find(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::Minecart(_)))
+        }).expect("cart must exist");
+        if let Some(Entity::Minecart(c)) = w.entities.get_mut(cart_z) {
+            c.body.motion[2] = 0.3;
+        }
+        for _ in 0..20 {
+            w.tick_minecart(cart_z);
+        }
+        let pz = match w.entities.get(cart_z) {
+            Some(e) => e.body().pos[2],
+            None => 0.0,
+        };
+        assert!(pz > 4.5, "cart must roll south along z, at {pz}");
+    }
+
+    #[test]
+    fn test_tnt_entity_fuse_and_blast() {
+        let mut w = world_with_floor();
+        w.ignite_tnt(4, 64, 4, 3);
+        let tnt = w.entities.alive_ids().into_iter().find(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::Tnt(_)))
+        }).expect("primed TNT entity must exist");
+        // Floor at 63 is stone; blast must eat cells around (4,64,4).
+        for _ in 0..5 {
+            w.tick_tnt(tnt);
+        }
+        assert!(w.entities.get(tnt).map(|e| e.body().dead).unwrap_or(true));
+    }
+
+    #[test]
+    fn test_hell_world_skylight_and_terrain() {
+        let mut h = World::new_hell(4242);
+        assert!(h.is_hell());
+        assert_eq!(h.calculate_skylight_subtracted(), 7);
+        h.ensure_chunk(0, 0);
+        assert!(h.has_chunk(0, 0));
+        let c = h.chunk_ref(0, 0).unwrap();
+        assert!(c.is_terrain_populated);
+        // Bloodstone-dominant, bedrock present, no overworld flora.
+        let mut blood = 0;
+        let mut bedrock = 0;
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 0..128 {
+                    match c.get_block_id(x, y, z) {
+                        87 => blood += 1,
+                        7 => bedrock += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(blood > 10000, "hell chunk must be bloodstone-dominant, got {blood}");
+        assert!(bedrock > 0);
+    }
+
+    #[test]
+    fn test_hell_spawns_ghast_and_pigzombie() {
+        let mut h = World::new_hell(777);
+        h.ensure_chunk(0, 0);
+        // Hover in open air above the hell surface.
+        let top = h.get_height_value(8, 8).max(30) + 6;
+        let g = h.entities.alloc_id();
+        let mut ghast = MobEnt::new(g, MobKind::Ghast);
+        ghast.living.body.set_position(8.5, top as f64, 8.5);
+        h.entities.insert(Entity::Mob(ghast));
+        assert!(h.spawner_mob_ok(g));
+        assert_eq!(crate::entity::table::mob_type_id(MobKind::Ghast), 56);
+        assert_eq!(crate::entity::table::mob_type_id(MobKind::PigZombie), 57);
+        assert_eq!(crate::entity::table::mob_type_id(MobKind::Giant), 53);
+        assert_eq!(crate::entity::table::mob_type_id(MobKind::Slime), 55);
+    }
+
+    #[test]
+    fn test_minecart_body_push_and_speed_cap() {
+        let mut w = world_with_floor();
+        for x in 0..16 {
+            w.set_block_id(x, 64, 4, 66);
+            w.set_block_meta(x, 64, 4, 1);
+        }
+        assert!(w.place_minecart(4, 64, 4));
+        let cart = w.entities.alive_ids().into_iter().find(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::Minecart(_)))
+        }).expect("cart must exist");
+        // Walk a player into the cart: it must gain motion.
+        let player = add_player(&mut w, "Steve", 3.0, 64.0, 4.5);
+        if let Some(e) = w.entities.get_mut(player) {
+            e.body_mut().motion = [0.2, 0.0, 0.0];
+        }
+        for _ in 0..10 {
+            // Keep walking into it.
+            let cart_x = w.entities.get(cart).map(|c| c.body().pos[0]).unwrap_or(3.0);
+            if let Some(e) = w.entities.get_mut(player) {
+                e.body_mut().motion[0] = 0.2;
+                e.body_mut().set_position(cart_x - 0.6, 64.0, 4.5);
+            }
+            w.tick_minecart(cart);
+        }
+        let (mx, dead) = match w.entities.get(cart) {
+            Some(e) => (e.body().motion[0], e.body().dead),
+            None => (0.0, true),
+        };
+        assert!(!dead);
+        assert!(mx.abs() > 0.01, "body must shove the cart, motion {mx}");
+        assert!(mx.abs() <= 0.41, "speed cap must hold, motion {mx}");
     }

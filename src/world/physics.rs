@@ -277,6 +277,16 @@ impl World {
                     // (`is_lava` is lava-only now that `Material` carries
                     // singleton identity; fire is a block id, not lava.)
                     if self.is_lava(x, y, z) || self.get_block_id(x, y, z) == 51 {
+                        // Ghasts/pigmen are fire-immune (`field_9079_ae`):
+                        // lava is a warm bath, not damage.
+                        let immune = matches!(
+                            self.entities.get(id),
+                            Some(Entity::Mob(m))
+                                if matches!(m.kind, crate::entity::table::MobKind::Ghast | crate::entity::table::MobKind::PigZombie)
+                        );
+                        if immune {
+                            return;
+                        }
                         self.attack_living(id, 1, None);
                         match self.entities.get_mut(id) {
                             Some(Entity::Mob(m)) => {
@@ -688,6 +698,235 @@ impl World {
             if let Some(Entity::Boat(o)) = self.entities.get_mut(oid) {
                 o.body.motion[0] += push.dvx2;
                 o.body.motion[2] += push.dvz2;
+            }
+        }
+        self.entities.update_rider_position(id);
+    }
+
+    /// Minecart damage (mirrors `EntityMinecart.attackEntityFrom`): rock
+    /// the cart, shatter past 40 damage dropping the cart item. Returns
+    /// true when the cart broke.
+    pub fn damage_minecart(&mut self, id: EntityId, amount: i32) -> bool {
+        if amount <= 0 {
+            return false;
+        }
+        let broke = match self.entities.get_mut(id) {
+            Some(Entity::Minecart(c)) => {
+                if c.body.dead {
+                    return false;
+                }
+                c.time_since_hit = 10;
+                c.damage_taken += amount * 10;
+                c.damage_taken > 40
+            }
+            _ => return false,
+        };
+        if !broke {
+            return false;
+        }
+        let rider = self.entities.get(id).map(|e| e.body().ridden_by).unwrap_or(-1);
+        if rider >= 0 {
+            self.entities.mount(rider, None);
+        }
+        let (px, py, pz) = match self.entities.get(id) {
+            Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+            None => return true,
+        };
+        self.spawn_item_entity(328, 1, 0, px, py, pz);
+        if let Some(Entity::Minecart(c)) = self.entities.get_mut(id) {
+            c.body.dead = true;
+        }
+        self.mark_chunk_modified((px.floor() as i32) >> 4, (pz.floor() as i32) >> 4);
+        true
+    }
+
+    /// Minecart tick (simplified rail physics): on rails (66) the cart
+    /// keeps its axis (flat), climbs slopes via step height, corners
+    /// keep both axes; speed cap 0.4, rail drag 0.98. Off rails it falls
+    /// with ground friction. Slopes add a small downhill pull.
+    /// Corner/slope shapes follow the vanilla metadata table
+    /// (0 E-W, 1 N-S, 2-5 asc E/W/N/S, 6-9 corners); junction switching
+    /// is not simulated (single-line carts).
+    ///
+    /// Shove model (runs every tick, bounded by the alive-row list the
+    /// world tick already collects): players walking into the cart
+    /// transfer momentum into it, carts shove each other apart with the
+    /// shared push kernel. Speed is hard-capped after shoves so a
+    /// 5-cart pileup can never pump velocity without bound.
+    pub fn tick_minecart(&mut self, id: EntityId) {
+        const MAX_CART_SPEED: f64 = 0.4;
+        self.entities.tick_base(id);
+        if let Some(Entity::Minecart(c)) = self.entities.get_mut(id) {
+            if c.body.dead {
+                return;
+            }
+            if c.time_since_hit > 0 {
+                c.time_since_hit -= 1;
+            }
+            if c.damage_taken > 0 {
+                c.damage_taken -= 1;
+            }
+        }
+        // Eject non-player riders (same rule as boats).
+        let rider = match self.entities.get(id) {
+            Some(e) => e.body().ridden_by,
+            None => return,
+        };
+        if rider >= 0 {
+            let is_player = matches!(self.entities.get(rider), Some(Entity::Player(_)));
+            if !is_player {
+                self.entities.mount(rider, None);
+            }
+        }
+        // Rail under the cart (feet cell, else the cell below).
+        let (px, py, pz) = match self.entities.get(id) {
+            Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2]),
+            None => return,
+        };
+        let (bx, mut by, bz) = (px.floor() as i32, py.floor() as i32, pz.floor() as i32);
+        let mut rail_meta: Option<u8> = None;
+        if self.get_block_id(bx, by, bz) == 66 {
+            rail_meta = Some(self.get_block_meta(bx, by, bz));
+        } else if self.get_block_id(bx, by - 1, bz) == 66 {
+            by -= 1;
+            rail_meta = Some(self.get_block_meta(bx, by, bz));
+        }
+        if let Some(Entity::Minecart(c)) = self.entities.get_mut(id) {
+            match rail_meta {
+                Some(0) => {
+                    // Flat N-S (along z): kill lateral (x), cap axis (z).
+                    c.body.motion[0] = 0.0;
+                    c.body.motion[2] = c.body.motion[2].clamp(-0.4, 0.4);
+                    // Sit on the rail head.
+                    if c.body.pos[1] < by as f64 + 0.5 {
+                        c.body.pos[1] = by as f64 + 0.5;
+                    }
+                }
+                Some(1) => {
+                    // Flat E-W (along x): kill lateral (z), cap axis (x).
+                    c.body.motion[2] = 0.0;
+                    c.body.motion[0] = c.body.motion[0].clamp(-0.4, 0.4);
+                    if c.body.pos[1] < by as f64 + 0.5 {
+                        c.body.pos[1] = by as f64 + 0.5;
+                    }
+                }
+                Some(2) => {
+                    // Ascending E (+x up): downhill pull -x, climb step.
+                    c.body.motion[2] = 0.0;
+                    c.body.motion[0] -= 0.02;
+                    c.body.motion[0] = c.body.motion[0].clamp(-0.4, 0.4);
+                }
+                Some(3) => {
+                    c.body.motion[2] = 0.0;
+                    c.body.motion[0] += 0.02;
+                    c.body.motion[0] = c.body.motion[0].clamp(-0.4, 0.4);
+                }
+                Some(4) => {
+                    c.body.motion[0] = 0.0;
+                    c.body.motion[2] += 0.02;
+                    c.body.motion[2] = c.body.motion[2].clamp(-0.4, 0.4);
+                }
+                Some(5) => {
+                    c.body.motion[0] = 0.0;
+                    c.body.motion[2] -= 0.02;
+                    c.body.motion[2] = c.body.motion[2].clamp(-0.4, 0.4);
+                }
+                Some(_) => {
+                    // Corners 6-9: keep both axes, cap each.
+                    c.body.motion[0] = c.body.motion[0].clamp(-0.4, 0.4);
+                    c.body.motion[2] = c.body.motion[2].clamp(-0.4, 0.4);
+                }
+                None => {
+                    // Off rails: gravity + ground friction.
+                    c.body.motion[1] -= 0.04;
+                    if c.body.on_ground {
+                        c.body.motion[0] *= 0.5;
+                        c.body.motion[2] *= 0.5;
+                    }
+                }
+            }
+            if rail_meta.is_some() {
+                c.body.motion[0] *= 0.98;
+                c.body.motion[2] *= 0.98;
+                if c.body.motion[1] < -0.1 {
+                    c.body.motion[1] = -0.1;
+                }
+            }
+        }
+        // Shove phase: bodies and carts push this cart (bounded scan over
+        // the tick's alive rows; carts in unloaded chunks never tick, so
+        // one chunk of circling carts costs O(carts x nearby)).
+        // The rider never shoves its own cart.
+        let rider = match self.entities.get(id) {
+            Some(e) => e.body().ridden_by,
+            None => return,
+        };
+        let shovers: Vec<EntityId> = self
+            .entities
+            .alive_ids()
+            .into_iter()
+            .filter(|oid| {
+                *oid != id
+                    && *oid != rider
+                    && matches!(
+                        self.entities.get(*oid),
+                        Some(Entity::Player(_))
+                            | Some(Entity::Mob(_))
+                            | Some(Entity::Animal(_))
+                            | Some(Entity::Minecart(_))
+                    )
+            })
+            .collect();
+        for oid in shovers {
+            let (ax, az, bx, bz, pmx, pmz, is_player_moving) =
+                match (self.entities.get(id), self.entities.get(oid)) {
+                    (Some(a), Some(b)) => (
+                        a.body().pos[0],
+                        a.body().pos[2],
+                        b.body().pos[0],
+                        b.body().pos[2],
+                        b.body().motion[0],
+                        b.body().motion[2],
+                        matches!(b, Entity::Player(_))
+                            && (b.body().motion[0] != 0.0 || b.body().motion[2] != 0.0),
+                    ),
+                    _ => continue,
+                };
+            let Some(push) =
+                crate::entity::physics::entity_push(ax, az, bx, bz, true, true)
+            else {
+                continue;
+            };
+            if let Some(Entity::Minecart(c)) = self.entities.get_mut(id) {
+                c.body.motion[0] += push.dvx1;
+                c.body.motion[2] += push.dvz1;
+                // Walking into the cart shoves it along (momentum share).
+                if is_player_moving {
+                    c.body.motion[0] += pmx * 0.25;
+                    c.body.motion[2] += pmz * 0.25;
+                }
+                // Hard speed cap after shoves (anti pileup pump).
+                c.body.motion[0] = c.body.motion[0].clamp(-MAX_CART_SPEED, MAX_CART_SPEED);
+                c.body.motion[2] = c.body.motion[2].clamp(-MAX_CART_SPEED, MAX_CART_SPEED);
+            }
+            if let Some(o) = self.entities.get_mut(oid) {
+                // Carts are heavy: the other side takes the counter-shove.
+                let b = o.body_mut();
+                b.motion[0] += push.dvx2;
+                b.motion[2] += push.dvz2;
+            }
+        }
+        let motion = match self.entities.get(id) {
+            Some(e) => (e.body().motion[0], e.body().motion[1], e.body().motion[2]),
+            None => return,
+        };
+        self.move_body(id, motion.0, motion.1, motion.2);
+        // Yaw follows travel.
+        if let Some(Entity::Minecart(c)) = self.entities.get_mut(id) {
+            if c.body.motion[0] != 0.0 || c.body.motion[2] != 0.0 {
+                c.body.yaw = (c.body.motion[2].atan2(c.body.motion[0]) * 180.0
+                    / std::f64::consts::PI) as f32
+                    - 90.0;
             }
         }
         self.entities.update_rider_position(id);
