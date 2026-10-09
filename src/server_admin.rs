@@ -260,6 +260,35 @@ pub fn chat_command(
         sess.teleport_to(world, sess.player, [tx, ty, tz], yaw, pitch);
         // C++ std::to_string(double) prints 6 decimals; match it exactly.
         say(sess, &format!("Teleported to {tx:.6}, {ty:.6}, {tz:.6}"));
+    } else if cmd.eq_ignore_ascii_case("boost") {
+        let sub = args.get(1).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        if sub == "on" || sub == "enable" || sub == "1" {
+            if !op {
+                say(sess, "You do not have permission to toggle GPU boost");
+                return;
+            }
+            if crate::gpu::is_gpu_available() {
+                crate::gpu::set_gpu_enabled(true);
+                say(sess, &format!("§aGPU boost enabled: {}", crate::gpu::gpu_device_info()));
+            } else {
+                say(sess, "§cCannot enable GPU boost: no compatible GPU device available");
+            }
+        } else if sub == "off" || sub == "disable" || sub == "0" {
+            if !op {
+                say(sess, "You do not have permission to toggle GPU boost");
+                return;
+            }
+            crate::gpu::set_gpu_enabled(false);
+            say(sess, "§eGPU boost disabled (CPU default)");
+        } else {
+            let state = if crate::gpu::is_gpu_enabled() {
+                "§aENABLED"
+            } else {
+                "§7DISABLED (CPU default)"
+            };
+            let dev = crate::gpu::gpu_device_info();
+            say(sess, &format!("GPU boost: {state} §8[{dev}]"));
+        }
     } else {
         say(sess, &format!("Unknown command: {cmd}"));
     }

@@ -57,7 +57,7 @@ impl Server {
         match tag {
             ConsoleCommandTag::Help => {
                 log::info(
-                    "Console commands:\n   help  or  ?               shows this message\n   kick <player>             removes a player from the server\n   ban <player>              bans a player from the server\n   pardon <player>           pardons a banned player\n   ban-ip <ip>               bans an IP address\n   pardon-ip <ip>            pardons a banned IP address\n   op <player>               turns a player into an op\n   deop <player>             removes op status\n   tp <player1> <player2>    teleports player1 to player2\n   give <player> <id> [num]  gives a player a resource\n   summon <mob> [count] [player] spawns debug mobs near player\n   tell <player> <message>   sends a private message\n   stop                      gracefully stops the server\n   save-all                  forces a server-wide level save\n   list                      lists all connected players\n   say <message>             broadcasts a message",
+                    "Console commands:\n   help  or  ?               shows this message\n   kick <player>             removes a player from the server\n   ban <player>              bans a player from the server\n   pardon <player>           pardons a banned player\n   ban-ip <ip>               bans an IP address\n   pardon-ip <ip>            pardons a banned IP address\n   op <player>               turns a player into an op\n   deop <player>             removes op status\n   tp <player1> <player2>    teleports player1 to player2\n   give <player> <id> [num]  gives a player a resource\n   summon <mob> [count] [player] spawns debug mobs near player\n   tell <player> <message>   sends a private message\n   stop                      gracefully stops the server\n   save-all                  forces a server-wide level save\n   list                      lists all connected players\n   say <message>             broadcasts a message\n   boost [on|off|status]     GPU acceleration status or toggle",
                 );
             }
             ConsoleCommandTag::List => {
@@ -156,6 +156,28 @@ impl Server {
                 log::info(&format!("[CONSOLE->{arg1}] {arg2}"));
                 if !self.send_chat_to_player(&arg1, &format!("§7CONSOLE whispers {arg2}")) {
                     log::info("There's no player by that name online.");
+                }
+            }
+            ConsoleCommandTag::Boost => {
+                let sub = arg1.trim().to_lowercase();
+                if sub == "on" || sub == "enable" || sub == "1" {
+                    if crate::gpu::is_gpu_available() {
+                        crate::gpu::set_gpu_enabled(true);
+                        log::info(&format!("GPU boost enabled: {}", crate::gpu::gpu_device_info()));
+                    } else {
+                        log::warning("Cannot enable GPU boost: no compatible GPU device available");
+                    }
+                } else if sub == "off" || sub == "disable" || sub == "0" {
+                    crate::gpu::set_gpu_enabled(false);
+                    log::info("GPU boost disabled (CPU default)");
+                } else {
+                    let state = if crate::gpu::is_gpu_enabled() {
+                        "ENABLED"
+                    } else {
+                        "DISABLED (CPU default)"
+                    };
+                    let dev = crate::gpu::gpu_device_info();
+                    log::info(&format!("GPU boost status: {state} [{dev}]"));
                 }
             }
             ConsoleCommandTag::Unknown => {

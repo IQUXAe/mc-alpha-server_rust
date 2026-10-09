@@ -21,6 +21,16 @@ rusty-leveldb = "4"
 mio = { version = "1.0", features = ["os-poll", "net"] }
 mimalloc = { version = "0.1", default-features = false }
 
+# Optional GPU acceleration (disabled by default; supports Vulkan, OpenGL ES, DX12, Metal, older GPUs)
+wgpu = { version = "30", optional = true, features = ["vulkan", "gles", "dx12", "metal", "wgsl"] }
+pollster = { version = "1.0", optional = true }
+bytemuck = { version = "1.25", optional = true, features = ["derive"] }
+
+[features]
+default = []
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+gpu-gen = ["gpu"]
+
 [lints.clippy]
 all = "warn"
 

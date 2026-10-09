@@ -34,6 +34,8 @@ pub struct Settings {
     pub hellworld: bool,
     pub hell_enabled: bool,
     pub auth_server_url: String,
+    pub gpu_acceleration: bool,
+    pub gpu_backend: String,
 }
 
 /// Leading-integer seed parse (mirrors `std::stoll`: optional `-`,
@@ -91,6 +93,31 @@ pub fn load_settings(cfg: &mut ServerConfig) -> Settings {
     let is_hell = cfg.get_bool("hellworld", false)
         || cfg.get("dimension").map(|s| s.trim() == "-1").unwrap_or(false)
         || cfg.get_bool("hell-enabled", false);
+    let gpu_backend = cfg.get_string("gpu-backend", "auto");
+    crate::gpu::set_configured_backend(&gpu_backend);
+
+    let gpu_acceleration = cfg.get_bool("gpu-acceleration", false)
+        || cfg.get("gpu-boost").map(|s| s == "true").unwrap_or(false)
+        || std::env::var("ALPHA_GPU_BOOST")
+            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        || std::env::var("ALPHA_GPU")
+            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    if gpu_acceleration {
+        if crate::gpu::is_gpu_available() {
+            crate::gpu::set_gpu_enabled(true);
+            crate::server_log::info(&format!(
+                "GPU acceleration enabled: {}",
+                crate::gpu::gpu_device_info()
+            ));
+        } else {
+            crate::server_log::warning(
+                "GPU acceleration requested in config/env, but no compatible GPU adapter is available; using CPU default.",
+            );
+        }
+    }
+
     Settings {
         server_ip: cfg.get_string("server-ip", ""),
         port: cfg.get_int("server-port", 25565),
@@ -116,6 +143,8 @@ pub fn load_settings(cfg: &mut ServerConfig) -> Settings {
             "auth-server-url",
             crate::session::login::DEFAULT_AUTH_URL,
         ),
+        gpu_acceleration,
+        gpu_backend,
     }
 }
 

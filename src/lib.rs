@@ -43,6 +43,7 @@ pub mod vec3d;
 pub mod item_data;
 pub mod item_use;
 pub mod item_verbs;
+pub mod gpu;
 
 use crate::random::JavaRandom;
 
