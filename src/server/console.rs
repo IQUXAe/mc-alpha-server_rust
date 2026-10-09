@@ -57,7 +57,7 @@ impl Server {
         match tag {
             ConsoleCommandTag::Help => {
                 log::info(
-                    "Console commands:\n   help  or  ?               shows this message\n   kick <player>             removes a player from the server\n   ban <player>              bans a player from the server\n   pardon <player>           pardons a banned player\n   ban-ip <ip>               bans an IP address\n   pardon-ip <ip>            pardons a banned IP address\n   op <player>               turns a player into an op\n   deop <player>             removes op status\n   tp <player1> <player2>    teleports player1 to player2\n   give <player> <id> [num]  gives a player a resource\n   summon <mob> [count] [player] spawns debug mobs near player\n   tell <player> <message>   sends a private message\n   stop                      gracefully stops the server\n   save-all                  forces a server-wide level save\n   list                      lists all connected players\n   say <message>             broadcasts a message\n   boost [on|off|status]     GPU acceleration status or toggle",
+                    "Console commands:\n   help  or  ?               shows this message\n   kick <player>             removes a player from the server\n   ban <player>              bans a player from the server\n   pardon <player>           pardons a banned player\n   ban-ip <ip>               bans an IP address\n   pardon-ip <ip>            pardons a banned IP address\n   op <player>               turns a player into an op\n   deop <player>             removes op status\n   tp <player1> <player2>    teleports player1 to player2\n   give <player> <id> [num]  gives a player a resource\n   summon <mob> [count] [player] spawns debug mobs near player\n   tell <player> <message>   sends a private message\n   stop                      gracefully stops the server\n   save-all                  forces a server-wide level save\n   list                      lists all connected players\n   say <message>             broadcasts a message\n   boost [on|off|status]     GPU acceleration status or toggle\n   seed                      shows the world seed",
                 );
             }
             ConsoleCommandTag::List => {
@@ -179,6 +179,9 @@ impl Server {
                     let dev = crate::gpu::gpu_device_info();
                     log::info(&format!("GPU boost status: {state} [{dev}]"));
                 }
+            }
+            ConsoleCommandTag::Seed => {
+                log::info(&format!("Seed: {}", self.world.seed));
             }
             ConsoleCommandTag::Unknown => {
                 log::info("Unknown console command. Type \"help\" for help.");
@@ -404,4 +407,15 @@ impl Server {
 fn parse_console(line: &str) -> (ConsoleCommandTag, String, String, i32) {
     let parsed = parse_console_command(line);
     (parsed.tag, parsed.arg1, parsed.arg2, parsed.count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_console_seed() {
+        let (tag, _, _, _) = parse_console("seed");
+        assert_eq!(tag, ConsoleCommandTag::Seed);
+    }
 }

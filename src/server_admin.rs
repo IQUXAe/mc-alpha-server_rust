@@ -195,7 +195,7 @@ pub fn chat_command(
         });
         return;
     }
-    if !op && (cmd == "give" || cmd == "tp") {
+    if !op && (cmd.eq_ignore_ascii_case("give") || cmd.eq_ignore_ascii_case("tp") || cmd.eq_ignore_ascii_case("seed")) {
         say(sess, "You do not have permission to use this command");
         return;
     }
@@ -289,6 +289,8 @@ pub fn chat_command(
             let dev = crate::gpu::gpu_device_info();
             say(sess, &format!("GPU boost: {state} §8[{dev}]"));
         }
+    } else if cmd.eq_ignore_ascii_case("seed") {
+        say(sess, &format!("Seed: {}", world.seed));
     } else {
         say(sess, &format!("Unknown command: {cmd}"));
     }
@@ -391,6 +393,14 @@ mod tests {
         let (mut w, mut sess, ops) = setup(false);
         run(&mut w, &mut sess, &ops, "/give 5");
         assert_eq!(chats(&sess), vec!["You do not have permission to use this command"]);
+        run(&mut w, &mut sess, &ops, "/seed");
+        assert_eq!(chats(&sess), vec!["You do not have permission to use this command"]);
+
+        // Seed command for ops.
+        let (mut w, mut sess, ops) = setup(true);
+        w.seed = 9876543210;
+        run(&mut w, &mut sess, &ops, "/seed");
+        assert_eq!(chats(&sess), vec!["Seed: 9876543210"]);
 
         // Give happy path with clamping.
         let (mut w, mut sess, ops) = setup(true);

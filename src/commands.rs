@@ -19,6 +19,7 @@ pub enum ConsoleCommandTag {
     Say,
     Tell,
     Boost,
+    Seed,
     Unknown,
 }
 
@@ -154,6 +155,8 @@ pub fn parse_console_command(cmd: &str) -> ParsedCommand {
     } else if lower == "boost" || lower.starts_with("boost ") {
         tag = ConsoleCommandTag::Boost;
         arg1 = arg_of(cmd, 5);
+    } else if lower == "seed" {
+        tag = ConsoleCommandTag::Seed;
     }
 
     ParsedCommand {
@@ -161,5 +164,18 @@ pub fn parse_console_command(cmd: &str) -> ParsedCommand {
         arg1: arg1.to_owned(),
         arg2: arg2.to_owned(),
         count,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_seed() {
+        let cmd = parse_console_command("seed");
+        assert_eq!(cmd.tag, ConsoleCommandTag::Seed);
+        let cmd_upper = parse_console_command("SEED");
+        assert_eq!(cmd_upper.tag, ConsoleCommandTag::Seed);
     }
 }
