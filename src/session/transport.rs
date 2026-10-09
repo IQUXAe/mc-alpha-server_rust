@@ -106,6 +106,9 @@ impl ConnInner {
         if read_pos > 0 {
             self.recv_buf.drain(..read_pos);
         }
+        if self.recv_buf.is_empty() && self.recv_buf.capacity() > 65536 {
+            self.recv_buf.shrink_to(8192);
+        }
     }
 
     fn flush_outbound(&mut self) {
@@ -136,6 +139,9 @@ impl ConnInner {
         }
         if write_pos > 0 {
             self.outbound.drain(..write_pos);
+        }
+        if self.outbound.is_empty() && self.outbound.capacity() > 65536 {
+            self.outbound.shrink_to(8192);
         }
         if self.outbound.is_empty() && self.closing && !self.closed {
             let _ = self.stream.shutdown(std::net::Shutdown::Write);
