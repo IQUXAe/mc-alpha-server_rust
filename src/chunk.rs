@@ -214,9 +214,16 @@ impl Chunk {
             blocks: [0u8; CHUNK_VOLUME],
             data: NibbleArray::with_nibbles(CHUNK_VOLUME),
             skylight: NibbleArray::with_nibbles(CHUNK_VOLUME),
-            blocklight: NibbleArray::with_nibbles(CHUNK_VOLUME),
+            blocklight: NibbleArray::new(),
             height_map: [0u8; CHUNK_AREA],
             cached_map_compressed: std::sync::Mutex::new(None),
+        }
+    }
+
+    #[inline]
+    fn ensure_blocklight(&mut self) {
+        if !self.blocklight.is_valid() {
+            self.blocklight = NibbleArray::with_nibbles(CHUNK_VOLUME);
         }
     }
 
@@ -400,19 +407,13 @@ impl Chunk {
         {
             return false;
         }
-        for x in 0..CHUNK_SIZE_X {
-            for z in 0..CHUNK_SIZE_Z {
-                for y in 0..CHUNK_SIZE_Y {
-                    let idx = Self::index(x, y, z);
-                    self.skylight.set_nibble(x, y, z, (sky[idx / 2] >> (4 * (idx % 2))) & 0xF);
-                    self.blocklight.set_nibble(x, y, z, (block[idx / 2] >> (4 * (idx % 2))) & 0xF);
-                }
-                let hi = (((z as usize) << 4) | (x as usize)) & (CHUNK_AREA - 1);
-                if let Some(slot) = self.height_map.get_mut(hi) {
-                    *slot = height[hi];
-                }
-            }
+        self.skylight = NibbleArray::from_bytes(sky.to_vec());
+        if block.iter().any(|&b| b != 0) {
+            self.blocklight = NibbleArray::from_bytes(block.to_vec());
+        } else {
+            self.blocklight = NibbleArray::new();
         }
+        self.height_map.copy_from_slice(height);
         self.invalidate_cache();
         self.is_modified = true;
         true
@@ -425,24 +426,17 @@ impl Chunk {
         block: &mut [u8; CHUNK_NIBBLE_BYTES],
         height: &mut [u8; CHUNK_AREA],
     ) {
-        for x in 0..CHUNK_SIZE_X {
-            for z in 0..CHUNK_SIZE_Z {
-                for y in 0..CHUNK_SIZE_Y {
-                    let idx = Self::index(x, y, z);
-                    let s = self.skylight.get_nibble(x, y, z) & 0xF;
-                    let b = self.blocklight.get_nibble(x, y, z) & 0xF;
-                    if idx % 2 == 0 {
-                        sky[idx / 2] = s;
-                        block[idx / 2] = b;
-                    } else {
-                        sky[idx / 2] |= s << 4;
-                        block[idx / 2] |= b << 4;
-                    }
-                }
-                let hi = (((z as usize) << 4) | (x as usize)) & (CHUNK_AREA - 1);
-                height[hi] = self.height_map[hi];
-            }
+        if self.skylight.is_valid() {
+            sky.copy_from_slice(self.skylight.view());
+        } else {
+            sky.fill(0);
         }
+        if self.blocklight.is_valid() {
+            block.copy_from_slice(self.blocklight.view());
+        } else {
+            block.fill(0);
+        }
+        height.copy_from_slice(&self.height_map);
     }
 
     /// Raw Packet51 payload length: 32768 block ids + 16384 packed
@@ -457,10 +451,16 @@ impl Chunk {
         let mut raw = vec![0u8; Self::MAP_RAW_LEN];
         raw[..CHUNK_VOLUME].copy_from_slice(&self.blocks);
         let (meta, rest) = raw[CHUNK_VOLUME..].split_at_mut(CHUNK_NIBBLE_BYTES);
-        meta.copy_from_slice(self.data.view());
+        if self.data.is_valid() {
+            meta.copy_from_slice(self.data.view());
+        }
         let (block, sky) = rest.split_at_mut(CHUNK_NIBBLE_BYTES);
-        block.copy_from_slice(self.blocklight.view());
-        sky.copy_from_slice(self.skylight.view());
+        if self.blocklight.is_valid() {
+            block.copy_from_slice(self.blocklight.view());
+        }
+        if self.skylight.is_valid() {
+            sky.copy_from_slice(self.skylight.view());
+        }
         raw
     }
 
@@ -513,7 +513,8 @@ impl Chunk {
         }
         if light_type == SKY_LIGHT {
             self.skylight.set_nibble(x, y, z, value);
-        } else {
+        } else if value > 0 || self.blocklight.is_valid() {
+            self.ensure_blocklight();
             self.blocklight.set_nibble(x, y, z, value);
         }
         self.invalidate_cache();
@@ -528,6 +529,11 @@ impl Chunk {
     /// Convenience: blocklight read.
     pub fn get_blocklight(&self, x: i32, y: i32, z: i32) -> u8 {
         self.get_saved_light_value(BLOCK_LIGHT, x, y, z)
+    }
+
+    /// True if blocklight array is allocated in memory (has emitting light sources).
+    pub fn has_blocklight(&self) -> bool {
+        self.blocklight.is_valid()
     }
 
     /// Mirrors `getHeightValue`: OOB returns `0`.
@@ -605,6 +611,7 @@ impl Chunk {
     /// neighbours missing).
     pub fn generate_skylight_map(&mut self) {
         self.invalidate_cache();
+        self.blocklight = NibbleArray::new();
         let mut sky_queue: VecDeque<LightNode> = VecDeque::new();
         let mut block_queue: VecDeque<LightNode> = VecDeque::new();
 
@@ -638,15 +645,14 @@ impl Chunk {
                     }
 
                     let emission = light_value(id);
-                    let emit_byte = if emission < 0 {
-                        0u8
-                    } else if emission > 15 {
-                        15u8
-                    } else {
-                        emission as u8
-                    };
-                    self.blocklight.set_nibble(x, y, z, emit_byte);
                     if emission > 0 {
+                        let emit_byte = if emission > 15 {
+                            15u8
+                        } else {
+                            emission as u8
+                        };
+                        self.ensure_blocklight();
+                        self.blocklight.set_nibble(x, y, z, emit_byte);
                         block_queue.push_back(LightNode { x, y, z });
                     }
                     y -= 1;
@@ -762,21 +768,21 @@ impl Chunk {
     /// Generate only blocklight map without skylight (for worlds with no sky, e.g. Hell).
     pub fn generate_blocklight_map(&mut self) {
         self.invalidate_cache();
+        self.blocklight = NibbleArray::new();
         let mut block_queue: VecDeque<LightNode> = VecDeque::new();
         for x in 0..CHUNK_SIZE_X {
             for z in 0..CHUNK_SIZE_Z {
                 for y in 0..CHUNK_SIZE_Y {
                     let id = self.get_block_id(x, y, z);
                     let emission = light_value(id);
-                    let emit_byte = if emission < 0 {
-                        0u8
-                    } else if emission > 15 {
-                        15u8
-                    } else {
-                        emission as u8
-                    };
-                    self.blocklight.set_nibble(x, y, z, emit_byte);
                     if emission > 0 {
+                        let emit_byte = if emission > 15 {
+                            15u8
+                        } else {
+                            emission as u8
+                        };
+                        self.ensure_blocklight();
+                        self.blocklight.set_nibble(x, y, z, emit_byte);
                         block_queue.push_back(LightNode { x, y, z });
                     }
                 }
@@ -1185,5 +1191,31 @@ mod tests {
         chunk.blocks_mut()[0] = 7;
         assert!(chunk.cached_map_compressed.lock().unwrap().is_none());
         assert_eq!(chunk.blocks()[0], 7);
+    }
+
+    #[test]
+    fn test_lazy_blocklight_allocation() {
+        let mut chunk = Chunk::new(0, 0);
+        // Initially blocklight is unallocated (0 bytes RAM)
+        assert!(!chunk.has_blocklight());
+        assert_eq!(chunk.get_blocklight(4, 64, 4), 0);
+
+        // Generating skylight on empty chunk keeps blocklight unallocated
+        chunk.generate_skylight_map();
+        assert!(!chunk.has_blocklight());
+        assert_eq!(chunk.get_blocklight(4, 64, 4), 0);
+
+        // Setting a light source (torch id 50) and regenerating allocates blocklight
+        chunk.set_block_id(4, 64, 4, 50);
+        chunk.generate_skylight_map();
+        assert!(chunk.has_blocklight());
+        assert_eq!(chunk.get_blocklight(4, 64, 4), 14);
+
+        // Setting blocklight via set_light_value directly allocates
+        let mut chunk2 = Chunk::new(1, 1);
+        assert!(!chunk2.has_blocklight());
+        chunk2.set_light_value(BLOCK_LIGHT, 5, 5, 5, 10);
+        assert!(chunk2.has_blocklight());
+        assert_eq!(chunk2.get_blocklight(5, 5, 5), 10);
     }
 }
