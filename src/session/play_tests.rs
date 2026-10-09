@@ -2110,6 +2110,52 @@
     }
 
     #[test]
+    fn test_continued_status_1_past_completion_does_not_destroy_block_before_grace_period() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        if let Some(e) = w.entities.get_mut(player) {
+            e.body_mut().on_ground = true;
+        }
+        w.set_block_id(3, 64, 4, 3);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        // Reach 1.0 damage (15 ticks)
+        for _ in 0..15 {
+            sess.pump(
+                &mut ctx(&mut w, &ops, &mut bc),
+                PacketData::BlockDig { status: 1, x: 3, y: 64, z: 4, face: 1 },
+            );
+            sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        }
+        assert!(sess.dig.cur_damage >= 1.0);
+
+        // Player continues holding LMB, sending 10 more status 1 packets before client triggers status 3
+        for _ in 0..10 {
+            sess.pump(
+                &mut ctx(&mut w, &ops, &mut bc),
+                PacketData::BlockDig { status: 1, x: 3, y: 64, z: 4, face: 1 },
+            );
+        }
+
+        // Block must STILL be intact so client can spawn break particles when local frame hits 1.0
+        assert_eq!(w.get_block_id(3, 64, 4), 3, "overtime status 1 must not prematurely destroy block");
+
+        // Client triggers status 3
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
+        );
+        assert_eq!(w.get_block_id(3, 64, 4), 0, "status 3 completes block harvest");
+    }
+
+    #[test]
     fn test_status_3_rejection_preserves_damage_and_target() {
         let mut w = floor_world();
         let ops = no_ops();

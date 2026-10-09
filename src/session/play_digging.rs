@@ -120,6 +120,7 @@ impl PlaySession {
                     self.dig.cur_damage = 0.0;
                     self.dig.ground_damage = 0.0;
                     self.dig.initial_cooldown = 0;
+                    self.dig.overtime_packets = 0;
                     self.dig.target_x = x;
                     self.dig.target_y = y;
                     self.dig.target_z = z;
@@ -176,6 +177,7 @@ impl PlaySession {
                         self.dig.cur_damage = 0.0;
                         self.dig.ground_damage = 0.0;
                         self.dig.initial_cooldown = 0;
+                        self.dig.overtime_packets = 0;
                         self.dig.target_x = x;
                         self.dig.target_y = y;
                         self.dig.target_z = z;
@@ -183,9 +185,14 @@ impl PlaySession {
                     }
                     if same_target && (self.dig.cur_damage >= 1.0 || self.dig.ground_damage >= 1.0) {
                         // Client did not send status 3, but continued sending status 1 past completion.
-                        // Fallback harvest to support synthetic test clients.
-                        self.harvest(ctx, x, y, z);
-                        crate::player::digging::dig_cancel(&mut self.dig);
+                        // Only fallback harvest after an overtime grace period so that real clients
+                        // have time to run local block destruction, spawn break particles, and send status 3.
+                        if self.dig.overtime_packets >= 20 {
+                            self.harvest(ctx, x, y, z);
+                            crate::player::digging::dig_cancel(&mut self.dig);
+                        } else {
+                            self.dig.overtime_packets += 1;
+                        }
                     } else {
                         let input = self.dig_input(ctx, bid as i32);
                         let done = dig_on_tick(&mut self.dig, x, y, z, input);
