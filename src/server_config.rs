@@ -42,6 +42,22 @@ impl ServerConfig {
         config
     }
 
+    /// Construct in-memory ServerConfig from parsed text (useful for tests).
+    pub fn from_text(text: &str) -> Self {
+        Self {
+            path: PathBuf::new(),
+            props: Self::parse_text(text),
+        }
+    }
+
+    /// Construct in-memory ServerConfig from a HashMap (useful for tests).
+    pub fn from_props(props: HashMap<String, String>) -> Self {
+        Self {
+            path: PathBuf::new(),
+            props,
+        }
+    }
+
     /// File this config persists to.
     pub fn path(&self) -> &Path {
         &self.path
