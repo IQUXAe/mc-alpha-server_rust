@@ -231,9 +231,9 @@ impl WorldGenReed {
                         }
                         let below = accessor.get_block_id(rx, ry + h - 1, rz);
                         if h == 0 {
-                            // `BlockReed.canPlaceBlockAt`: grass or dirt
-                            // only (sand never hosts reed).
-                            if below != 2 && below != 3 {
+                            // `BlockReed.canPlaceBlockAt`: grass, dirt,
+                            // or sand.
+                            if below != 2 && below != 3 && below != 12 {
                                 break;
                             }
                         } else {

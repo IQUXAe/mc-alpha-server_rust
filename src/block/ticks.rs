@@ -594,9 +594,9 @@ fn reed_can_stay_here(w: &World, pos: BlockPos) -> bool {
     if below == 83 {
         return true;
     }
-    // Mirrors `BlockReed.canPlaceBlockAt`: grass or dirt only (sand
-    // never hosts reed), with water adjacent at soil level.
-    if below != 2 && below != 3 {
+    // Mirrors `BlockReed.canPlaceBlockAt`: grass, dirt, or sand, with
+    // water adjacent at soil level.
+    if below != 2 && below != 3 && below != 12 {
         return false;
     }
     for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
@@ -1277,8 +1277,7 @@ mod tests {
         let drops = items_at(&w, 6);
         assert_eq!(drops.len(), 1, "{drops:?}");
 
-        // 15. Reed needs grass/dirt near water (sand never hosts reed,
-        // like Java `BlockReed.canPlaceBlockAt`); mushroom over void
+        // 15. Reed needs grass/dirt/sand near water; mushroom over void
         // does not stay.
         let mut w = harness(7);
         stage(
@@ -1290,6 +1289,8 @@ mod tests {
                 (0, 6, 0, 39, 0),
             ],
         );
+        assert!(block_reed_can_stay(&w, p(0, 5, 0)));
+        w.set_block_id(0, 4, 0, 1);
         assert!(!block_reed_can_stay(&w, p(0, 5, 0)));
         w.set_block_id(0, 4, 0, 3);
         assert!(block_reed_can_stay(&w, p(0, 5, 0)));
