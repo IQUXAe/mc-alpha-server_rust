@@ -144,12 +144,6 @@ pub fn generate_chunk(
     temperatures: &mut [f64; 256],
     humidities: &mut [f64; 256],
 ) {
-    let mut rand = JavaRandom::new(
-        (chunk_x as i64)
-            .wrapping_mul(341873128712)
-            .wrapping_add((chunk_z as i64).wrapping_mul(132897987541)),
-    );
-
     // 1. Load block generator data (biomes & temperatures)
     climate_into(
         gen,
@@ -162,7 +156,6 @@ pub fn generate_chunk(
 
     // 2. Generate terrain
     let var6 = 4;
-    let var7 = 64;
     let var8 = var6 + 1;
     let var9 = 17;
     let var10 = var6 + 1;
@@ -185,65 +178,25 @@ pub fn generate_chunk(
         &gen.max_noise,
     );
 
-    for var11 in 0..var6 {
-        for var12 in 0..var6 {
-            for var13 in 0..16 {
-                let var14 = 0.125;
-                let mut var16 = density_field[((var11 * var10 + var12) * var9 + var13) as usize];
-                let mut var18 = density_field[((var11 * var10 + var12 + 1) * var9 + var13) as usize];
-                let mut var20 = density_field[(((var11 + 1) * var10 + var12) * var9 + var13) as usize];
-                let mut var22 = density_field[(((var11 + 1) * var10 + var12 + 1) * var9 + var13) as usize];
-                let var24 = (density_field[((var11 * var10 + var12) * var9 + var13 + 1) as usize] - var16) * var14;
-                let var26 = (density_field[((var11 * var10 + var12 + 1) * var9 + var13 + 1) as usize] - var18) * var14;
-                let var28 = (density_field[(((var11 + 1) * var10 + var12) * var9 + var13 + 1) as usize] - var20) * var14;
-                let var30 = (density_field[(((var11 + 1) * var10 + var12 + 1) * var9 + var13 + 1) as usize] - var22) * var14;
+    interpolate_density_to_blocks(&density_field, temperatures, blocks);
 
-                for var32 in 0..8 {
-                    let var33 = 0.25;
-                    let mut var35 = var16;
-                    let mut var37 = var18;
-                    let var39 = (var20 - var16) * var33;
-                    let var41 = (var22 - var18) * var33;
+    // 3 & 4. Biome replacement (grass, dirt, sand, gravel, bedrock) and cave generation
+    replace_blocks_for_biomes_and_caves(gen, chunk_x, chunk_z, blocks, biomes);
+}
 
-                    for var43 in 0..4 {
-                        let mut var44 = ((var43 + var11 * 4) << 11) | ((var12 * 4) << 7) | (var13 * 8 + var32);
-                        let var45 = 128;
-                        let var46 = 0.25;
-                        let mut var48 = var35;
-                        let var50 = (var37 - var35) * var46;
-
-                        for var52 in 0..4 {
-                            let temp_val = temperatures[((var11 * 4 + var43) * 16 + var12 * 4 + var52) as usize];
-                            let mut var55 = 0;
-                            if var13 * 8 + var32 < var7 {
-                                if temp_val < 0.5 && var13 * 8 + var32 >= var7 - 1 {
-                                    var55 = 79; // ice
-                                } else {
-                                    var55 = 9; // waterMoving
-                                }
-                            }
-
-                            if var48 > 0.0 {
-                                var55 = 1; // stone
-                            }
-
-                            blocks[var44 as usize] = var55;
-                            var44 += var45;
-                            var48 += var50;
-                        }
-
-                        var35 += var39;
-                        var37 += var41;
-                    }
-
-                    var16 += var24;
-                    var18 += var26;
-                    var20 += var28;
-                    var22 += var30;
-                }
-            }
-        }
-    }
+/// Applies surface biome blocks (grass, dirt, sand, gravel, bedrock) and carves caves.
+pub fn replace_blocks_for_biomes_and_caves(
+    gen: &mut ChunkProvider,
+    chunk_x: i32,
+    chunk_z: i32,
+    blocks: &mut [u8; 32768],
+    biomes: &[MobSpawnerBase; 256],
+) {
+    let mut rand = JavaRandom::new(
+        (chunk_x as i64)
+            .wrapping_mul(341873128712)
+            .wrapping_add((chunk_z as i64).wrapping_mul(132897987541)),
+    );
 
     // 3. Replace blocks for biomes
     let var5_biome = 64;
@@ -339,6 +292,190 @@ pub fn populate_batch(
         temperatures,
     );
     canvas.take_loot()
+}
+
+/// CPU-only trilinear interpolation of density field and temperatures into raw block array.
+pub fn interpolate_density_to_blocks_cpu(
+    density_field: &[f64],
+    temperatures: &[f64; 256],
+    blocks: &mut [u8; 32768],
+) {
+    let var6 = 4usize;
+    let var7 = 64usize;
+    let var9 = 17usize;
+    let var10 = 5usize;
+
+    for var11 in 0..var6 {
+        for var12 in 0..var6 {
+            for var13 in 0..16usize {
+                let var14 = 0.125f64;
+                let mut var16 = density_field[(var11 * var10 + var12) * var9 + var13];
+                let mut var18 = density_field[(var11 * var10 + var12 + 1) * var9 + var13];
+                let mut var20 = density_field[((var11 + 1) * var10 + var12) * var9 + var13];
+                let mut var22 = density_field[((var11 + 1) * var10 + var12 + 1) * var9 + var13];
+                let var24 = (density_field[(var11 * var10 + var12) * var9 + var13 + 1] - var16) * var14;
+                let var26 = (density_field[(var11 * var10 + var12 + 1) * var9 + var13 + 1] - var18) * var14;
+                let var28 = (density_field[((var11 + 1) * var10 + var12) * var9 + var13 + 1] - var20) * var14;
+                let var30 = (density_field[((var11 + 1) * var10 + var12 + 1) * var9 + var13 + 1] - var22) * var14;
+
+                for var32 in 0..8usize {
+                    let var33 = 0.25f64;
+                    let mut var35 = var16;
+                    let mut var37 = var18;
+                    let var39 = (var20 - var16) * var33;
+                    let var41 = (var22 - var18) * var33;
+
+                    for var43 in 0..4usize {
+                        let mut var44 = ((var43 + var11 * 4) << 11) | ((var12 * 4) << 7) | (var13 * 8 + var32);
+                        let var45 = 128usize;
+                        let var46 = 0.25f64;
+                        let mut var48 = var35;
+                        let var50 = (var37 - var35) * var46;
+
+                        for var52 in 0..4usize {
+                            let temp_val = temperatures[(var11 * 4 + var43) * 16 + var12 * 4 + var52];
+                            let mut var55 = 0u8;
+                            let y_coord = var13 * 8 + var32;
+                            if y_coord < var7 {
+                                if temp_val < 0.5 && y_coord >= var7 - 1 {
+                                    var55 = 79; // ice
+                                } else {
+                                    var55 = 9; // waterMoving
+                                }
+                            }
+
+                            if var48 > 0.0 {
+                                var55 = 1; // stone
+                            }
+
+                            blocks[var44] = var55;
+                            var44 += var45;
+                            var48 += var50;
+                        }
+
+                        var35 += var39;
+                        var37 += var41;
+                    }
+
+                    var16 += var24;
+                    var18 += var26;
+                    var20 += var28;
+                    var22 += var30;
+                }
+            }
+        }
+    }
+}
+
+/// Trilinear interpolation of density field to blocks, with optional GPU boost.
+/// If GPU is enabled and available, dispatches to GPU; otherwise falls back to CPU.
+pub fn interpolate_density_to_blocks(
+    density_field: &[f64],
+    temperatures: &[f64; 256],
+    blocks: &mut [u8; 32768],
+) {
+    #[cfg(feature = "gpu")]
+    if crate::gpu::is_gpu_enabled() {
+        if let Some(ctx) = crate::gpu::get_gpu_context() {
+            let density_f32: Vec<f32> = density_field.iter().map(|&v| v as f32).collect();
+            let temp_f32: Vec<f32> = temperatures.iter().map(|&v| v as f32).collect();
+            if let Ok(mut chunks) = crate::gpu::gpu_interpolate_terrain_batch(
+                ctx,
+                &density_f32,
+                &temp_f32,
+                1,
+                64,
+            ) {
+                if let Some(b) = chunks.pop() {
+                    *blocks = b;
+                    return;
+                }
+            }
+        }
+    }
+
+    interpolate_density_to_blocks_cpu(density_field, temperatures, blocks);
+}
+
+/// Batch terrain block generation for multiple chunks.
+/// When GPU is enabled, executes all chunk interpolations on GPU in parallel in a single dispatch.
+pub fn generate_terrain_batch(
+    gen: &mut ChunkProvider,
+    coords: &[(i32, i32)],
+    temperatures: &[[f64; 256]],
+    humidities: &[[f64; 256]],
+    blocks_out: &mut [[u8; 32768]],
+) {
+    let n = coords.len();
+    if n == 0 {
+        return;
+    }
+
+    #[cfg(feature = "gpu")]
+    if crate::gpu::is_gpu_enabled() {
+        if let Some(ctx) = crate::gpu::get_gpu_context() {
+            let mut density_f32 = Vec::with_capacity(n * 425);
+            let mut temp_f32 = Vec::with_capacity(n * 256);
+
+            for i in 0..n {
+                let (chunk_x, chunk_z) = coords[i];
+                let mut field = vec![0.0f64; 425];
+                crate::density::density_generate_field(
+                    &mut field,
+                    chunk_x * 4,
+                    0,
+                    chunk_z * 4,
+                    5,
+                    17,
+                    5,
+                    &temperatures[i],
+                    &humidities[i],
+                    &gen.depth_noise,
+                    &gen.scale_noise,
+                    &gen.main_noise,
+                    &gen.min_noise,
+                    &gen.max_noise,
+                );
+                density_f32.extend(field.iter().map(|&v| v as f32));
+                temp_f32.extend(temperatures[i].iter().map(|&v| v as f32));
+            }
+
+            if let Ok(batch_blocks) = crate::gpu::gpu_interpolate_terrain_batch(
+                ctx,
+                &density_f32,
+                &temp_f32,
+                n,
+                64,
+            ) {
+                for (out, generated) in blocks_out.iter_mut().zip(batch_blocks) {
+                    *out = generated;
+                }
+                return;
+            }
+        }
+    }
+
+    for i in 0..n {
+        let (chunk_x, chunk_z) = coords[i];
+        let mut field = vec![0.0f64; 425];
+        crate::density::density_generate_field(
+            &mut field,
+            chunk_x * 4,
+            0,
+            chunk_z * 4,
+            5,
+            17,
+            5,
+            &temperatures[i],
+            &humidities[i],
+            &gen.depth_noise,
+            &gen.scale_noise,
+            &gen.main_noise,
+            &gen.min_noise,
+            &gen.max_noise,
+        );
+        interpolate_density_to_blocks_cpu(&field, &temperatures[i], &mut blocks_out[i]);
+    }
 }
 
 #[cfg(test)]

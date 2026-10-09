@@ -202,6 +202,68 @@ impl World {
         self.generator.as_mut().unwrap()
     }
 
+    /// Batch-generate raw terrain for a list of chunks (GPU-boosted when enabled).
+    /// Pre-populates raw terrain blocks in `chunks` so subsequent `ensure_chunk` calls
+    /// only execute decorators without re-evaluating terrain noise.
+    pub fn pregenerate_terrain_batch(&mut self, coords: &[(i32, i32)]) {
+        if coords.is_empty() || self.dimension == -1 {
+            return;
+        }
+
+        // Filter to chunks not already loaded/generated
+        let mut needed = Vec::new();
+        for &(cx, cz) in coords {
+            self.recall_chunk(cx, cz);
+            if !self.chunks.contains_key(&(cx, cz)) {
+                needed.push((cx, cz));
+            }
+        }
+        if needed.is_empty() {
+            return;
+        }
+
+        let n = needed.len();
+        let gen = self.generator();
+        let mut temps = Vec::with_capacity(n);
+        let mut humids = Vec::with_capacity(n);
+        let mut biomes = Vec::with_capacity(n);
+
+        for &(cx, cz) in &needed {
+            let mut t = [0.0f64; 256];
+            let mut h = [0.0f64; 256];
+            let mut b = [crate::biome::MobSpawnerBase::DEFAULT; 256];
+            crate::generator::climate_into(gen, [cx * 16, cz * 16], [16, 16], &mut b, &mut t, &mut h);
+            temps.push(t);
+            humids.push(h);
+            biomes.push(b);
+        }
+
+        let mut blocks_batch = vec![[0u8; 32768]; n];
+        crate::generator::generate_terrain_batch(
+            gen,
+            &needed,
+            &temps,
+            &humids,
+            &mut blocks_batch,
+        );
+
+        for (i, &(cx, cz)) in needed.iter().enumerate() {
+            crate::generator::replace_blocks_for_biomes_and_caves(
+                gen,
+                cx,
+                cz,
+                &mut blocks_batch[i],
+                &biomes[i],
+            );
+        }
+
+        for (i, &(cx, cz)) in needed.iter().enumerate() {
+            let mut chunk = Chunk::new(cx, cz);
+            chunk.load_arrays(&blocks_batch[i], &[0u8; 32768]);
+            self.chunks.insert((cx, cz), Box::new(chunk));
+        }
+    }
+
     /// Generate a square of chunks around a center with progress feedback.
     pub fn ensure_area_with_progress<F>(&mut self, cx: i32, cz: i32, radius: i32, mut on_progress: F)
     where
