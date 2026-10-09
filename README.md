@@ -19,9 +19,10 @@ A lightweight, high-performance server implementation for **Minecraft Alpha (v1.
 7. [Alpha Protocol Implementation](#alpha-protocol-implementation)
 8. [Architecture](#architecture)
 9. [Mechanics & Anti-Cheat Parity](#mechanics--anti-cheat-parity)
-10. [Nether Dimension & Alpha Client Limitations](#nether-dimension--alpha-client-limitations)
-11. [Development & Testing](#development--testing)
-12. [License](#license)
+10. [Optional GPU Acceleration (`--features gpu`)](#optional-gpu-acceleration-features-gpu)
+11. [Nether Dimension & Alpha Client Limitations](#nether-dimension--alpha-client-limitations)
+12. [Development & Testing](#development--testing)
+13. [License](#license)
 
 ---
 
@@ -30,6 +31,7 @@ A lightweight, high-performance server implementation for **Minecraft Alpha (v1.
 - **Protocol Parity**: 100% network and gameplay compatibility with Minecraft Alpha clients running **Protocol Version 6** (Alpha v1.2.3_04 through v1.2.6).
 - **Ultra-Low Memory Footprint**: Runs in as little as **~15–18 MB RSS** with an active player on embedded routers, compared to 500+ MB on the JVM vanilla server.
 - **1:1 Terrain Generation**: Exact reproduction of Alpha noise, density fields, biomes, cave carving, tree decorators, and ore distribution.
+- **Optional GPU Acceleration**: Optional compile-time feature (`--features gpu` / `gpu-gen`) offloading 3D density field trilinear interpolation and batch chunk pre-generation to GPU compute shaders (Vulkan, OpenGL ES 3.1+, DX12, Metal). Disabled by default at runtime with bit-exact parity and graceful zero-overhead CPU fallback, specifically tuned for older GPUs and integrated graphics.
 - **World Mechanisms & Physics**: Complete redstone signal recalculation (levels 0–15), torch burnout prevention, levers, buttons, pressure plates, doors, water/lava fluid spread, and obsidian/cobblestone formation.
 - **Tile Entities**: Interactive furnaces (fuel burning and item smelting), single and double chests, signs, and mob spawners.
 - **Synchronous Mining Physics**: Natural crack animations and break particles/sounds with anti-cheat protection against speed mining and instant break hacks.
@@ -104,6 +106,7 @@ The server includes an interactive console that accepts commands in real time:
 | **`summon`** | `summon <mob> [count]` | Spawns mobs (`Zombie`, `Skeleton`, `Spider`, `Creeper`, `Giant`, `Slime`, `Ghast`, `PigZombie`, `Pig`, `Sheep`, `Cow`, `Chicken`). |
 | **`say`** | `say <message>` | Broadcasts a server announcement to all players. |
 | **`tell`** | `tell <player> <message>` | Whispers a private message to a specific player. |
+| **`boost`** | `boost [on\|off\|status]` | Toggles or checks GPU acceleration status at runtime (requires `--features gpu`). |
 
 ### Permission & Moderation Lists
 
@@ -142,6 +145,14 @@ view-distance=6
 # World dimension: false = Overworld (dimension 0, default), true = Nether (dimension -1).
 # Vanilla Alpha SMP servers run either Overworld OR Nether exclusively.
 hellworld=false
+
+# Optional GPU acceleration (effective when compiled with `--features gpu`).
+# Defaults to false (CPU generation is always the active default).
+gpu-acceleration=false
+
+# Preferred GPU graphics backend: auto, vulkan, gles (OpenGL ES 3.1+), gl, dx12, metal.
+# Overrideable at runtime via environment variable ALPHA_GPU_BACKEND.
+gpu-backend=auto
 ```
 
 ---
@@ -236,6 +247,7 @@ The server codebase is organized into modular components under `src/`:
 | **Entity System** | `src/entity/` | Entity representations, AABB spatial collisions, pathfinding, mob AI, gravity, fluid drag, health, and combat. |
 | **Persistence** | `src/persist.rs` | LevelDB chunk store (`rusty-leveldb`) with configurable write buffers and block cache; gzip-NBT serialization for player files and `level.dat`. |
 | **Config & Admin** | `src/server_config.rs`, `server_admin.rs`, `commands.rs` | `server.properties` parser/serializer, ops list, IP/player bans, and interactive console. |
+| **GPU Compute** | `src/gpu/` | Optional WGSL compute pipeline (`--features gpu`) for Vulkan/GLES trilinear terrain density interpolation, batch pre-generation, adapter ranking, and graceful CPU fallback. |
 
 ---
 
@@ -255,6 +267,73 @@ In Minecraft Alpha, mining relies on tight synchronization between client and se
   - To prevent **false rollbacks** when a player is jumping or swimming (where airborne/underwater penalties slow client mining speed), the server also tracks ground-equivalent progress (`ground_damage >= 0.70`).
   - The background server tick (`dig_tick`) advances progress up to 0.80 (for both `cur_damage` and `ground_damage`) to account for network jitter without ever nearing the break threshold, and **never harvests blocks in the background**. Harvesting is strictly client-packet driven so blocks never vanish prematurely without break animations.
   - Instant break cheats (0 ticks) and speed mining cheats (2x–5x speed) are strictly rejected and rolled back via `Packet 53 (BlockChange)`.
+
+---
+
+## Optional GPU Acceleration (`--features gpu`)
+
+The server includes an optional GPU compute pipeline that offloads 3D terrain density field trilinear interpolation and batch chunk pre-generation to modern and vintage graphics hardware using `wgpu` WGSL compute shaders.
+
+> [!WARNING]
+> **Experimental Feature & Resource Overhead Notice**:
+> GPU acceleration is strictly **experimental** and intended primarily for batch world pre-generation:
+> - **Increased RAM Consumption**: Initializing user-space graphics drivers and runtime contexts can significantly increase host memory usage. For example, on Linux with the proprietary NVIDIA driver (tested on a GeForce GTX 1660 SUPER), internal driver heaps and state tracking incur an additional **~150 MB+ RSS overhead** (compared to the ultra-lean ~15–18 MB RSS of pure CPU execution).
+> - **Potential Latency & Performance Degradation**: Weak integrated GPUs (iGPUs), mobile SoCs, and entry-level laptop graphics chips may execute compute shaders significantly slower than modern CPU cores. In such hardware environments, as well as during single-chunk generation on the fly where bus transfer latency and driver queue submission overhead dominate, GPU acceleration can cause net performance degradation compared to the zero-copy, cache-friendly CPU generator.
+> - **Broad Hardware Incompatibility**: Many legacy graphics adapters and mobile GPUs do not support compute shaders (requiring OpenGL ES 3.1+ or desktop GL 4.2+) or have buggy drivers. When an adapter fails feature or downlevel limit validation, the server automatically reverts to CPU generation.
+
+### 1. Philosophy & Default Behavior
+- **Zero Overhead on CPU by Default**: Standard compilation (`cargo build --release`) links zero graphics libraries and incurs zero binary or memory overhead (~3–5 MB idle RSS for embedded routers).
+- **Disabled at Runtime**: Even when compiled with `--features gpu`, GPU acceleration is **disabled (`false`)** by default. The standard CPU generator remains active until explicitly enabled.
+- **Bit-Exact Parity**: The WGSL compute shader (`src/gpu/terrain.wgsl`) reproduces the exact block placement (stone, water, ice, air) matching the Notchian Java 1.2.6 float/double trilinear interpolation.
+- **Graceful Zero-Crash Fallback**: If device creation fails, if a driver does not support compute shaders, or if a runtime error occurs, the server logs a warning and automatically falls back to CPU generation without crashing or disrupting players.
+
+### 2. Supported Graphics Backends
+The backend can be explicitly fixed via `gpu-backend` in `server.properties` or overridden via `ALPHA_GPU_BACKEND`:
+
+| Backend | Identifier | Hardware & Driver Compatibility |
+| :--- | :--- | :--- |
+| **Vulkan** | `vulkan` | Modern & vintage Vulkan 1.1+ (NVIDIA Kepler+, AMD GCN 1+, Intel Skylake+, Mesa RADV/ANVIL). |
+| **OpenGL ES** | `gles` / `gl` | OpenGL ES 3.1+ / Desktop OpenGL 4.2+ with compute shader & storage buffer support. |
+| **DirectX 12** | `dx12` | Windows 10/11 with Feature Level 11_0+. |
+| **Metal** | `metal` | macOS / iOS with Metal compute support (Apple Silicon & Intel Macs). |
+| **Auto** (default) | `auto` / `all` | Automatically enumerates, scores, and selects the best available compute adapter. |
+
+### 3. Compatibility on Vintage & Low-End GPUs
+To support older discrete cards and integrated graphics (Intel HD/Iris, AMD Radeon Vega/RDNA, older NVIDIA):
+1. **Downlevel Profiles & Relaxed Limits**: Requests conservative [`wgpu::Limits::downlevel_defaults()`](src/gpu/gpu_impl.rs) with alignment-safe 32-bit buffers.
+2. **Headless & EGL Safe**: Operates with stripped instance flags (`InstanceFlags::empty()`), ensuring reliable execution on headless Linux servers without active X11/Wayland display contexts.
+3. **TDR Timeout Prevention**: Batches chunk workloads into slices of at most 64 chunks (`MAX_CHUNKS_PER_DISPATCH = 64`), preventing OS Timeout Detection and Recovery (TDR) driver resets on slower GPUs.
+4. **Thread-Safe Multi-Worker Synchronization**: Dispatches are safely serialized across multi-threaded world generator tasks via `GPU_DISPATCH_LOCK`.
+
+### 4. Compilation & Configuration
+Compile the server with GPU compute enabled:
+```bash
+cargo build --release --features gpu
+# or using the feature alias:
+cargo build --release --features gpu-gen
+```
+
+Enable and configure in `server.properties`:
+```properties
+# Enable GPU acceleration (defaults to false)
+gpu-acceleration=true
+
+# Fix preferred graphics backend (defaults to auto)
+# Options: auto, vulkan, gles, gl, dx12, metal
+gpu-backend=vulkan
+```
+
+Or configure dynamically via environment variables:
+```bash
+export ALPHA_GPU_BOOST=1
+export ALPHA_GPU_BACKEND=vulkan
+./target/release/alpha_server
+```
+
+Console and operator in-game commands:
+- `boost on` / `/boost on` — Activates GPU boost.
+- `boost off` / `/boost off` — Deactivates GPU boost (returns to CPU default).
+- `boost status` / `/boost status` — Queries active status and adapter information.
 
 ---
 
