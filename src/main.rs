@@ -13,6 +13,9 @@ use alpha_server::server::Server;
 use alpha_server::server_config::ServerConfig;
 use alpha_server::server_log as log;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 static STOP: AtomicBool = AtomicBool::new(false);
 
 #[allow(unsafe_code)]

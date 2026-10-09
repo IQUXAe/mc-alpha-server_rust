@@ -19,6 +19,7 @@ zstd = "0.13"
 ureq = "3"
 rusty-leveldb = "4"
 mio = { version = "1.0", features = ["os-poll", "net"] }
+mimalloc = { version = "0.1", default-features = false }
 
 [lints.clippy]
 all = "warn"
