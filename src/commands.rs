@@ -18,6 +18,7 @@ pub enum ConsoleCommandTag {
     Summon,
     Say,
     Tell,
+    Boost,
     Unknown,
 }
 
@@ -150,6 +151,9 @@ pub fn parse_console_command(cmd: &str) -> ParsedCommand {
                 }
             }
         }
+    } else if lower == "boost" || lower.starts_with("boost ") {
+        tag = ConsoleCommandTag::Boost;
+        arg1 = arg_of(cmd, 5);
     }
 
     ParsedCommand {
