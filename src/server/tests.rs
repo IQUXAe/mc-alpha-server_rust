@@ -1453,3 +1453,19 @@
         assert!(alex_got_bc, "Watchers in hellworld must receive block change when fire is extinguished");
     }
 
+    #[test]
+    fn test_flush_unloaded_chunks_paced_eviction() {
+        let mut srv = mk_server("");
+        for i in 0..100 {
+            let mut c = crate::chunk::Chunk::new(100 + i, 100);
+            c.clear_modified();
+            srv.world.unloaded.insert((100 + i, 100), Box::new(c));
+        }
+        assert_eq!(srv.world.unloaded.len(), 100);
+        // With limit 4, clean drops are paced up to limit * 8 = 32 per call
+        srv.flush_unloaded_chunks_limit(4);
+        assert_eq!(srv.world.unloaded.len(), 100 - 32);
+        srv.flush_unloaded_chunks_limit(4);
+        assert_eq!(srv.world.unloaded.len(), 100 - 64);
+    }
+

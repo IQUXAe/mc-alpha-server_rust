@@ -18,7 +18,7 @@ impl Server {
                 -1
             }
         } else {
-            self.world.dimension as i32
+            self.world.dimension
         }
     }
 
@@ -131,7 +131,7 @@ impl Server {
     /// A failed encode/put keeps the chunk staged (vanilla retries via
     /// `isModified`) instead of silently dropping player builds.
     pub(crate) fn flush_unloaded_chunks(&mut self) {
-        self.flush_unloaded_chunks_limit(32);
+        self.flush_unloaded_chunks_limit(8);
     }
 
     pub(crate) fn flush_unloaded_chunks_limit(&mut self, limit: usize) {
@@ -161,18 +161,22 @@ impl Server {
         if world.unloaded.is_empty() {
             return;
         }
-        let keys: Vec<(i32, i32)> = world.unloaded.keys().copied().take(limit).collect();
-        for (cx, cz) in keys {
-            let dirty = world
-                .unloaded
-                .get(&(cx, cz))
-                .map(|c| c.is_modified)
-                .unwrap_or(false);
-            if !dirty {
-                world.unloaded.remove(&(cx, cz));
-                world.tiles.remove_chunk(cx, cz);
-                continue;
+        let mut clean_drops = Vec::new();
+        let mut dirty_to_save = Vec::new();
+        for (&(cx, cz), chunk) in &world.unloaded {
+            if !chunk.is_modified {
+                if clean_drops.len() < limit * 8 {
+                    clean_drops.push((cx, cz));
+                }
+            } else if dirty_to_save.len() < limit {
+                dirty_to_save.push((cx, cz));
             }
+        }
+        for (cx, cz) in clean_drops {
+            world.unloaded.remove(&(cx, cz));
+            world.tiles.remove_chunk(cx, cz);
+        }
+        for (cx, cz) in dirty_to_save {
             match crate::persist::encode_chunk_blob(world, cx, cz, true) {
                 None => {
                     log::warning(&format!("Failed to encode chunk {cx},{cz}; keeping staged"));
