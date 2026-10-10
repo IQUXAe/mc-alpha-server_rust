@@ -228,7 +228,7 @@ impl Chunk {
     }
 
     #[inline]
-    fn invalidate_cache(&self) {
+    pub fn invalidate_cache(&self) {
         if let Ok(mut lock) = self.cached_map_compressed.lock() {
             *lock = None;
         }
@@ -521,6 +521,21 @@ impl Chunk {
         self.is_modified = true;
     }
 
+    /// Direct light write without acquiring the compression cache lock or marking modified.
+    /// Used by batch lighting passes to avoid thousands of mutex acquisitions.
+    #[inline]
+    pub fn set_light_value_raw(&mut self, light_type: i32, x: i32, y: i32, z: i32, value: u8) {
+        if !Self::in_bounds(x, y, z) {
+            return;
+        }
+        if light_type == SKY_LIGHT {
+            self.skylight.set_nibble(x, y, z, value);
+        } else if value > 0 || self.blocklight.is_valid() {
+            self.ensure_blocklight();
+            self.blocklight.set_nibble(x, y, z, value);
+        }
+    }
+
     /// Convenience: skylight read.
     pub fn get_skylight(&self, x: i32, y: i32, z: i32) -> u8 {
         self.get_saved_light_value(SKY_LIGHT, x, y, z)
@@ -612,18 +627,34 @@ impl Chunk {
     pub fn generate_skylight_map(&mut self) {
         self.invalidate_cache();
         self.blocklight = NibbleArray::new();
-        let mut sky_queue: VecDeque<LightNode> = VecDeque::new();
-        let mut block_queue: VecDeque<LightNode> = VecDeque::new();
+        let mut sky_queue: VecDeque<LightNode> = VecDeque::with_capacity(2048);
+        let mut block_queue: VecDeque<LightNode> = VecDeque::with_capacity(512);
 
         // STEP 1: vertical initial pass + emitter detection.
         let mut x: i32 = 0;
         while x < CHUNK_SIZE_X {
             let mut z: i32 = 0;
             while z < CHUNK_SIZE_Z {
+                let col_h = self.height_map[(z << 4) as usize | x as usize] as i32;
+                let mut h_max = col_h;
+                if x > 0 {
+                    h_max = h_max.max(self.height_map[(z << 4) as usize | (x - 1) as usize] as i32);
+                }
+                if x < 15 {
+                    h_max = h_max.max(self.height_map[(z << 4) as usize | (x + 1) as usize] as i32);
+                }
+                if z > 0 {
+                    h_max = h_max.max(self.height_map[((z - 1) << 4) as usize | x as usize] as i32);
+                }
+                if z < 15 {
+                    h_max = h_max.max(self.height_map[((z + 1) << 4) as usize | x as usize] as i32);
+                }
+
                 let mut current_sky: i32 = 15;
                 let mut y: i32 = CHUNK_SIZE_Y - 1;
+                let col_base = ((x as usize) << 11) | ((z as usize) << 7);
                 while y >= 0 {
-                    let id = self.get_block_id(x, y, z);
+                    let id = self.blocks[col_base | (y as usize)];
                     if !is_transparent(id) {
                         current_sky = 0;
                     } else {
@@ -640,7 +671,7 @@ impl Chunk {
                         current_sky as u8
                     };
                     self.skylight.set_nibble(x, y, z, sky_byte);
-                    if current_sky > 0 {
+                    if current_sky > 0 && y <= h_max {
                         sky_queue.push_back(LightNode { x, y, z });
                     }
 
@@ -769,11 +800,12 @@ impl Chunk {
     pub fn generate_blocklight_map(&mut self) {
         self.invalidate_cache();
         self.blocklight = NibbleArray::new();
-        let mut block_queue: VecDeque<LightNode> = VecDeque::new();
+        let mut block_queue: VecDeque<LightNode> = VecDeque::with_capacity(512);
         for x in 0..CHUNK_SIZE_X {
             for z in 0..CHUNK_SIZE_Z {
+                let col_base = ((x as usize) << 11) | ((z as usize) << 7);
                 for y in 0..CHUNK_SIZE_Y {
-                    let id = self.get_block_id(x, y, z);
+                    let id = self.blocks[col_base | (y as usize)];
                     let emission = light_value(id);
                     if emission > 0 {
                         let emit_byte = if emission > 15 {

@@ -581,36 +581,25 @@ impl World {
         ];
         let kinds: &[u8] = if self.dimension == -1 { &[1u8] } else { &[0u8, 1u8] };
         for &kind in kinds {
-            let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::new();
+            let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::with_capacity(256);
             for &(cx, cz) in chunks_to_check {
                 let Some(chunk_a) = self.chunks.get(&(cx, cz)) else {
                     continue;
                 };
                 if let Some(chunk_b) = self.chunks.get(&(cx + 1, cz)) {
-                    let xa = cx * 16 + 15;
-                    let xb = xa + 1;
-                    for lz in 0..16 {
-                        let gz = cz * 16 + lz;
-                        for y in 0..WORLD_HEIGHT {
-                            let la = chunk_a.get_saved_light_value(kind as i32, 15, y, lz) as i32;
-                            let lb = chunk_b.get_saved_light_value(kind as i32, 0, y, lz) as i32;
-                            if la > lb + 1 {
-                                queue.push_back((xa, y, gz));
-                            } else if lb > la + 1 {
-                                queue.push_back((xb, y, gz));
-                            }
-                        }
-                    }
-                }
-                if !chunks_to_check.contains(&(cx - 1, cz)) {
-                    if let Some(chunk_b) = self.chunks.get(&(cx - 1, cz)) {
-                        let xa = cx * 16;
-                        let xb = xa - 1;
+                    if kind != 1 || chunk_a.has_blocklight() || chunk_b.has_blocklight() {
+                        let xa = cx * 16 + 15;
+                        let xb = xa + 1;
                         for lz in 0..16 {
                             let gz = cz * 16 + lz;
-                            for y in 0..WORLD_HEIGHT {
-                                let la = chunk_a.get_saved_light_value(kind as i32, 0, y, lz) as i32;
-                                let lb = chunk_b.get_saved_light_value(kind as i32, 15, y, lz) as i32;
+                            let max_y = if kind == 0 {
+                                chunk_a.get_height_value(15, lz).max(chunk_b.get_height_value(0, lz))
+                            } else {
+                                WORLD_HEIGHT - 1
+                            };
+                            for y in 0..=max_y {
+                                let la = chunk_a.get_saved_light_value(kind as i32, 15, y, lz) as i32;
+                                let lb = chunk_b.get_saved_light_value(kind as i32, 0, y, lz) as i32;
                                 if la > lb + 1 {
                                     queue.push_back((xa, y, gz));
                                 } else if lb > la + 1 {
@@ -620,31 +609,45 @@ impl World {
                         }
                     }
                 }
-                if let Some(chunk_b) = self.chunks.get(&(cx, cz + 1)) {
-                    let za = cz * 16 + 15;
-                    let zb = za + 1;
-                    for lx in 0..16 {
-                        let gx = cx * 16 + lx;
-                        for y in 0..WORLD_HEIGHT {
-                            let la = chunk_a.get_saved_light_value(kind as i32, lx, y, 15) as i32;
-                            let lb = chunk_b.get_saved_light_value(kind as i32, lx, y, 0) as i32;
-                            if la > lb + 1 {
-                                queue.push_back((gx, y, za));
-                            } else if lb > la + 1 {
-                                queue.push_back((gx, y, zb));
+                if !chunks_to_check.contains(&(cx - 1, cz)) {
+                    if let Some(chunk_b) = self.chunks.get(&(cx - 1, cz)) {
+                        if kind != 1 || chunk_a.has_blocklight() || chunk_b.has_blocklight() {
+                            let xa = cx * 16;
+                            let xb = xa - 1;
+                            for lz in 0..16 {
+                                let gz = cz * 16 + lz;
+                                let max_y = if kind == 0 {
+                                    chunk_a.get_height_value(0, lz).max(chunk_b.get_height_value(15, lz))
+                                } else {
+                                    WORLD_HEIGHT - 1
+                                };
+                                for y in 0..=max_y {
+                                    let la = chunk_a.get_saved_light_value(kind as i32, 0, y, lz) as i32;
+                                    let lb = chunk_b.get_saved_light_value(kind as i32, 15, y, lz) as i32;
+                                    if la > lb + 1 {
+                                        queue.push_back((xa, y, gz));
+                                    } else if lb > la + 1 {
+                                        queue.push_back((xb, y, gz));
+                                    }
+                                }
                             }
                         }
                     }
                 }
-                if !chunks_to_check.contains(&(cx, cz - 1)) {
-                    if let Some(chunk_b) = self.chunks.get(&(cx, cz - 1)) {
-                        let za = cz * 16;
-                        let zb = za - 1;
+                if let Some(chunk_b) = self.chunks.get(&(cx, cz + 1)) {
+                    if kind != 1 || chunk_a.has_blocklight() || chunk_b.has_blocklight() {
+                        let za = cz * 16 + 15;
+                        let zb = za + 1;
                         for lx in 0..16 {
                             let gx = cx * 16 + lx;
-                            for y in 0..WORLD_HEIGHT {
-                                let la = chunk_a.get_saved_light_value(kind as i32, lx, y, 0) as i32;
-                                let lb = chunk_b.get_saved_light_value(kind as i32, lx, y, 15) as i32;
+                            let max_y = if kind == 0 {
+                                chunk_a.get_height_value(lx, 15).max(chunk_b.get_height_value(lx, 0))
+                            } else {
+                                WORLD_HEIGHT - 1
+                            };
+                            for y in 0..=max_y {
+                                let la = chunk_a.get_saved_light_value(kind as i32, lx, y, 15) as i32;
+                                let lb = chunk_b.get_saved_light_value(kind as i32, lx, y, 0) as i32;
                                 if la > lb + 1 {
                                     queue.push_back((gx, y, za));
                                 } else if lb > la + 1 {
@@ -654,7 +657,33 @@ impl World {
                         }
                     }
                 }
+                if !chunks_to_check.contains(&(cx, cz - 1)) {
+                    if let Some(chunk_b) = self.chunks.get(&(cx, cz - 1)) {
+                        if kind != 1 || chunk_a.has_blocklight() || chunk_b.has_blocklight() {
+                            let za = cz * 16;
+                            let zb = za - 1;
+                            for lx in 0..16 {
+                                let gx = cx * 16 + lx;
+                                let max_y = if kind == 0 {
+                                    chunk_a.get_height_value(lx, 0).max(chunk_b.get_height_value(lx, 15))
+                                } else {
+                                    WORLD_HEIGHT - 1
+                                };
+                                for y in 0..=max_y {
+                                    let la = chunk_a.get_saved_light_value(kind as i32, lx, y, 0) as i32;
+                                    let lb = chunk_b.get_saved_light_value(kind as i32, lx, y, 15) as i32;
+                                    if la > lb + 1 {
+                                        queue.push_back((gx, y, za));
+                                    } else if lb > la + 1 {
+                                        queue.push_back((gx, y, zb));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
+            let mut modified_chunks: HashSet<(i32, i32)> = HashSet::new();
             while let Some((x, y, z)) = queue.pop_front() {
                 let (cx, cz, lx, lz) = Self::chunk_of(x, z);
                 let cur = match self.chunks.get(&(cx, cz)) {
@@ -680,10 +709,17 @@ impl World {
                         let new_light = cur - step;
                         let neighbor_light = c.get_saved_light_value(kind as i32, nlx, ny, nlz) as i32;
                         if new_light > neighbor_light {
-                            c.set_light_value(kind as i32, nlx, ny, nlz, new_light as u8);
+                            c.set_light_value_raw(kind as i32, nlx, ny, nlz, new_light as u8);
+                            modified_chunks.insert((ncx, ncz));
                             queue.push_back((nx, ny, nz));
                         }
                     }
+                }
+            }
+            for &(mcx, mcz) in &modified_chunks {
+                if let Some(c) = self.chunks.get_mut(&(mcx, mcz)) {
+                    c.invalidate_cache();
+                    c.is_modified = true;
                 }
             }
         }
@@ -956,7 +992,7 @@ impl World {
     /// Collision boxes of blocks overlapping `mask` (mirrors
     /// `World::getCollidingBoundingBoxes` over loaded chunks only).
     pub fn colliding_boxes(&self, mask: &AxisAlignedBB) -> Vec<AxisAlignedBB> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(8);
         if !mask.min_x.is_finite()
             || !mask.max_x.is_finite()
             || !mask.min_y.is_finite()
@@ -980,9 +1016,15 @@ impl World {
         let min_bz = (mask.min_z.floor() as i32).max(cz.saturating_sub(16));
         let max_bz = (mask.max_z.floor() as i32).min(cz.saturating_add(16));
         for x in min_bx..=max_bx {
-            for y in min_by..=max_by {
-                for z in min_bz..=max_bz {
-                    let id = self.get_block_id(x, y, z);
+            for z in min_bz..=max_bz {
+                let (cx, cz, lx, lz) = Self::chunk_of(x, z);
+                let Some(c) = self.chunks.get(&(cx, cz)) else {
+                    continue;
+                };
+                let col_base = ((lx as usize) << 11) | ((lz as usize) << 7);
+                let blocks = c.blocks();
+                for y in min_by..=max_by {
+                    let id = blocks[col_base | (y as usize)];
                     if id == 0 {
                         continue;
                     }
