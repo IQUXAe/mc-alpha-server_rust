@@ -2736,3 +2736,45 @@
         assert!(!sess.dig.has_target, "Dig target must not latch onto netherrack while fire is present");
     }
 
+    #[test]
+    fn test_teleport_wait_requires_exact_xz_equality_as_per_vanilla() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 10.0, 64.0, 10.0);
+        let mut sess = PlaySession::new(player);
+        sess.teleport_wait = Some([10.0, 64.0, 10.0]);
+        let mut bc = Vec::new();
+
+        // An in-flight packet with slight x offset (e.g. 10.005) must not prematurely clear teleport_wait:
+        let out = sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::PlayerLookMove {
+                x: 10.005,
+                y: 64.0,
+                stance: 65.62,
+                z: 10.0,
+                yaw: 0.0,
+                pitch: 0.0,
+                on_ground: true,
+            },
+        );
+        assert!(out.is_none());
+        assert!(sess.teleport_wait.is_some(), "In-flight offset packet must not clear teleport_wait");
+
+        // The exact packet clears teleport_wait:
+        let out = sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::PlayerLookMove {
+                x: 10.0,
+                y: 64.0,
+                stance: 65.62,
+                z: 10.0,
+                yaw: 0.0,
+                pitch: 0.0,
+                on_ground: true,
+            },
+        );
+        assert!(out.is_none());
+        assert!(sess.teleport_wait.is_none(), "Exact match must clear teleport_wait");
+    }
+

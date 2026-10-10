@@ -191,12 +191,8 @@ impl PlaySession {
         let moved_wrongly = res_sq > crate::player::movement::VANILLA_WRONGLY_SQ;
         // Force client position like vanilla (setPositionAndRotation(want)),
         // then verify the destination is free when we started free.
-        if !moved_wrongly {
-            // Within tolerance: accept client position to avoid permanent
-            // wall desync (old code kept the clipped server pos forever).
-            if let Some(e) = ctx.world.entities.get_mut(me) {
-                e.body_mut().set_position(x, y, z);
-            }
+        if let Some(e) = ctx.world.entities.get_mut(me) {
+            e.body_mut().set_position(x, y, z);
         }
         let dest_free = {
             use crate::aabb::AxisAlignedBB;
@@ -213,7 +209,7 @@ impl PlaySession {
             );
             ctx.world.colliding_boxes(&shrunk).is_empty()
         };
-        if moved_wrongly || (was_free && !dest_free) {
+        if was_free && (moved_wrongly || !dest_free) {
             self.teleport_to(ctx.world, me, [bx, by, bz], final_yaw, final_pitch);
             return None;
         }
