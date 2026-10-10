@@ -68,6 +68,7 @@ pvp=true
 spawn-animals=true
 spawn-monsters=true
 max-players=20
+# Global TCP connection cap (protects against fd exhaustion & DoS, auto-clamped to >= max-players)
 max-connections=256
 spawn-protection-radius=16
 auto-save-interval=6000
@@ -149,7 +150,7 @@ The server console accepts standard commands at runtime:
 ## Alpha Protocol Notes
 
 ### Network Framing (Protocol 6)
-- **Handshake & Login**: `0x02` (Handshake) and `0x01` (LoginRequest) with Mojang/Betacraft authentication or offline fallback.
+- **Handshake & Login**: `0x02` (Handshake) and `0x01` (LoginRequest) with Betacraft authentication or offline fallback.
 - **Chunk Streaming**: Allocation via `Packet 50 (0x32, PreChunk)` followed by zlib-compressed payloads via `Packet 51 (0x33, MapChunk)`.
 - **Block Digging (`Packet 14, 0x0E`)**:
   - `status = 0`: Start digging (immediate harvest for 0.0 hardness blocks like torches and redstone).
