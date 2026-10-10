@@ -62,18 +62,16 @@ impl Server {
     pub(crate) fn ensure_chunk_dim(&mut self, dim: i32, cx: i32, cz: i32) {
         if dim == -1 && self.hell.is_some() {
             let Some(hell) = self.hell.as_mut() else { return };
-            if !hell.has_chunk(cx, cz) && !hell.recall_chunk(cx, cz) {
-                if !self.load_chunk_dim(-1, cx, cz) {
-                    if let Some(hell) = self.hell.as_mut() {
-                        hell.ensure_chunk(cx, cz);
-                    }
+            if !hell.has_chunk(cx, cz) && !hell.recall_chunk(cx, cz)
+                && !self.load_chunk_dim(-1, cx, cz) {
+                if let Some(hell) = self.hell.as_mut() {
+                    hell.ensure_chunk(cx, cz);
                 }
             }
         } else {
-            if !self.world.has_chunk(cx, cz) && !self.world.recall_chunk(cx, cz) {
-                if !self.load_chunk(cx, cz) {
-                    self.world.ensure_chunk(cx, cz);
-                }
+            if !self.world.has_chunk(cx, cz) && !self.world.recall_chunk(cx, cz)
+                && !self.load_chunk(cx, cz) {
+                self.world.ensure_chunk(cx, cz);
             }
         }
     }
@@ -191,7 +189,11 @@ impl Server {
         let mut sent_now = 0;
         let mut deferred_count = 0;
         let mut i = 0;
+        let mut sent_indices = Vec::with_capacity(CHUNKS_PER_TICK as usize);
         while i < stream.queue.len() && sent_now < CHUNKS_PER_TICK as usize {
+            if sess.conn.has_pending_outbound() {
+                break;
+            }
             let (qx, qz) = stream.queue[i];
             // Borrow the dimension world for this item; field-disjoint
             // accesses below (worker, pending, budget) stay legal.
@@ -327,7 +329,6 @@ impl Server {
                             data,
                         ));
                     });
-                    chunk.clear_compressed_cache();
                 }
                 for &(x, y, z) in hell.tiles.chunk_cells(qx, qz) {
                     if let Some(tile) = hell.tiles.get(&(x, y, z)) {
@@ -367,7 +368,6 @@ impl Server {
                             data,
                         ));
                     });
-                    chunk.clear_compressed_cache();
                 }
                 // Tile entities ride the chunk like C++ (row order is map
                 // order on both sides).
@@ -386,8 +386,21 @@ impl Server {
             }
             stream.sent.insert(chunk_map_key(dim, qx, qz));
             self.players_by_chunk.entry(chunk_map_key(dim, qx, qz)).or_default().insert(play.player);
-            stream.queue.remove(i);
+            sent_indices.push(i);
             sent_now += 1;
+            i += 1;
+        }
+        if !sent_indices.is_empty() {
+            let mut sent_set = HashSet::with_capacity(sent_indices.len());
+            for idx in sent_indices {
+                sent_set.insert(idx);
+            }
+            let mut cur_idx = 0;
+            stream.queue.retain(|_| {
+                let keep = !sent_set.contains(&cur_idx);
+                cur_idx += 1;
+                keep
+            });
         }
     }
 }
