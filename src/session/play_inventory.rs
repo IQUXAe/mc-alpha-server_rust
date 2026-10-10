@@ -89,15 +89,63 @@ impl PlaySession {
                     }
                 }
             }
+            // GUI drops whose stack left the armor bank (helmet/chest/
+            // legs/boots, plus the wearable pumpkin — `SlotArmor` allows
+            // `Block.pumpkin`): the cursor stack is not part of any
+            // `Packet5` bank, so until the client's 1-second sync fires
+            // the server copy still holds it in armor.
+            if !has_item {
+                for slot in &mut p.inventory.armor {
+                    if let Some(s) = slot {
+                        if s.item_id == item_id as i32 && s.count >= count as i32 {
+                            damage = s.damage;
+                            has_item = true;
+                            s.count -= count as i32;
+                            if s.count == 0 {
+                                *slot = None;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            // Same for the 2x2 crafting grid (closing the inventory GUI
+            // drops whatever was left in it).
+            if !has_item {
+                for slot in &mut p.inventory.crafting {
+                    if let Some(s) = slot {
+                        if s.item_id == item_id as i32 && s.count >= count as i32 {
+                            damage = s.damage;
+                            has_item = true;
+                            s.count -= count as i32;
+                            if s.count == 0 {
+                                *slot = None;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         if !has_item {
-            self.send_inventory(ctx.world);
-            return;
-        }
-        self.sync_held(ctx.world);
-        if self.selected_stack(ctx.world).is_none() {
-            self.held_id = 0;
+            // Vanilla fallback (`NetServerHandler.handlePickupSpawn`
+            // spawns the entity with no inventory check): the stack can
+            // legitimately exist in no server bank — it sits on the
+            // client's GUI cursor (`draggingItemStack`), which no
+            // `Packet5` bank covers, and the client's periodic sync may
+            // already have cleared its source slot server-side. Reject
+            // the drop only when the id itself is unobtainable; a full
+            // resync here punished the client for the gap and destroyed
+            // the cursor stack (the evaporating-pumpkin bug).
+            if !crate::item_data::item_is_obtainable(item_id as i32) {
+                return;
+            }
+        } else {
+            self.sync_held(ctx.world);
+            if self.selected_stack(ctx.world).is_none() {
+                self.held_id = 0;
+            }
         }
 
         let eid = ctx.world.spawn_item_entity(item_id as i32, count as i32, damage, rx, ry, rz);

@@ -50,13 +50,15 @@ impl PlaySession {
     ) -> Option<SessionOutcome> {
         let me = self.player;
         if direction == -1 {
-            // Right-click in air: use the held item (must match packet item_id if specified).
+            // Right-click in air: use the held item (must match packet
+            // item_id if specified). Vanilla `handlePlace` never answers
+            // an item use with a `Packet5` inventory sync — the client's
+            // local stack state converges via its own 1-second bank sync;
+            // a full resync here clobbered in-flight GUI edits.
             let held = self.selected_stack(ctx.world);
             if let Some(s) = held {
                 if item_id < 0 || s.item_id == item_id as i32 {
-                    if !self.use_item_air(ctx, s) {
-                        self.send_inventory(ctx.world);
-                    }
+                    let _ = self.use_item_air(ctx, s);
                 }
             }
             return None;
@@ -175,7 +177,11 @@ impl PlaySession {
                 }
             }
         }
-        self.send_inventory(ctx.world);
+        // No `Packet5` resync here: vanilla `handlePlace` answers with
+        // block changes only. The client decrements its own stack on
+        // placement and converges within its 1-second bank sync; a
+        // full-bank resync at this point reverted GUI edits made in the
+        // same second (the "resync sandwich" item loss).
         // Rollback views at both cells (plus upper/lower door half when a door was clicked).
         self.send_block_change(ctx.world, x, y, z);
         if clicked == 64 || clicked == 71 {

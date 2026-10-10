@@ -795,7 +795,68 @@
         assert!(w.entities.get(zombie).is_none());
         assert!(w.entities.get(item).is_none());
         // The full take was recorded for the server tick's collect fan-out.
-        assert_eq!(w.item_pickups, vec![(item, player)]);
+        assert_eq!(
+            w.item_pickups,
+            vec![PickupEvent {
+                item,
+                player,
+                item_id: 3,
+                count: 5,
+                damage: 0,
+                full: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_partial_pickup_reports_added_delta() {
+        // A 5-drop into a bank with room for 2 more merges partially: the
+        // entity keeps the remainder and the event carries the ADDED
+        // delta (the `Packet17AddToInventory` count the client merges —
+        // vanilla only ever reports full takes, the port also reports
+        // partials so the client bank stays in sync without a full
+        // `Packet5` resync).
+        let mut w = world_with_floor();
+        let player = add_player(&mut w, "steve", 3.5, 64.0, 4.5);
+        if let Some(crate::entity::table::Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(crate::inventory::ItemStack::new(3, 62, 0));
+            // Fill the rest so the leftover dirt has nowhere to go.
+            for slot in p.inventory.main.iter_mut().skip(1) {
+                *slot = Some(crate::inventory::ItemStack::new(1, 64, 0));
+            }
+        }
+        let item = w.spawn_item_entity(3, 5, 0, 3.5, 64.2, 4.5);
+        if let Some(crate::entity::table::Entity::Item(e)) = w.entities.get_mut(item) {
+            e.pickup_delay = 0;
+        }
+        w.tick_world();
+        // Only 2 of the 5 dirt fit: the held stack caps at 64...
+        if let Some(crate::entity::table::Entity::Player(p)) = w.entities.get(player) {
+            assert_eq!(
+                p.inventory.main[0].as_ref().map(|s| (s.item_id, s.count)),
+                Some((3, 64))
+            );
+        }
+        // ...the entity survives with the remainder (no Collect packet)...
+        match w.entities.get(item) {
+            Some(crate::entity::table::Entity::Item(e)) => {
+                assert!(!e.body.dead);
+                assert_eq!(e.count, 3);
+            }
+            _ => panic!("partial item row must survive"),
+        }
+        // ...and the event reports the delta as a non-full take.
+        assert_eq!(
+            w.item_pickups,
+            vec![PickupEvent {
+                item,
+                player,
+                item_id: 3,
+                count: 2,
+                damage: 0,
+                full: false,
+            }]
+        );
     }
 
     #[test]

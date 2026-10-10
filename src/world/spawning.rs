@@ -6,7 +6,7 @@
 use crate::entity::table::{AnimalKind, Entity, EntityId, MobKind};
 use crate::math_helper::floor_double;
 use crate::world::tiles::TileData;
-use crate::world::{is_air_material, World, GRASS_BLOCK_ID, WORLD_HEIGHT};
+use crate::world::{is_air_material, PickupEvent, World, GRASS_BLOCK_ID, WORLD_HEIGHT};
 
 impl crate::mob_spawning::SpawnerWorld for World {
     fn spawn_next_int(&mut self, bound: i32) -> i32 {
@@ -337,14 +337,25 @@ impl World {
                 );
                 if rem < count {
                     self.mark_chunk_modified(icx, icz);
-                    if rem <= 0 {
+                    let full = rem <= 0;
+                    if full {
                         if let Some(e) = self.entities.get_mut(iid) {
                             e.body_mut().dead = true;
                         }
-                        self.item_pickups.push((iid, *pid));
                     } else if let Some(Entity::Item(e)) = self.entities.get_mut(iid) {
                         e.count = rem;
                     }
+                    // Report the added delta, not the original count: the
+                    // port merges partial takes (vanilla only reports full
+                    // consumption, `func_163_c` count == pre-merge size).
+                    self.item_pickups.push(PickupEvent {
+                        item: iid,
+                        player: *pid,
+                        item_id,
+                        count: count - rem,
+                        damage,
+                        full,
+                    });
                 }
                 if self.entities.get(iid).map(|e| e.body().dead).unwrap_or(true) {
                     break;

@@ -231,6 +231,20 @@
                 r_skip(c, 6);
                 String::new()
             }
+            17 => {
+                // Packet17AddToInventory: short item id, byte count,
+                // short damage (captured for pickup assertions).
+                let item = r_u16(c) as i16;
+                let count = {
+                    let mut b = [0u8; 1];
+                    c.read_exact(&mut b).unwrap();
+                    b[0] as i8
+                };
+                let mut d = [0u8; 2];
+                c.read_exact(&mut d).unwrap();
+                let damage = i16::from_be_bytes(d);
+                format!("{item}/{count}/{damage}")
+            }
             18 => {
                 r_skip(c, 5);
                 String::new()
@@ -459,9 +473,12 @@
     }
 
     #[test]
-    fn pickup_sends_collect_and_inventory() {
+    fn pickup_sends_collect_and_add_to_inventory() {
         // Dirt dropped at the player's feet must arrive as Packet22Collect
-        // (pop sound + fly-over animation) plus a full inventory sync.
+        // (pop sound + fly-over animation) plus Packet17AddToInventory —
+        // the client merges the stack into its own banks. No full
+        // Packet5 resync: it fought the client's 1-second bank sync and
+        // erased in-flight GUI edits.
         let mut srv = mk_server("");
         let (mut client, _cid) = pair(&mut srv);
         join(&mut srv, &mut client, "Steve");
@@ -475,7 +492,9 @@
             e.pickup_delay = 0;
         }
         assert_eq!(pump_match(&mut client, &mut srv, &|p| p.0 == 22).0, 22);
-        assert_eq!(pump_match(&mut client, &mut srv, &|p| p.0 == 5).0, 5);
+        let (id, payload) = pump_match(&mut client, &mut srv, &|p| p.0 == 17);
+        assert_eq!(id, 17);
+        assert_eq!(payload, "3/5/0");
         let dirt: i32 = match srv.world.entities.get(eid).unwrap() {
             Entity::Player(p) => p.inventory.main.iter().filter_map(|s| *s).map(|s| s.count).sum(),
             _ => unreachable!(),

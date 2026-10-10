@@ -232,8 +232,11 @@
             _ => unreachable!(),
         };
         assert_eq!(count, Some(9));
-        // Rollback + inventory sync packets queued (3 sections + 2 changes).
-        assert!(sess.outbox.len() >= 5);
+        // Block-change rollbacks only: vanilla `handlePlace` never sends
+        // a `Packet5` inventory sync, and a full-bank resync here fought
+        // the client's 1-second bank sync (erasing in-flight GUI edits).
+        assert!(sess.outbox.iter().all(|p| p[0] == 53));
+        assert!(sess.outbox.len() >= 2);
         assert_eq!(sess.outbox[sess.outbox.len() - 2][0], 53);
     }
 
@@ -795,9 +798,15 @@
     }
 
     #[test]
-    fn test_pickup_spawn_rejects_dropping_more_than_inventory() {
+    fn test_pickup_spawn_overdrop_spawns_without_decrement() {
         use crate::entity::table::Entity;
         use crate::inventory::ItemStack;
+        // Dropping more than any bank holds no longer rejects the drop
+        // with a full resync: vanilla `handlePickupSpawn` never checks
+        // the inventory (NetServerHandler.java spawns unconditionally),
+        // and the punish-resync destroyed legitimate GUI drops whose
+        // stack lived on the client cursor. The bank stays untouched and
+        // the entity spawns with the packet's count.
         let mut w = floor_world();
         let ops = no_ops();
         let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
@@ -821,28 +830,36 @@
         };
         sess.pump(&mut ctx(&mut w, &ops, &mut bc), pkt);
 
-        // Inventory should remain 1
+        // The bank stack is untouched (no wrong-slot decrement).
         if let Some(Entity::Player(p)) = w.entities.get(player) {
             assert_eq!(p.inventory.main[0].as_ref().map(|s| s.count), Some(1));
         }
-        // No item entity should spawn
-        let items_count = w
+        // The entity spawned with the packet's count, damage 0 (the
+        // Packet15 wire carries no damage, like vanilla).
+        let items: Vec<_> = w
             .entities
             .alive_ids()
             .into_iter()
-            .filter(|id| matches!(w.entities.get(*id), Some(Entity::Item(_))))
-            .count();
-        assert_eq!(items_count, 0);
+            .filter_map(|id| match w.entities.get(id) {
+                Some(Entity::Item(it)) => Some((it.item_id, it.count, it.damage)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items, vec![(3, 64, 0)]);
     }
 
     #[test]
-    fn test_pickup_spawn_rejects_missing_item_even_if_held() {
+    fn test_pickup_spawn_cursor_fallback_spawns_like_vanilla() {
         use crate::entity::table::Entity;
+        // The diamond exists only on the client's GUI cursor
+        // (`draggingItemStack`) — no `Packet5` bank covers it once the
+        // client's 1-second sync cleared its source slot. The drop must
+        // still spawn the entity (vanilla behavior), not vanish it.
         let mut w = floor_world();
         let ops = no_ops();
         let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
         let mut sess = PlaySession::new(player);
-        sess.held_id = 264; // Diamond, but not in inventory
+        sess.held_id = 264; // Diamond, but not in any server bank
         let mut bc = Vec::new();
         let pkt = PacketData::PickupSpawn {
             entity_id: -1,
@@ -857,6 +874,40 @@
         };
         sess.pump(&mut ctx(&mut w, &ops, &mut bc), pkt);
 
+        let items: Vec<_> = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .filter_map(|id| match w.entities.get(id) {
+                Some(Entity::Item(it)) => Some((it.item_id, it.count, it.damage)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items, vec![(264, 1, 0)]);
+    }
+
+    #[test]
+    fn test_pickup_spawn_rejects_unobtainable_fallback() {
+        use crate::entity::table::Entity;
+        // Unobtainable ids (bedrock) never reach the fallback spawn: a
+        // hacked client cannot materialize them with a bare Packet15.
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+        let pkt = PacketData::PickupSpawn {
+            entity_id: -1,
+            item_id: 7,
+            count: 1,
+            x: (3.5 * 32.0) as i32,
+            y: (64.0 * 32.0) as i32,
+            z: (4.5 * 32.0) as i32,
+            rotation: 0,
+            pitch: 0,
+            roll: 0,
+        };
+        sess.pump(&mut ctx(&mut w, &ops, &mut bc), pkt);
         let items_count = w
             .entities
             .alive_ids()
@@ -864,6 +915,141 @@
             .filter(|id| matches!(w.entities.get(*id), Some(Entity::Item(_))))
             .count();
         assert_eq!(items_count, 0);
+    }
+
+    #[test]
+    fn test_pickup_spawn_from_armor_bank() {
+        use crate::entity::table::Entity;
+        use crate::inventory::ItemStack;
+        // Removing the wearable pumpkin (SlotArmor allows
+        // Block.pumpkin) puts it on the GUI cursor, which no Packet5 bank
+        // covers — but until the client's 1-second sync fires, the
+        // server copy still holds it in the armor bank. Dropping it must
+        // decrement armor (this is the evaporating-pumpkin regression).
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.armor[3] = Some(ItemStack::new(86, 1, 0));
+            p.inventory.armor[2] = Some(ItemStack::new(306, 1, 7)); // worn helmet
+        }
+        let mut bc = Vec::new();
+        let pkt = PacketData::PickupSpawn {
+            entity_id: -1,
+            item_id: 86,
+            count: 1,
+            x: (3.5 * 32.0) as i32,
+            y: (64.0 * 32.0) as i32,
+            z: (4.5 * 32.0) as i32,
+            rotation: 0,
+            pitch: 0,
+            roll: 0,
+        };
+        sess.pump(&mut ctx(&mut w, &ops, &mut bc), pkt);
+        // The armor bank was decremented (server stays consistent)...
+        if let Some(Entity::Player(p)) = w.entities.get(player) {
+            assert_eq!(p.inventory.armor[3], None);
+            assert_eq!(p.inventory.armor[2].map(|s| s.item_id), Some(306));
+        }
+        // ...and the pumpkin exists as a real entity.
+        let items: Vec<_> = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .filter_map(|id| match w.entities.get(id) {
+                Some(Entity::Item(it)) => Some((it.item_id, it.count, it.damage)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items, vec![(86, 1, 0)]);
+        // A worn helmet keeps its damage through the armor-bank drop.
+        let pkt = PacketData::PickupSpawn {
+            entity_id: -1,
+            item_id: 306,
+            count: 1,
+            x: (3.5 * 32.0) as i32,
+            y: (64.0 * 32.0) as i32,
+            z: (4.5 * 32.0) as i32,
+            rotation: 0,
+            pitch: 0,
+            roll: 0,
+        };
+        sess.pump(&mut ctx(&mut w, &ops, &mut bc), pkt);
+        if let Some(Entity::Player(p)) = w.entities.get(player) {
+            assert_eq!(p.inventory.armor[2], None);
+        }
+        let mut items: Vec<_> = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .filter_map(|id| match w.entities.get(id) {
+                Some(Entity::Item(it)) => Some((it.item_id, it.count, it.damage)),
+                _ => None,
+            })
+            .collect();
+        items.sort();
+        assert_eq!(items, vec![(86, 1, 0), (306, 1, 7)]);
+    }
+
+    #[test]
+    fn test_pickup_spawn_from_crafting_bank() {
+        use crate::entity::table::Entity;
+        use crate::inventory::ItemStack;
+        // Closing the inventory GUI drops whatever was left in the 2x2
+        // crafting grid; the drop must decrement the crafting bank, not
+        // be rejected.
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.crafting[0] = Some(ItemStack::new(5, 3, 0));
+        }
+        let mut bc = Vec::new();
+        let pkt = PacketData::PickupSpawn {
+            entity_id: -1,
+            item_id: 5,
+            count: 1,
+            x: (3.5 * 32.0) as i32,
+            y: (64.0 * 32.0) as i32,
+            z: (4.5 * 32.0) as i32,
+            rotation: 0,
+            pitch: 0,
+            roll: 0,
+        };
+        sess.pump(&mut ctx(&mut w, &ops, &mut bc), pkt);
+        if let Some(Entity::Player(p)) = w.entities.get(player) {
+            assert_eq!(
+                p.inventory.crafting[0].map(|s| (s.item_id, s.count)),
+                Some((5, 2))
+            );
+        }
+        let items: Vec<_> = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .filter_map(|id| match w.entities.get(id) {
+                Some(Entity::Item(it)) => Some((it.item_id, it.count, it.damage)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items, vec![(5, 1, 0)]);
+    }
+
+    #[test]
+    fn test_pkt_add_to_inventory_encoding() {
+        // Packet17 wire (Packet17AddToInventory.writePacketData): id
+        // byte, short item id, byte count, short damage — big-endian.
+        assert_eq!(
+            crate::session_packets::pkt_add_to_inventory(86, 5, 42),
+            vec![17, 0, 86, 5, 0, 42]
+        );
+        // Signed edge values encode as-is (vanilla writes raw shorts).
+        assert_eq!(
+            crate::session_packets::pkt_add_to_inventory(-1, -1, -1),
+            vec![17, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+        );
     }
 
     #[test]

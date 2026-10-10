@@ -260,22 +260,20 @@ impl Server {
             return;
         }
         let count = count.clamp(1, 64);
-        let rem = self.world.player_add_item(
-            eid,
-            crate::inventory::ItemStack::new(id, count, 0),
-        );
-        let given = count - rem;
-        if let Some(cid) = self.players.get(&eid).copied() {
-            if let Some(sess) = self.sessions.get_mut(&cid) {
-                if let SessionState::Play(play, _) = &mut sess.state {
-                    play.send_inventory(&self.world);
-                }
-            }
-        }
-        if rem > 0 {
-            log::info(&format!("Gave {given} of {id} to {target} ({rem} did not fit)."));
-        } else {
-            log::info(&format!("Gave {given} of {id} to {target}."));
+        // Vanilla `/give` drops the stack at the player's feet
+        // (`MinecraftServer` -> `EntityPlayer.func_161_a` -> `EntityItem`);
+        // the pickup sweep delivers it via `Packet17AddToInventory` and
+        // the client merges the stack itself. No full `Packet5` resync:
+        // it fought the client's 1-second bank sync and could erase
+        // in-flight GUI edits.
+        let pos = self
+            .world
+            .entities
+            .get(eid)
+            .map(|e| (e.body().pos[0], e.body().pos[1], e.body().pos[2]));
+        if let Some((px, py, pz)) = pos {
+            self.world.spawn_item_entity(id, count, 0, px, py, pz);
+            log::info(&format!("Gave {count} of {id} to {target}."));
         }
     }
 

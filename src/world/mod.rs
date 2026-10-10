@@ -43,6 +43,23 @@ pub const WORLD_HEIGHT: i32 = 128;
 /// World explosion event payload `(x, y, z, radius, destroyed_cells)`.
 pub type ExplosionEvent = (f64, f64, f64, f32, Vec<(i32, i32, i32)>);
 
+/// A pickup since the last server tick (mirrors the vanilla
+/// `EntityPlayerMP.func_163_c` pair of `Packet17AddToInventory` +
+/// `Packet22Collect`): which item entity fed which player, how much of
+/// which stack was merged in, and whether the row was fully consumed
+/// (drives the Collect animation). `count` is the added delta — vanilla
+/// only ever reports full takes, the port also merges partials and
+/// leaves the remainder in the entity.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PickupEvent {
+    pub item: EntityId,
+    pub player: EntityId,
+    pub item_id: i32,
+    pub count: i32,
+    pub damage: i32,
+    pub full: bool,
+}
+
 /// Per-phase wall-clock breakdown of the last [`World::tick_world`], in
 /// microseconds. Read-only diagnostics (perf harness, lag warnings).
 #[derive(Clone, Copy, Debug, Default)]
@@ -167,12 +184,13 @@ pub struct World {
     /// completion or burn change); drained by the server tick to broadcast
     /// `Packet59ComplexEntity`.
     pub tile_updates: Vec<[i32; 3]>,
-    /// Full pickups since the last server tick as `(item, player)` pairs
-    /// (mirrors the collect packet in `EntityPlayerMP.onUpdate`); the
-    /// server tick drains these into `Packet22Collect` fan-out plus an
-    /// inventory sync for the picker. Recorded only on full takes, like
-    /// vanilla (partial merges leave the item down with no packet).
-    pub item_pickups: Vec<(EntityId, EntityId)>,
+    /// Full pickups since the last server tick (mirrors the collect
+    /// packet in `EntityPlayerMP.onUpdate`); the server tick drains
+    /// these into `Packet22Collect` fan-out (full takes) plus
+    /// `Packet17AddToInventory` for the picker — the client merges the
+    /// stack itself without a full-bank resync. Partial merges are
+    /// reported too, with the added delta.
+    pub item_pickups: Vec<PickupEvent>,
     /// Deaths since the last server tick (mirrors the status-3 broadcast
     /// in `EntityLiving.onDeath`); the server tick drains these before
     /// the tracker retires the rows, so the animation precedes destroy.

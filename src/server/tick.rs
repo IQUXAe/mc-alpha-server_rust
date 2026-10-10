@@ -191,12 +191,14 @@ impl Server {
 }
 
 impl Server {
-    /// Ship pickup feedback (mirrors the collect packet in
-    /// `EntityPlayerMP.onUpdate` plus the inventory sync): `Packet22Collect`
-    /// to the item's watchers and picker (the client plays `random.pop`,
-    /// flies the item over and removes it), then a full inventory sync for
-    /// the picker. Drained before `tracker_tick` so Collect precedes the
-    /// destroy for the dead item row. Runs per dimension.
+    /// Ship pickup feedback (mirrors `EntityPlayerMP.func_163_c`):
+    /// `Packet22Collect` to the item's watchers and picker on full takes
+    /// (the client plays `random.pop`, flies the item over and removes
+    /// it), then `Packet17AddToInventory` so the client merges the stack
+    /// itself — no full `Packet5` resync, which fought the client's
+    /// 1-second bank sync and erased in-flight GUI edits. Drained before
+    /// `tracker_tick` so Collect precedes the destroy for the dead item
+    /// row. Runs per dimension.
     fn drain_pickup_events(&mut self) {
         let dim = self.world.dimension as i32;
         self.drain_pickup_events_dim(dim);
@@ -219,8 +221,13 @@ impl Server {
         }
         self.tracker_scratch.out.clear();
         for i in 0..world.item_pickups.len() {
-            let (item_id, player_id) = world.item_pickups[i];
-            world.tracker.collect_fx(item_id, player_id, &mut self.tracker_scratch.out);
+            let ev = world.item_pickups[i];
+            // Collect animation only when the row was fully consumed; a
+            // partial merge leaves the item in the world (vanilla sends
+            // no packet for partials at all, the delta arrives below).
+            if ev.full {
+                world.tracker.collect_fx(ev.item, ev.player, &mut self.tracker_scratch.out);
+            }
         }
         for o in self.tracker_scratch.out.drain(..) {
             if let Some(cid) = self.players.get(&o.to).copied() {
@@ -229,13 +236,22 @@ impl Server {
                 }
             }
         }
+        // `Packet17AddToInventory` (vanilla `EntityPlayerMP.func_163_c`):
+        // the client merges the stack into the first partial/empty slot
+        // itself, without a full `Packet5` bank overwrite. A resync here
+        // fought the client's 1-second bank sync and erased in-flight GUI
+        // edits (the "resync sandwich" item loss).
         for i in 0..world.item_pickups.len() {
-            let (_, player_id) = world.item_pickups[i];
-            if let Some(cid) = self.players.get(&player_id).copied() {
+            let ev = world.item_pickups[i];
+            if let Some(cid) = self.players.get(&ev.player).copied() {
                 if let Some(Session { state: SessionState::Play(play, _), .. }) =
                     self.sessions.get_mut(&cid)
                 {
-                    play.send_inventory(world);
+                    play.outbox.push(crate::session_packets::pkt_add_to_inventory(
+                        ev.item_id as i16,
+                        ev.count.clamp(1, 127) as i8,
+                        ev.damage.clamp(0, 32767) as i16,
+                    ));
                 }
             }
         }

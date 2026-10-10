@@ -114,6 +114,22 @@ pub fn pkt_inventory_section(inv_type: i32, slots: &[Option<ItemStack>]) -> Vec<
     b
 }
 
+/// `Packet17AddToInventory` (vanilla `EntityPlayerMP.func_163_c` pickup
+/// path): the client merges the stack into the first partial/empty slot
+/// (`NetClientHandler.handleAddToInventory` -> `addItemStackToInventory`)
+/// without touching the rest of the banks, so unlike a full `Packet5`
+/// resync it cannot clobber in-flight GUI edits (the client sends its
+/// banks at most once per second). Wire: short id, byte count, short
+/// damage.
+pub fn pkt_add_to_inventory(item_id: i16, count: i8, damage: i16) -> Vec<u8> {
+    let mut b = Vec::with_capacity(7);
+    put_u8(&mut b, 17);
+    put_i16(&mut b, item_id);
+    put_u8(&mut b, count as u8);
+    put_i16(&mut b, damage);
+    b
+}
+
 pub fn pkt_tile_entity(x: i32, y: i32, z: i32, nbt_gz: &[u8]) -> Vec<u8> {
     let mut b = Vec::with_capacity(13 + nbt_gz.len());
     put_u8(&mut b, 59);
