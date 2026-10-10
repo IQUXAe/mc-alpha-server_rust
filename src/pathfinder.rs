@@ -1,6 +1,6 @@
 use std::collections::{BinaryHeap, HashMap};
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct PathPointNode {
     x: i32,
     y: i32,
@@ -162,8 +162,8 @@ pub fn find_path_native(
     let start_key = (start_x_floor, start_y_floor, start_z_floor);
     let target_key = (target_x_floor, target_y_floor, target_z_floor);
 
-    let mut nodes = HashMap::new();
-    let mut heap = BinaryHeap::new();
+    let mut nodes = HashMap::with_capacity(64);
+    let mut heap = BinaryHeap::with_capacity(64);
 
     let start_target_dist = ((target_x_floor - start_x_floor) as f32 * (target_x_floor - start_x_floor) as f32 +
                              (target_y_floor - start_y_floor) as f32 * (target_y_floor - start_y_floor) as f32 +
@@ -194,7 +194,7 @@ pub fn find_path_native(
         }
 
         let current_node = match nodes.get(&key) {
-            Some(n) => n.clone(),
+            Some(&n) => n,
             None => continue,
         };
 
@@ -239,7 +239,7 @@ pub fn find_path_native(
                 get_safe_point(q, [nx, ny, nz], size, vertical_step, &mut nodes)
             {
                 let cand_node = match nodes.get(&safe_coord) {
-                    Some(n) => n.clone(),
+                    Some(&n) => n,
                     None => continue,
                 };
                 if cand_node.is_closed {
