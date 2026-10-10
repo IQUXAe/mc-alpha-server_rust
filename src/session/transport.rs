@@ -104,10 +104,14 @@ impl ConnInner {
             }
         }
         if read_pos > 0 {
-            self.recv_buf.drain(..read_pos);
+            if read_pos >= self.recv_buf.len() {
+                self.recv_buf.clear();
+            } else {
+                self.recv_buf.drain(..read_pos);
+            }
         }
-        if self.recv_buf.is_empty() && self.recv_buf.capacity() > 65536 {
-            self.recv_buf.shrink_to(8192);
+        if self.recv_buf.is_empty() && self.recv_buf.capacity() > 524288 {
+            self.recv_buf.shrink_to(65536);
         }
     }
 
@@ -138,10 +142,14 @@ impl ConnInner {
             }
         }
         if write_pos > 0 {
-            self.outbound.drain(..write_pos);
+            if write_pos >= self.outbound.len() {
+                self.outbound.clear();
+            } else {
+                self.outbound.drain(..write_pos);
+            }
         }
-        if self.outbound.is_empty() && self.outbound.capacity() > 65536 {
-            self.outbound.shrink_to(8192);
+        if self.outbound.is_empty() && self.outbound.capacity() > 524288 {
+            self.outbound.shrink_to(65536);
         }
         if self.outbound.is_empty() && self.closing && !self.closed {
             let _ = self.stream.shutdown(std::net::Shutdown::Write);
@@ -222,6 +230,51 @@ impl Conn {
         }
         inner.outbound.extend_from_slice(&bytes);
         inner.flush_outbound();
+    }
+
+    /// Queue multiple packets for the socket in a single batch, flushing once.
+    pub fn send_batch(&self, packets: &mut Vec<Vec<u8>>) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.closed {
+            packets.clear();
+            return;
+        }
+        let total_len: usize = packets.iter().map(|p| p.len()).sum();
+        if inner.outbound.len() + total_len > SEND_QUEUE_MAX_BYTES as usize {
+            crate::server_log::warning(&format!(
+                "Send queue limit exceeded ({} bytes) for {}, dropping connection",
+                inner.outbound.len() + total_len,
+                self.remote
+            ));
+            drop(inner);
+            self.close();
+            packets.clear();
+            return;
+        }
+        for pkt in packets.drain(..) {
+            inner.outbound.extend_from_slice(&pkt);
+        }
+        inner.flush_outbound();
+    }
+
+    /// Queue bytes for the socket without flushing immediately.
+    pub fn queue(&self, bytes: &[u8]) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.closed {
+            return;
+        }
+        let len = bytes.len();
+        if inner.outbound.len() + len > SEND_QUEUE_MAX_BYTES as usize {
+            crate::server_log::warning(&format!(
+                "Send queue limit exceeded ({} bytes) for {}, dropping connection",
+                inner.outbound.len() + len,
+                self.remote
+            ));
+            drop(inner);
+            self.close();
+            return;
+        }
+        inner.outbound.extend_from_slice(bytes);
     }
 
     /// Graceful close: flush outbound bytes, FIN the socket, and report Dropped.
