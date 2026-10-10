@@ -1235,22 +1235,37 @@ impl World {
         }
         keys.sort_unstable();
         keys.dedup();
-        for &(cx, cz) in &keys {
-            if !self.has_chunk(cx, cz) {
-                continue;
-            }
-            for _ in 0..80 {
-                let bx = (cx << 4) + self.rng.next_int_bound(16);
-                let by = self.rng.next_int_bound(128);
-                let bz = (cz << 4) + self.rng.next_int_bound(16);
-                let id = self.get_block_id(bx, by, bz);
-                if id == 0 {
+        let mut to_tick = Vec::new();
+        {
+            let World {
+                ref mut rng,
+                ref chunks,
+                ..
+            } = *self;
+            for &(cx, cz) in &keys {
+                let Some(c) = chunks.get(&(cx, cz)) else {
                     continue;
-                }
-                if block_properties_get(id as u32).tick_on_load {
-                    self.update_block_tick(bx, by, bz);
+                };
+                let blocks = c.blocks();
+                for _ in 0..80 {
+                    let lx = rng.next_int_bound(16);
+                    let by = rng.next_int_bound(128);
+                    let lz = rng.next_int_bound(16);
+                    let idx = ((lx as usize) << 11) | ((lz as usize) << 7) | (by as usize);
+                    let id = blocks[idx];
+                    if id == 0 {
+                        continue;
+                    }
+                    if block_properties_get(id as u32).tick_on_load {
+                        let bx = (cx << 4) + lx;
+                        let bz = (cz << 4) + lz;
+                        to_tick.push((bx, by, bz));
+                    }
                 }
             }
+        }
+        for (bx, by, bz) in to_tick {
+            self.update_block_tick(bx, by, bz);
         }
         self.random_tick_keys = keys;
     }
