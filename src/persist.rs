@@ -1074,7 +1074,7 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> bool {
         use std::io::Write;
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        file.sync_data()?;
         Ok(())
     })()
     .is_ok();
@@ -1086,11 +1086,6 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> bool {
     if std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return false;
-    }
-    if let Some(p) = parent {
-        if let Ok(dir) = std::fs::File::open(p) {
-            let _ = dir.sync_all();
-        }
     }
     true
 }

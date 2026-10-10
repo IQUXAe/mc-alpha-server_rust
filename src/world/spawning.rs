@@ -297,8 +297,7 @@ impl World {
         }
         items.sort_unstable();
         players.sort_unstable();
-        for i in 0..items.len() {
-            let iid = items[i];
+        for &iid in &items {
             if self.entities.get(iid).map(|e| e.body().dead).unwrap_or(true) {
                 continue;
             }
@@ -377,7 +376,6 @@ impl World {
     pub fn tick_world(&mut self) {
         use std::time::Instant;
         let total = Instant::now();
-        self.update_skylight_subtracted();
         self.time += 1;
         self.update_skylight_subtracted();
         let t = Instant::now();

@@ -486,11 +486,12 @@ impl Tracker {
                     entry.last_fixed[2],
                     entry.range,
                 );
-                let seen = chunk_visible(o.id, e.id);
                 let already = entry.tracking.contains(&o.id);
-                if in_range && seen && !already && o.id != e.id {
-                    self.fresh_scratch.push(o.id);
-                } else if (!in_range || !seen) && already {
+                if in_range && !already && o.id != e.id {
+                    if chunk_visible(o.id, e.id) {
+                        self.fresh_scratch.push(o.id);
+                    }
+                } else if already && (!in_range || !chunk_visible(o.id, e.id)) {
                     self.gone_scratch.push(o.id);
                 }
             }

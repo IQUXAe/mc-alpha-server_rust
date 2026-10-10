@@ -338,7 +338,7 @@ impl Server {
             },
         };
         let anchor_dim = if self.world.entities.get(anchor).is_some() {
-            self.world.dimension as i32
+            self.world.dimension
         } else {
             -1
         };

@@ -19,7 +19,7 @@ impl Server {
     /// Runs once per dimension; observers only ever see their own
     /// dimension (the `sent` gate carries the dimension key).
     fn tracker_tick(&mut self) {
-        let dim = self.world.dimension as i32;
+        let dim = self.world.dimension;
         self.tracker_tick_dim(dim);
         if self.hell.is_some() {
             self.tracker_tick_dim(-1);
@@ -39,7 +39,7 @@ impl Server {
                     &mut scratch,
                 );
             }
-        } else if dim == self.world.dimension as i32 {
+        } else if dim == self.world.dimension {
             Self::tracker_tick_world(
                 dim,
                 &mut self.world,
@@ -152,30 +152,35 @@ impl Server {
                 Some(Entity::Falling(_)) | None => None,
             };
             if let Some(te) = te {
-                scratch.chunks.insert(
-                    te.id,
-                    (
-                        (te.pos[0].floor() as i32).div_euclid(16),
-                        (te.pos[2].floor() as i32).div_euclid(16),
-                    ),
-                );
                 scratch.tracked.push(te);
+            }
+        }
+        let mut observer_sent: Vec<(EntityId, &std::collections::HashSet<crate::server::ChunkMapKey>)> =
+            Vec::with_capacity(scratch.observers.len());
+        for o in &scratch.observers {
+            if let Some(cid) = players.get(&o.id) {
+                if let Some(Session { state: SessionState::Play(_, stream), .. }) = sessions.get(cid) {
+                    if stream.dim == dim {
+                        observer_sent.push((o.id, &stream.sent));
+                    }
+                }
             }
         }
         for te in &scratch.tracked {
             world.tracker.add(te);
+            let ecx = (te.pos[0].floor() as i32).div_euclid(16);
+            let ecz = (te.pos[2].floor() as i32).div_euclid(16);
+            let chunk_key = chunk_map_key(dim, ecx, ecz);
             world.tracker.tick_entity(
                 te,
                 &scratch.observers,
-                &|observer, entity| {
-                    let (ecx, ecz) = scratch.chunks.get(&entity).copied().unwrap_or((0, 0));
-                    match players.get(&observer).and_then(|cid| sessions.get(cid)) {
-                        Some(Session { state: SessionState::Play(_, stream), .. }) => {
-                            stream.dim == dim
-                                && stream.sent.contains(&chunk_map_key(dim, ecx, ecz))
+                &|observer, _entity| {
+                    for &(oid, sent) in &observer_sent {
+                        if oid == observer {
+                            return sent.contains(&chunk_key);
                         }
-                        _ => false,
                     }
+                    false
                 },
                 &mut scratch.out,
             );
@@ -183,7 +188,7 @@ impl Server {
         for o in scratch.out.drain(..) {
             if let Some(cid) = players.get(&o.to).copied() {
                 if let Some(sess) = sessions.get(&cid) {
-                    sess.conn.send(o.bytes);
+                    sess.conn.queue(&o.bytes);
                 }
             }
         }
@@ -200,7 +205,7 @@ impl Server {
     /// `tracker_tick` so Collect precedes the destroy for the dead item
     /// row. Runs per dimension.
     fn drain_pickup_events(&mut self) {
-        let dim = self.world.dimension as i32;
+        let dim = self.world.dimension;
         self.drain_pickup_events_dim(dim);
         if self.hell.is_some() {
             self.drain_pickup_events_dim(-1);
@@ -211,7 +216,7 @@ impl Server {
         let world: &mut World = if dim == -1 && self.hell.is_some() {
             let Some(h) = self.hell.as_mut() else { return };
             h
-        } else if dim == self.world.dimension as i32 {
+        } else if dim == self.world.dimension {
             &mut self.world
         } else {
             return;
@@ -232,7 +237,7 @@ impl Server {
         for o in self.tracker_scratch.out.drain(..) {
             if let Some(cid) = self.players.get(&o.to).copied() {
                 if let Some(sess) = self.sessions.get(&cid) {
-                    sess.conn.send(o.bytes);
+                    sess.conn.queue(&o.bytes);
                 }
             }
         }
@@ -264,7 +269,7 @@ impl Server {
     /// for the same tick's kills. Runs per dimension (explosions only
     /// reach players standing in the same dimension).
     fn drain_death_events(&mut self) {
-        let dim = self.world.dimension as i32;
+        let dim = self.world.dimension;
         self.drain_death_events_dim(dim);
         if self.hell.is_some() {
             self.drain_death_events_dim(-1);
@@ -275,7 +280,7 @@ impl Server {
         let world: &mut World = if dim == -1 && self.hell.is_some() {
             let Some(h) = self.hell.as_mut() else { return };
             h
-        } else if dim == self.world.dimension as i32 {
+        } else if dim == self.world.dimension {
             &mut self.world
         } else {
             return;
@@ -297,7 +302,7 @@ impl Server {
             for o in self.tracker_scratch.out.drain(..) {
                 if let Some(cid) = self.players.get(&o.to).copied() {
                     if let Some(sess) = self.sessions.get(&cid) {
-                        sess.conn.send(o.bytes);
+                        sess.conn.queue(&o.bytes);
                     }
                 }
             }
@@ -319,7 +324,7 @@ impl Server {
                 };
                 if in_range {
                     if let Some(sess) = self.sessions.get(&cid) {
-                        sess.conn.send(pkt.clone());
+                        sess.conn.queue(&pkt);
                     }
                 }
             }
@@ -332,7 +337,7 @@ impl Server {
     /// all reach the HUD — previously only login/respawn/eat synced it.
     /// Runs per dimension (rows live in exactly one world).
     fn push_health_changes(&mut self) {
-        let dim = self.world.dimension as i32;
+        let dim = self.world.dimension;
         self.push_health_changes_dim(dim);
         if self.hell.is_some() {
             self.push_health_changes_dim(-1);
@@ -343,7 +348,7 @@ impl Server {
         let world: &World = if dim == -1 && self.hell.is_some() {
             let Some(h) = self.hell.as_ref() else { return };
             h
-        } else if dim == self.world.dimension as i32 {
+        } else if dim == self.world.dimension {
             &self.world
         } else {
             return;
@@ -365,7 +370,7 @@ impl Server {
         for i in 0..self.health_scratch.len() {
             let (cid, health) = self.health_scratch[i];
             if let Some(sess) = self.sessions.get_mut(&cid) {
-                sess.conn.send(pkt_health(health));
+                sess.conn.queue(&pkt_health(health));
                 if let SessionState::Play(play, _) = &mut sess.state {
                     play.last_health = health;
                 }
@@ -382,7 +387,7 @@ impl Server {
     /// (which would replace `GuiFurnace.field_978_j` and clobber facing metadata).
     /// Runs per dimension.
     fn drain_block_updates(&mut self) {
-        let dim = self.world.dimension as i32;
+        let dim = self.world.dimension;
         self.drain_block_updates_dim(dim);
         if self.hell.is_some() {
             self.drain_block_updates_dim(-1);
@@ -393,7 +398,7 @@ impl Server {
         let world: &mut World = if dim == -1 && self.hell.is_some() {
             let Some(h) = self.hell.as_mut() else { return };
             h
-        } else if dim == self.world.dimension as i32 {
+        } else if dim == self.world.dimension {
             &mut self.world
         } else {
             return;
@@ -406,15 +411,16 @@ impl Server {
                 for ((lcx, lcz), sc) in
                     crate::session_packets::pkt_subchunk_furnace_light(world, x, y, z)
                 {
-                    for cid in Self::conns_in_chunk(
+                    Self::for_each_conn_in_chunk(
                         &self.players_by_chunk,
                         &self.players,
                         chunk_map_key(dim, lcx, lcz),
-                    ) {
-                        if let Some(sess) = self.sessions.get(&cid) {
-                            sess.conn.send(sc.clone());
-                        }
-                    }
+                        |cid| {
+                            if let Some(sess) = self.sessions.get(&cid) {
+                                sess.conn.queue(&sc);
+                            }
+                        },
+                    );
                 }
             }
             let subchunk = if matches!(id, 61 | 62) {
@@ -434,29 +440,29 @@ impl Server {
                 self.sent_tiles_scratch.insert((dim, x, y, z));
             }
             let bytes = pkt_block_change(x, y, z, id, meta);
-            let cids = Self::conns_in_chunk(
+            Self::for_each_conn_in_chunk(
                 &self.players_by_chunk,
                 &self.players,
                 chunk_map_key(dim, x.div_euclid(16), z.div_euclid(16)),
-            );
-            for cid in cids {
-                if let Some(sess) = self.sessions.get(&cid) {
-                    sess.conn.send(bytes.clone());
-                    if let Some(ref tp) = furnace_tile {
-                        sess.conn.send(tp.clone());
+                |cid| {
+                    if let Some(sess) = self.sessions.get(&cid) {
+                        sess.conn.queue(&bytes);
+                        if let Some(ref tp) = furnace_tile {
+                            sess.conn.queue(tp);
+                        }
                         if let Some(ref sc) = subchunk {
-                            sess.conn.send(sc.clone());
+                            sess.conn.queue(sc);
                         }
                     }
-                }
-            }
+                },
+            );
         }
     }
 
     /// Ship queued tile-entity updates (`Packet59ComplexEntity`) to chunk-loaded players.
     /// Runs per dimension.
     fn drain_tile_updates(&mut self) {
-        let dim = self.world.dimension as i32;
+        let dim = self.world.dimension;
         self.drain_tile_updates_dim(dim);
         if self.hell.is_some() {
             self.drain_tile_updates_dim(-1);
@@ -467,7 +473,7 @@ impl Server {
         let world: &mut World = if dim == -1 && self.hell.is_some() {
             let Some(h) = self.hell.as_mut() else { return };
             h
-        } else if dim == self.world.dimension as i32 {
+        } else if dim == self.world.dimension {
             &mut self.world
         } else {
             return;
@@ -483,19 +489,19 @@ impl Server {
                 } else {
                     None
                 };
-                let cids = Self::conns_in_chunk(
+                Self::for_each_conn_in_chunk(
                     &self.players_by_chunk,
                     &self.players,
                     chunk_map_key(dim, x.div_euclid(16), z.div_euclid(16)),
-                );
-                for cid in cids {
-                    if let Some(sess) = self.sessions.get(&cid) {
-                        sess.conn.send(bytes.clone());
-                        if let Some(ref sc) = subchunk {
-                            sess.conn.send(sc.clone());
+                    |cid| {
+                        if let Some(sess) = self.sessions.get(&cid) {
+                            sess.conn.queue(&bytes);
+                            if let Some(ref sc) = subchunk {
+                                sess.conn.queue(sc);
+                            }
                         }
-                    }
-                }
+                    },
+                );
             }
         }
     }
@@ -527,7 +533,7 @@ impl Server {
             for &cid in &self.cids_scratch {
                 if self.is_play(cid) {
                     if let Some(sess) = self.sessions.get(&cid) {
-                        sess.conn.send(bytes.clone());
+                        sess.conn.queue(&bytes);
                     }
                 }
             }
@@ -554,6 +560,7 @@ impl Server {
         self.sent_tiles_scratch.clear();
         self.drain_block_updates();
         self.drain_tile_updates();
+        self.flush_all_sessions();
         self.poll_network(std::time::Duration::ZERO);
         let lines = std::mem::take(&mut self.console);
         for line in lines {

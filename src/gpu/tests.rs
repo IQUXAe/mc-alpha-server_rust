@@ -52,6 +52,7 @@ fn test_gpu_boost_status_string() {
 
 #[test]
 fn test_settings_gpu_acceleration_defaults_to_false() {
+    let _guard = GPU_TEST_LOCK.lock().unwrap();
     let mut cfg = ServerConfig::default();
     let settings = load_settings(&mut cfg);
     assert!(!settings.gpu_acceleration, "gpu-acceleration must default to false");
@@ -64,6 +65,7 @@ fn test_settings_gpu_acceleration_defaults_to_false() {
 
 #[test]
 fn test_settings_gpu_acceleration_parsing() {
+    let _guard = GPU_TEST_LOCK.lock().unwrap();
     let text = "#props\ngpu-acceleration=true\n";
     let mut cfg = ServerConfig::from_text(text);
     let settings = load_settings(&mut cfg);
@@ -78,6 +80,7 @@ fn test_settings_gpu_acceleration_parsing() {
 
 #[test]
 fn test_settings_gpu_backend_parsing() {
+    let _guard = GPU_TEST_LOCK.lock().unwrap();
     let mut cfg = ServerConfig::default();
     let settings = load_settings(&mut cfg);
     assert_eq!(settings.gpu_backend, "auto");

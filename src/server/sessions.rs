@@ -395,15 +395,16 @@ impl Server {
 }
 
 impl Session {
-    /// Ship queued bytes to the socket.
+    /// Ship queued bytes to the socket in a single batch.
     pub(crate) fn flush(&mut self) {
         let outbox = match &mut self.state {
             SessionState::Login(l) => &mut l.outbox,
             SessionState::Play(p, _) => &mut p.outbox,
         };
-        for msg in outbox.drain(..) {
-            self.conn.send(msg);
+        if outbox.is_empty() {
+            return;
         }
+        self.conn.send_batch(outbox);
     }
 }
 
@@ -569,6 +570,29 @@ impl Server {
         match players_by_chunk.get(&key) {
             Some(set) => set.iter().filter_map(|eid| players.get(eid).copied()).collect(),
             None => Vec::new(),
+        }
+    }
+
+    /// Iterate connections in chunk without heap allocation.
+    pub(crate) fn for_each_conn_in_chunk<F: FnMut(ConnId)>(
+        players_by_chunk: &HashMap<ChunkMapKey, HashSet<EntityId>>,
+        players: &HashMap<EntityId, ConnId>,
+        key: ChunkMapKey,
+        mut f: F,
+    ) {
+        if let Some(set) = players_by_chunk.get(&key) {
+            for eid in set {
+                if let Some(&cid) = players.get(eid) {
+                    f(cid);
+                }
+            }
+        }
+    }
+
+    /// Flush pending outbound bytes for all active sessions.
+    pub(crate) fn flush_all_sessions(&mut self) {
+        for sess in self.sessions.values() {
+            sess.conn.flush_outbound();
         }
     }
 
@@ -1164,7 +1188,7 @@ impl Server {
                 let dim = if self.hell.is_some() {
                     if self.world.entities.get(play.player).is_some() { 0 } else { -1 }
                 } else {
-                    self.world.dimension as i32
+                    self.world.dimension
                 };
                 if dim == -1 && self.hell.is_none() && self.world.dimension != -1 {
                     // Hell disabled mid-session: fall back to overworld row.
@@ -1389,7 +1413,7 @@ impl Server {
                 0
             }
         } else {
-            let d = self.world.dimension as i32;
+            let d = self.world.dimension;
             if let Some(Entity::Player(p)) = self.world.entities.get_mut(eid) {
                 p.living.body.dimension = self.world.dimension;
             }
