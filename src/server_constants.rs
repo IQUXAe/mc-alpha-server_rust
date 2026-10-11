@@ -14,6 +14,8 @@ pub const CHUNKS_PER_TICK: i32 = 15;
 /// Fresh chunk generations per tick per player (a cold generate costs
 /// ~12 ms; without a budget exploring new terrain blows the 50 ms tick).
 pub const CHUNK_GEN_PER_TICK: i32 = 2;
+/// LevelDB chunk loads per tick budget to avoid disk/decompression spikes.
+pub const CHUNK_LOADS_PER_TICK: usize = 16;
 pub const CHUNK_GENERATION_EXTRA_RADIUS: i32 = 2;
 
 pub const MAX_PACKET_SIZE: i32 = 65536;

@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use crate::server::sessions::{Session, SessionState};
 use crate::server::{ChunkMapKey, ConnId, Server, chunk_map_key};
-use crate::server_constants::{CHUNKS_PER_TICK, CHUNK_GEN_PER_TICK};
+use crate::server_constants::{CHUNKS_PER_TICK, CHUNK_GEN_PER_TICK, CHUNK_LOADS_PER_TICK};
 use crate::session::{pkt_map_chunk, pkt_pre_chunk, tile_packet};
 
 pub struct PlayStream {
@@ -213,7 +213,13 @@ impl Server {
                             self.world.recall_chunk(bx, bz)
                         };
                         if !recalled {
-                            let _ = self.load_chunk_dim(dim, bx, bz);
+                            if self.chunks_loaded_this_tick >= CHUNK_LOADS_PER_TICK {
+                                deferred = true;
+                                break 'nb;
+                            }
+                            if self.load_chunk_dim(dim, bx, bz) {
+                                self.chunks_loaded_this_tick += 1;
+                            }
                         }
                     }
                     let populated = if dim == -1 && self.hell.is_some() {
@@ -248,7 +254,14 @@ impl Server {
                                 };
                                 ready = recalled_n;
                                 if !recalled_n {
+                                    if self.chunks_loaded_this_tick >= CHUNK_LOADS_PER_TICK {
+                                        deferred = true;
+                                        break 'nb;
+                                    }
                                     ready = self.load_chunk_dim(dim, nx, nz);
+                                    if ready {
+                                        self.chunks_loaded_this_tick += 1;
+                                    }
                                 }
                             }
                             if !ready {
@@ -288,6 +301,7 @@ impl Server {
             }
             if deferred {
                 if self.chunks_generated_this_tick >= CHUNK_GEN_PER_TICK
+                    || self.chunks_loaded_this_tick >= CHUNK_LOADS_PER_TICK
                     || (self.chunk_worker.is_some() && self.pending_chunk_gens.len() >= 64)
                 {
                     break;
