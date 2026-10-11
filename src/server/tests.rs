@@ -1469,3 +1469,71 @@
         assert_eq!(srv.world.unloaded.len(), 100 - 64);
     }
 
+    #[test]
+    fn test_autosave_paced_queue_with_entity_chunks_completes() {
+        let mut srv = mk_server("");
+        // Ensure 16 distinct chunks are loaded and saved clean
+        for cx in 0..16 {
+            srv.ensure_chunk_dim(0, cx, 0);
+        }
+        srv.save_world();
+
+        // Populate the 16 clean chunks with entities
+        for cx in 0..16 {
+            let eid = srv.world.entities.alloc_id();
+            let mut b = crate::entity::table::Body::new(eid, 0.25, 0.25, 0.0);
+            b.set_position(cx as f64 * 16.0 + 8.0, 64.0, 8.0);
+            srv.world.entities.insert(crate::entity::table::Entity::Item(crate::entity::table::ItemEnt {
+                body: b,
+                item_id: 1,
+                count: 1,
+                damage: 0,
+                age: 0,
+                pickup_delay: 10,
+            }));
+        }
+
+        // Begin autosave: all 16 entity chunks must be queued
+        srv.begin_autosave();
+        assert!(srv.auto_save_active);
+        assert!(srv.auto_save_queue.len() >= 16);
+
+        // Step 1: saves 8 chunks, must still be active
+        let done1 = srv.step_autosave(8);
+        assert!(!done1);
+        assert!(srv.auto_save_active);
+        assert_eq!(srv.auto_save_saved, 8);
+
+        // Step 2: saves remaining chunks, must complete and deactivate
+        let done2 = srv.step_autosave(8);
+        assert!(done2);
+        assert!(!srv.auto_save_active);
+        assert_eq!(srv.auto_save_saved, 16);
+
+        // All 16 chunks must now have modified = false
+        for cx in 0..16 {
+            assert!(
+                !srv.world.chunk_ref(cx, 0).unwrap().is_modified,
+                "chunk {cx},0 must be clean after autosave"
+            );
+        }
+    }
+
+    #[test]
+    fn test_save_world_flushes_all_staged_unloads_on_shutdown() {
+        let mut srv = mk_server("");
+        for i in 0..20 {
+            let mut c = crate::chunk::Chunk::new(200 + i, 200);
+            c.is_modified = true;
+            srv.world.unloaded.insert((200 + i, 200), Box::new(c));
+        }
+        assert_eq!(srv.world.unloaded.len(), 20);
+        // save_world must flush ALL 20 staged unloads without leaving any behind
+        srv.save_world();
+        assert!(
+            srv.world.unloaded.is_empty(),
+            "save_world must flush all staged unloads regardless of default budget"
+        );
+    }
+
+

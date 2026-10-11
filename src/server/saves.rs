@@ -202,6 +202,7 @@ impl Server {
     }
 
     /// Flush level.dat plus modified loaded chunks (mirrors vanilla
+    /// Flush level.dat plus modified loaded chunks (mirrors vanilla
     /// `saveWorld`: only `isModified` chunks hit the disk, flag cleared on
     /// success; live persistent entities pin their chunks, staged
     /// unloads are flushed to LevelDB and freed from memory).
@@ -211,12 +212,23 @@ impl Server {
         if !self.world.save_level_to(&self.level_dir) {
             log::warning("Failed to save level.dat");
         }
-        self.flush_unloaded_chunks();
-        Self::save_world_into(&mut self.world, &mut self.store, &mut self.store_missing);
+        self.auto_save_active = false;
+        self.auto_save_queue.clear();
+        self.auto_save_saved = 0;
+        self.flush_unloaded_chunks_limit(usize::MAX);
+        Self::pin_entity_chunks(&mut self.world);
+        if let Some(hell) = self.hell.as_mut() {
+            Self::pin_entity_chunks(hell);
+        }
+        Self::save_all_dirty_loaded(
+            &mut self.world,
+            &mut self.store,
+            &mut self.store_missing,
+        );
         if let Some(hell) = self.hell.as_mut() {
             if let Some(hstore) = self.hell_store.as_mut() {
                 let hmissing = &mut self.store_missing_hell;
-                Self::save_world_into(hell, hstore, hmissing);
+                Self::save_all_dirty_loaded(hell, hstore, hmissing);
             }
         }
         if let Err(e) = self.store.flush() {
@@ -230,32 +242,40 @@ impl Server {
         log::info("Saved level.dat and flushed modified chunks to disk.");
     }
 
-    /// Save one world's live-entity-pinned dirty chunks into its store.
-    fn save_world_into(
+    /// Mark chunks holding live persistent entities as modified.
+    fn pin_entity_chunks(world: &mut crate::world::World) {
+        let mut entity_chunks = Vec::new();
+        for (_, e) in world.entities.iter() {
+            if !e.body().dead
+                && matches!(
+                    e,
+                    Entity::Boat(_)
+                        | Entity::Minecart(_)
+                        | Entity::Item(_)
+                        | Entity::Animal(_)
+                        | Entity::Mob(_)
+                        | Entity::Arrow(_)
+                        | Entity::Falling(_)
+                )
+            {
+                let (cx, cz) = (
+                    (e.body().pos[0].floor() as i32).div_euclid(16),
+                    (e.body().pos[2].floor() as i32).div_euclid(16),
+                );
+                entity_chunks.push((cx, cz));
+            }
+        }
+        for (cx, cz) in entity_chunks {
+            world.mark_chunk_modified(cx, cz);
+        }
+    }
+
+    /// Save all currently modified chunks in `world` to `store`.
+    fn save_all_dirty_loaded(
         world: &mut crate::world::World,
         store: &mut crate::persist::ChunkStore,
         missing: &mut std::collections::HashSet<(i32, i32)>,
     ) {
-        for eid in world.entities.alive_ids() {
-            if let Some(
-                Entity::Boat(_)
-                | Entity::Minecart(_)
-                | Entity::Item(_)
-                | Entity::Animal(_)
-                | Entity::Mob(_)
-                | Entity::Arrow(_)
-                | Entity::Falling(_),
-            ) = world.entities.get(eid)
-            {
-                if let Some(e) = world.entities.get(eid) {
-                    let (cx, cz) = (
-                        (e.body().pos[0].floor() as i32).div_euclid(16),
-                        (e.body().pos[2].floor() as i32).div_euclid(16),
-                    );
-                    world.mark_chunk_modified(cx, cz);
-                }
-            }
-        }
         let coords = world.loaded_chunk_coords();
         let mut saved = 0;
         let mut skipped = 0;
@@ -282,6 +302,106 @@ impl Server {
             "Saved dim {} chunks to disk ({saved} saved, {skipped} clean skipped).",
             world.dimension,
         ));
+    }
+
+    /// Begin a paced autosave cycle across loaded dimensions.
+    pub(crate) fn begin_autosave(&mut self) {
+        self.auto_save_queue.clear();
+        self.auto_save_saved = 0;
+        Self::pin_entity_chunks(&mut self.world);
+        for (cx, cz) in self.world.loaded_chunk_coords() {
+            if self.world.chunk_ref(cx, cz).map(|c| c.is_modified).unwrap_or(false) {
+                self.auto_save_queue.push_back((0, cx, cz));
+            }
+        }
+        if let Some(hell) = self.hell.as_mut() {
+            Self::pin_entity_chunks(hell);
+            for (cx, cz) in hell.loaded_chunk_coords() {
+                if hell.chunk_ref(cx, cz).map(|c| c.is_modified).unwrap_or(false) {
+                    self.auto_save_queue.push_back((-1, cx, cz));
+                }
+            }
+        }
+        self.auto_save_active = true;
+    }
+
+    /// Step through the autosave queue up to `limit` dirty chunks.
+    /// Returns true when all dirty chunks across dimensions have been saved and stores flushed.
+    pub(crate) fn step_autosave(&mut self, limit: usize) -> bool {
+        if !self.auto_save_active {
+            return true;
+        }
+        self.flush_unloaded_chunks_limit(limit);
+        let mut processed = 0;
+        while processed < limit {
+            let Some((dim, cx, cz)) = self.auto_save_queue.pop_front() else {
+                break;
+            };
+            processed += 1;
+            if dim == 0 {
+                let dirty = self
+                    .world
+                    .chunk_ref(cx, cz)
+                    .map(|c| c.is_modified)
+                    .unwrap_or(false);
+                if dirty {
+                    if self.world.save_chunk_to(&mut self.store, cx, cz) {
+                        self.store_missing.remove(&(cx, cz));
+                        if let Some(c) = self.world.chunk_ref_mut(cx, cz) {
+                            c.clear_modified();
+                        }
+                        self.auto_save_saved += 1;
+                    } else {
+                        log::warning(&format!("Failed to save chunk {cx},{cz}; keeping dirty"));
+                    }
+                }
+            } else if dim == -1 {
+                if let (Some(hell), Some(hstore)) = (self.hell.as_mut(), self.hell_store.as_mut()) {
+                    let dirty = hell
+                        .chunk_ref(cx, cz)
+                        .map(|c| c.is_modified)
+                        .unwrap_or(false);
+                    if dirty {
+                        if hell.save_chunk_to(hstore, cx, cz) {
+                            self.store_missing_hell.remove(&(cx, cz));
+                            if let Some(c) = hell.chunk_ref_mut(cx, cz) {
+                                c.clear_modified();
+                            }
+                            self.auto_save_saved += 1;
+                        } else {
+                            log::warning(&format!("Failed to save hell chunk {cx},{cz}; keeping dirty"));
+                        }
+                    }
+                }
+            }
+        }
+        if self.auto_save_queue.is_empty() {
+            self.auto_save_active = false;
+            if let Err(e) = self.store.flush() {
+                log::warning(&format!("Failed to flush chunk store to disk: {e}"));
+            }
+            if let Some(hs) = self.hell_store.as_mut() {
+                if let Err(e) = hs.flush() {
+                    log::warning(&format!("Failed to flush hell chunk store to disk: {e}"));
+                }
+            }
+            log::info(&format!(
+                "Autosave completed; saved {} modified chunks and flushed stores to disk.",
+                self.auto_save_saved
+            ));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Paced dirty chunk save across dimensions, budgeted by `limit`.
+    #[allow(dead_code)]
+    pub(crate) fn save_world_budgeted(&mut self, limit: usize) -> bool {
+        if !self.auto_save_active {
+            self.begin_autosave();
+        }
+        self.step_autosave(limit)
     }
 
     /// Graceful shutdown (mirrors the `run` tail): kick everyone with

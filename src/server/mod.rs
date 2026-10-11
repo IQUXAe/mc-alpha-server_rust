@@ -157,6 +157,10 @@ pub struct Server {
     /// Negative cache for hell store misses (mirrors `store_missing`).
     pub store_missing_hell: HashSet<(i32, i32)>,
     pub chunks_generated_this_tick: i32,
+    pub chunks_loaded_this_tick: usize,
+    pub auto_save_active: bool,
+    pub auto_save_queue: std::collections::VecDeque<(i32, i32, i32)>,
+    pub auto_save_saved: usize,
 }
 
 #[derive(Default)]
