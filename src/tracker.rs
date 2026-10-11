@@ -848,6 +848,7 @@ mod tests {
             waypoint: [0.0; 3],
             has_waypoint: false,
             shoot_cooldown: 0,
+            path_retry_timer: 0,
         }));
         let row = table.get(id).unwrap();
         let tracked = TrackedEntity::from_entity(row, 0, 160, 3, false).unwrap();

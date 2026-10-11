@@ -132,16 +132,14 @@ impl World {
         bbox: &crate::aabb::AxisAlignedBB,
         exclude: Option<EntityId>,
     ) -> bool {
-        for oid in self.entities.alive_ids() {
-            if Some(oid) == exclude {
+        for (&oid, e) in self.entities.iter() {
+            if Some(oid) == exclude || e.body().dead {
                 continue;
             }
-            if let Some(e) = self.entities.get(oid) {
-                if matches!(e, Entity::Mob(_) | Entity::Animal(_) | Entity::Player(_))
-                    && e.body().bounding_box.intersects_with(bbox)
-                {
-                    return false;
-                }
+            if matches!(e, Entity::Mob(_) | Entity::Animal(_) | Entity::Player(_))
+                && e.body().bounding_box.intersects_with(bbox)
+            {
+                return false;
             }
         }
         true
@@ -456,7 +454,17 @@ impl World {
     /// server tick to broadcast, and inventory/burn changes queue
     /// `tile_updates` (`Packet59ComplexEntity`) and mark the chunk dirty.
     pub fn tick_furnaces(&mut self) {
-        let mut cells: Vec<(i32, i32, i32)> = self.tiles.keys().copied().collect();
+        let mut cells: Vec<(i32, i32, i32)> = self
+            .tiles
+            .iter()
+            .filter_map(|(&k, tile)| {
+                if matches!(tile, TileData::Furnace(_)) {
+                    Some(k)
+                } else {
+                    None
+                }
+            })
+            .collect();
         cells.sort_unstable();
         for (x, y, z) in cells {
             // Vanilla only ticks loaded tile entities; unloaded staged
@@ -494,7 +502,17 @@ impl World {
 
     /// Tick dungeon mob spawners (`TileEntityMobSpawner::updateEntity`).
     pub fn tick_mob_spawners(&mut self) {
-        let mut cells: Vec<(i32, i32, i32)> = self.tiles.keys().copied().collect();
+        let mut cells: Vec<(i32, i32, i32)> = self
+            .tiles
+            .iter()
+            .filter_map(|(&k, tile)| {
+                if matches!(tile, TileData::MobSpawner(_)) {
+                    Some(k)
+                } else {
+                    None
+                }
+            })
+            .collect();
         cells.sort_unstable();
         for (x, y, z) in cells {
             let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));

@@ -423,6 +423,7 @@ pub struct MobEnt {
     pub has_waypoint: bool,
     /// Ghast fireball cooldown ticks (vanilla `field_4103_aj`-style gate).
     pub shoot_cooldown: i32,
+    pub path_retry_timer: i32,
 }
 
 impl MobEnt {
@@ -461,6 +462,7 @@ impl MobEnt {
             waypoint: [0.0; 3],
             has_waypoint: false,
             shoot_cooldown: 0,
+            path_retry_timer: 0,
         }
     }
 

@@ -325,12 +325,10 @@ pub fn encode_chunk_blob(world: &World, cx: i32, cz: i32, zstd: bool) -> Option<
     let mut monster_rows: Vec<PendingCreature> = chunk.pending_monsters.clone();
     let mut boat_rows: Vec<PendingBoat> = chunk.pending_boats.clone();
     let mut minecart_rows: Vec<PendingMinecart> = chunk.pending_minecarts.clone();
-    let mut live: Vec<Entity> = Vec::new();
-    for oid in world.entities.alive_ids() {
-        if let Some(e) = world.entities.get(oid) {
-            if !e.body().dead && in_chunk((e.body().pos[0], e.body().pos[2])) {
-                live.push(e.clone());
-            }
+    let mut live: Vec<&Entity> = Vec::new();
+    for (_, e) in world.entities.iter() {
+        if !e.body().dead && in_chunk((e.body().pos[0], e.body().pos[2])) {
+            live.push(e);
         }
     }
     live.sort_by_key(|e| e.id());

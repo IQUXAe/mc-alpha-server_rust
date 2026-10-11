@@ -118,7 +118,7 @@ fn spawn_pass(
 ) -> i32 {
     // Eligible chunks: 8-chunk square around every player (Java HashSet,
     // C++ vector+sort+unique — same set either way).
-    let mut eligible: Vec<u64> = Vec::new();
+    let mut eligible: Vec<u64> = Vec::with_capacity(players_x.len() * 289);
     for i in 0..players_x.len() {
         let cx = (players_x[i] / 16.0).floor() as i32;
         let cz = (players_z[i] / 16.0).floor() as i32;
