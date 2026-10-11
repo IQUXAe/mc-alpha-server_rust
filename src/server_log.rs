@@ -153,18 +153,52 @@ pub fn format_message(level: LogLevel, msg: &str) -> String {
     format!("{}{} {}", current_timestamp(), level.prefix(), msg)
 }
 
+enum LogCommand {
+    Line(LogLevel, String),
+    PrintConsole,
+    Flush(std::sync::mpsc::SyncSender<()>),
+}
+
+fn log_channel() -> &'static std::sync::mpsc::SyncSender<LogCommand> {
+    static SENDER: OnceLock<std::sync::mpsc::SyncSender<LogCommand>> = OnceLock::new();
+    SENDER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<LogCommand>(4096);
+        std::thread::Builder::new()
+            .name("server-logger".to_string())
+            .spawn(move || {
+                while let Ok(cmd) = rx.recv() {
+                    match cmd {
+                        LogCommand::Line(level, line) => {
+                            match level {
+                                LogLevel::Warning | LogLevel::Severe => eprintln!("{line}"),
+                                LogLevel::Debug | LogLevel::Info => println!("{line}"),
+                            }
+                            print_console_line();
+                        }
+                        LogCommand::PrintConsole => {
+                            print_console_line();
+                        }
+                        LogCommand::Flush(ack) => {
+                            let _ = std::io::stdout().flush();
+                            let _ = std::io::stderr().flush();
+                            let _ = ack.send(());
+                        }
+                    }
+                }
+            })
+            .expect("failed to spawn server-logger thread");
+        tx
+    })
+}
+
 /// Logs one line if it passes the filter (stderr for warnings/errors),
-/// then re-prints the console line.
+/// non-blocking via a background thread to prevent tick thread stalls.
 pub fn log(level: LogLevel, msg: &str) {
     if !should_log(level) {
         return;
     }
     let line = format_message(level, msg);
-    match level {
-        LogLevel::Warning | LogLevel::Severe => eprintln!("{line}"),
-        LogLevel::Debug | LogLevel::Info => println!("{line}"),
-    }
-    print_console_line();
+    let _ = log_channel().try_send(LogCommand::Line(level, line));
 }
 
 /// Logs at DEBUG.
@@ -187,9 +221,17 @@ pub fn severe(msg: &str) {
     log(LogLevel::Severe, msg);
 }
 
-/// Re-prints the console line.
+/// Re-prints the console line via the logger queue.
 pub fn refresh_console_line() {
-    print_console_line();
+    let _ = log_channel().try_send(LogCommand::PrintConsole);
+}
+
+/// Flushes pending log output from the background worker.
+pub fn flush() {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    if log_channel().send(LogCommand::Flush(tx)).is_ok() {
+        let _ = rx.recv();
+    }
 }
 
 #[cfg(test)]
@@ -269,6 +311,7 @@ mod tests {
         refresh_console_line();
         clear_console_line_provider();
         refresh_console_line();
+        flush();
 
         set_level(LogLevel::Info);
         assert_eq!(get_level(), LogLevel::Info);
