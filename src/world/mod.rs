@@ -549,10 +549,21 @@ impl World {
         } else {
             let mut regen_set = dirty.clone();
             for &(cx, cz) in &dirty {
+                let dirty_had_blocklight = self
+                    .chunks
+                    .get(&(cx, cz))
+                    .map(|c| c.has_blocklight())
+                    .unwrap_or(false);
                 for dx in -1..=1 {
                     for dz in -1..=1 {
-                        if self.chunks.contains_key(&(cx + dx, cz + dz)) {
-                            regen_set.insert((cx + dx, cz + dz));
+                        if dx == 0 && dz == 0 {
+                            continue;
+                        }
+                        let npos = (cx + dx, cz + dz);
+                        if let Some(nc) = self.chunks.get(&npos) {
+                            if dirty_had_blocklight || nc.has_blocklight() {
+                                regen_set.insert(npos);
+                            }
                         }
                     }
                 }
@@ -736,11 +747,25 @@ impl World {
 
     /// Drain queued block changes, deduplicated (one packet per cell per
     /// tick no matter how many writes hit it).
+    #[allow(dead_code)]
     pub(crate) fn take_block_updates(&mut self) -> Vec<[i32; 3]> {
-        let mut out = std::mem::take(&mut self.block_updates);
-        out.sort_unstable();
-        out.dedup();
-        out
+        self.take_block_updates_budgeted(usize::MAX)
+    }
+
+    /// Drain up to `cap` queued block changes, deduplicated, retaining
+    /// leftovers for subsequent ticks.
+    pub(crate) fn take_block_updates_budgeted(&mut self, cap: usize) -> Vec<[i32; 3]> {
+        if self.block_updates.is_empty() {
+            return Vec::new();
+        }
+        self.block_updates.sort_unstable();
+        self.block_updates.dedup();
+        if self.block_updates.len() <= cap {
+            std::mem::take(&mut self.block_updates)
+        } else {
+            let remaining = self.block_updates.split_off(cap);
+            std::mem::replace(&mut self.block_updates, remaining)
+        }
     }
 
     /// Drain queued tile entity changes, deduplicated.

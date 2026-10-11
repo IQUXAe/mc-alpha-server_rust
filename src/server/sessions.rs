@@ -161,6 +161,10 @@ impl Server {
             store_missing: HashSet::new(),
             store_missing_hell: HashSet::new(),
             chunks_generated_this_tick: 0,
+            chunks_loaded_this_tick: 0,
+            auto_save_active: false,
+            auto_save_queue: std::collections::VecDeque::new(),
+            auto_save_saved: 0,
         })
     }
 
@@ -429,7 +433,7 @@ impl Server {
         for o in out.drain(..) {
             if let Some(cid) = self.players.get(&o.to).copied() {
                 if let Some(sess) = self.sessions.get(&cid) {
-                    sess.conn.send(o.bytes);
+                    sess.conn.queue(&o.bytes);
                 }
             }
         }
@@ -438,12 +442,9 @@ impl Server {
     /// Chat to every authenticated player (mirrors `broadcastPacket`).
     pub(crate) fn broadcast_chat(&mut self, msg: String) {
         let bytes = pkt_chat(&msg);
-        let cids: Vec<ConnId> = self.sessions.keys().copied().collect();
-        for cid in cids {
-            if self.is_play(cid) {
-                if let Some(sess) = self.sessions.get(&cid) {
-                    sess.conn.send(bytes.clone());
-                }
+        for sess in self.sessions.values() {
+            if matches!(sess.state, SessionState::Play(..)) {
+                sess.conn.queue(&bytes);
             }
         }
     }
@@ -459,18 +460,12 @@ impl Server {
             match b {
                 SessionBroadcast::Chat(msg) => {
                     let bytes = pkt_chat(&msg);
-                    let cids: Vec<ConnId> = self.sessions.keys().copied().collect();
-                    // Play-only (mirrors vanilla `sendPacketToAllPlayers`:
-                    // login-phase sockets have no player row and must not
-                    // see game chat).
-                    for cid in cids {
-                        if self.is_play(cid) {
-                            if let Some(other) = self.sessions.get(&cid) {
-                                other.conn.send(bytes.clone());
-                            }
+                    for other in self.sessions.values() {
+                        if matches!(other.state, SessionState::Play(..)) {
+                            other.conn.queue(&bytes);
                         }
                     }
-                    sess.conn.send(bytes);
+                    sess.conn.queue(&bytes);
                 }
                 SessionBroadcast::Tell { target, text } => {
                     // Java /tell: whisper to the named player, miss note
@@ -491,16 +486,11 @@ impl Server {
                 }
                 SessionBroadcast::ArmSwing(eid) => {
                     let bytes = pkt_arm(eid, 1);
-                    let cids: Vec<ConnId> = self
-                        .world
-                        .tracker
-                        .watchers(eid)
-                        .iter()
-                        .filter_map(|pid| self.players.get(pid).copied())
-                        .collect();
-                    for cid in cids {
-                        if let Some(other) = self.sessions.get(&cid) {
-                            other.conn.send(bytes.clone());
+                    for pid in self.world.tracker.watchers(eid) {
+                        if let Some(&cid) = self.players.get(&pid) {
+                            if let Some(other) = self.sessions.get(&cid) {
+                                other.conn.queue(&bytes);
+                            }
                         }
                     }
                 }
@@ -969,16 +959,12 @@ impl Server {
             }
             self.route_outbox_drain(&mut out);
         }
-        // 1. Ensure 3x3 chunks around arrival are loaded/generated in the target world.
+        // 1. Ensure arrival chunk is loaded/generated in the target world.
         let (tcx, tcz) = (
             (tx.floor() as i32).div_euclid(16),
             (tz.floor() as i32).div_euclid(16),
         );
-        for dcx in -1..=1 {
-            for dcz in -1..=1 {
-                self.ensure_chunk_dim(target_dim, tcx + dcx, tcz + dcz);
-            }
-        }
+        self.ensure_chunk_dim(target_dim, tcx, tcz);
         // 2. Link to an existing portal in target dimension if one exists within
         // radius 128, matching Teleporter.java. Otherwise, build a return portal.
         let arrival_pos = if let Some(existing) = self.find_portal(target_dim, tx, ty, tz) {
@@ -1121,16 +1107,12 @@ impl Server {
             row.body_mut().set_position(sx, sy, sz);
         }
 
-        // Ensure 3x3 chunks around Overworld spawn are loaded/generated.
+        // Ensure the arrival chunk around Overworld spawn is loaded/generated.
         let (scx, scz) = (
             (sx.floor() as i32).div_euclid(16),
             (sz.floor() as i32).div_euclid(16),
         );
-        for dcx in -1..=1 {
-            for dcz in -1..=1 {
-                self.ensure_chunk_dim(0, scx + dcx, scz + dcz);
-            }
-        }
+        self.ensure_chunk_dim(0, scx, scz);
 
         // Insert into Overworld entities preserving the ID, and add to tracker.
         self.world.entities.reserve_id(eid);
@@ -1353,10 +1335,10 @@ impl Server {
         if let Some(old_cid) =
             self.players.iter().find_map(|(eid, ocid)| {
                 let hit = match self.world.entities.get(*eid) {
-                    Some(Entity::Player(p)) if admin_normalize(&p.username) == lower => true,
+                    Some(Entity::Player(p)) if p.username.eq_ignore_ascii_case(&username) => true,
                     _ => matches!(
                         self.hell.as_ref().and_then(|h| h.entities.get(*eid)),
-                        Some(Entity::Player(p)) if admin_normalize(&p.username) == lower
+                        Some(Entity::Player(p)) if p.username.eq_ignore_ascii_case(&username)
                     ),
                 };
                 if hit { Some(*ocid) } else { None }
