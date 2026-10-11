@@ -48,6 +48,7 @@ pub(crate) struct CreatureSnap {
     pub(crate) path: Vec<[i32; 3]>,
     pub(crate) path_index: usize,
     pub(crate) has_attacked: bool,
+    pub(crate) path_retry_timer: i32,
 }
 
 impl World {
@@ -246,9 +247,10 @@ impl World {
         if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
             m.target_timer = timer;
             m.target = target;
-            if prev_target.is_none() && target.is_some() {
+            if prev_target != target {
                 m.path.clear();
                 m.path_index = 0;
+                m.path_retry_timer = 0;
             }
         }
         target
@@ -340,18 +342,20 @@ impl World {
 
     /// Owned AI snapshot of one mob/animal row.
     pub(crate) fn creature_snapshot(&self, id: EntityId) -> Option<CreatureSnap> {
-        let (body, move_speed, path, path_index) = match self.entities.get(id) {
+        let (body, move_speed, path, path_index, path_retry_timer) = match self.entities.get(id) {
             Some(Entity::Mob(m)) => (
                 &m.living.body,
                 m.living.move_speed,
                 m.path.clone(),
                 m.path_index,
+                m.path_retry_timer,
             ),
             Some(Entity::Animal(a)) => (
                 &a.living.body,
                 a.living.move_speed,
                 a.path.clone(),
                 a.path_index,
+                0,
             ),
             _ => return None,
         };
@@ -367,6 +371,7 @@ impl World {
             path,
             path_index,
             has_attacked: false,
+            path_retry_timer,
         })
     }
 
@@ -380,6 +385,7 @@ impl World {
                 m.living.jumping = jumping;
                 m.path = snap.path.clone();
                 m.path_index = snap.path_index;
+                m.path_retry_timer = snap.path_retry_timer;
             }
             Some(Entity::Animal(a)) => {
                 a.living.body.yaw = snap.yaw;
@@ -453,6 +459,9 @@ impl World {
         // re-path gate skips), else refresh the chase path
         // (EntityCreature.java:29-35).
         let had_path = !snap.path.is_empty();
+        if snap.path_retry_timer > 0 {
+            snap.path_retry_timer -= 1;
+        }
         if snap.has_attacked || target.is_none() || (had_path && self.rng.next_int_bound(20) != 0) {
             if !snap.has_attacked
                 && ((!had_path && self.rng.next_int_bound(80) == 0)
@@ -466,8 +475,15 @@ impl World {
                 }
             }
         } else if let Some(t) = target {
-            snap.path = self.path_target_points(id, t, CREATURE_TARGET_RANGE as f32);
-            snap.path_index = 0;
+            if had_path || snap.path_retry_timer == 0 {
+                snap.path = self.path_target_points(id, t, CREATURE_TARGET_RANGE as f32);
+                snap.path_index = 0;
+                if snap.path.is_empty() {
+                    snap.path_retry_timer = 20;
+                } else {
+                    snap.path_retry_timer = 0;
+                }
+            }
         }
         // Phase 3: follow the path (mirrors `EntityCreature.java:52-125`).
         *strafe = 0.0;
