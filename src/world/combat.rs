@@ -443,21 +443,19 @@ impl World {
         }
         let mut entity_hit: Option<EntityId> = None;
         let mut cands: Vec<EntityId> = Vec::new();
-        for oid in self.entities.alive_ids() {
-            if oid == id || oid == owner && ticks_in_air < grace_ticks {
+        for (&oid, o) in self.entities.iter() {
+            if o.body().dead || oid == id || (oid == owner && ticks_in_air < grace_ticks) {
                 continue;
             }
             // Projectiles don't hit items, other shots, or vehicles.
-            if let Some(o) = self.entities.get(oid) {
-                if !matches!(
-                    o,
-                    Entity::Mob(_) | Entity::Animal(_) | Entity::Player(_)
-                ) {
-                    continue;
-                }
-                if sweep.intersects_with(&o.body().bounding_box) {
-                    cands.push(oid);
-                }
+            if !matches!(
+                o,
+                Entity::Mob(_) | Entity::Animal(_) | Entity::Player(_)
+            ) {
+                continue;
+            }
+            if sweep.intersects_with(&o.body().bounding_box) {
+                cands.push(oid);
             }
         }
         cands.sort_unstable();
@@ -1655,20 +1653,18 @@ impl World {
         let mut best = block_hit.map(|(_, _, _, _, _, d)| d).unwrap_or(f64::MAX);
         let mut entity_hit: Option<EntityId> = None;
         let mut cands: Vec<EntityId> = Vec::new();
-        for oid in self.entities.alive_ids() {
-            if oid == id {
+        for (&oid, o) in self.entities.iter() {
+            if o.body().dead || oid == id {
                 continue;
             }
-            if matches!(self.entities.get(oid), Some(Entity::Arrow(_))) {
+            if matches!(o, Entity::Arrow(_)) {
                 continue;
             }
             if oid == shooter && ticks_in_air < 5 {
                 continue;
             }
-            if let Some(o) = self.entities.get(oid) {
-                if sweep.intersects_with(&o.body().bounding_box) {
-                    cands.push(oid);
-                }
+            if sweep.intersects_with(&o.body().bounding_box) {
+                cands.push(oid);
             }
         }
         cands.sort_unstable();

@@ -675,11 +675,25 @@ impl World {
             b.body.pitch = 0.0;
         }
         // Boat-on-boat shoves.
+        let boat_pos = match self.entities.get(id) {
+            Some(e) => e.body().pos,
+            None => return,
+        };
         let boats: Vec<EntityId> = self
             .entities
-            .alive_ids()
-            .into_iter()
-            .filter(|oid| *oid != id && matches!(self.entities.get(*oid), Some(Entity::Boat(_))))
+            .iter()
+            .filter_map(|(&oid, e)| {
+                if oid != id
+                    && !e.body().dead
+                    && matches!(e, Entity::Boat(_))
+                    && (e.body().pos[0] - boat_pos[0]).abs() <= 1.5
+                    && (e.body().pos[2] - boat_pos[2]).abs() <= 1.5
+                {
+                    Some(oid)
+                } else {
+                    None
+                }
+            })
             .collect();
         for oid in boats {
             let (ax, az, bx, bz) = match (self.entities.get(id), self.entities.get(oid)) {
@@ -857,24 +871,31 @@ impl World {
         // the tick's alive rows; carts in unloaded chunks never tick, so
         // one chunk of circling carts costs O(carts x nearby)).
         // The rider never shoves its own cart.
-        let rider = match self.entities.get(id) {
-            Some(e) => e.body().ridden_by,
+        let (cart_pos, rider) = match self.entities.get(id) {
+            Some(e) => (e.body().pos, e.body().ridden_by),
             None => return,
         };
         let shovers: Vec<EntityId> = self
             .entities
-            .alive_ids()
-            .into_iter()
-            .filter(|oid| {
-                *oid != id
-                    && *oid != rider
+            .iter()
+            .filter_map(|(&oid, e)| {
+                if oid != id
+                    && oid != rider
+                    && !e.body().dead
+                    && (e.body().pos[0] - cart_pos[0]).abs() <= 1.5
+                    && (e.body().pos[2] - cart_pos[2]).abs() <= 1.5
                     && matches!(
-                        self.entities.get(*oid),
-                        Some(Entity::Player(_))
-                            | Some(Entity::Mob(_))
-                            | Some(Entity::Animal(_))
-                            | Some(Entity::Minecart(_))
+                        e,
+                        Entity::Player(_)
+                            | Entity::Mob(_)
+                            | Entity::Animal(_)
+                            | Entity::Minecart(_)
                     )
+                {
+                    Some(oid)
+                } else {
+                    None
+                }
             })
             .collect();
         for oid in shovers {

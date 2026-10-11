@@ -262,6 +262,7 @@
             waypoint: [0.0; 3],
             has_waypoint: false,
             shoot_cooldown: 0,
+            path_retry_timer: 0,
         }));
         id
     }
@@ -3098,4 +3099,44 @@
         assert!(!dead);
         assert!(mx.abs() > 0.01, "body must shove the cart, motion {mx}");
         assert!(mx.abs() <= 0.41, "speed cap must hold, motion {mx}");
+    }
+
+    #[test]
+    fn test_minecart_and_boat_proximity_shove() {
+        let mut w = world_with_floor();
+        for x in 0..16 {
+            w.set_block_id(x, 64, 4, 66);
+            w.set_block_meta(x, 64, 4, 1);
+        }
+        assert!(w.place_minecart(4, 64, 4));
+        let cart_a = w.entities.alive_ids().into_iter().find(|oid| {
+            matches!(w.entities.get(*oid), Some(Entity::Minecart(_)))
+        }).expect("cart A must exist");
+
+        // Distant cart B at x=100
+        w.ensure_chunk(6, 0);
+        w.set_block_id(100, 63, 4, 1);
+        w.set_block_id(100, 64, 4, 66);
+        w.set_block_meta(100, 64, 4, 1);
+        assert!(w.place_minecart(100, 64, 4));
+        let cart_b = w.entities.alive_ids().into_iter().find(|oid| {
+            *oid != cart_a && matches!(w.entities.get(*oid), Some(Entity::Minecart(_)))
+        }).expect("cart B must exist");
+
+        w.tick_minecart(cart_a);
+        let mb = match w.entities.get(cart_b) {
+            Some(e) => (e.body().motion[0], e.body().motion[2]),
+            None => (0.0, 0.0),
+        };
+        assert_eq!(mb, (0.0, 0.0), "distant cart B must not receive shove impulse from cart A");
+
+        // Distant boats
+        let boat_a = add_boat(&mut w, 10.0, 64.0, 10.0);
+        let boat_b = add_boat(&mut w, 50.0, 64.0, 50.0);
+        w.tick_boat(boat_a);
+        let bmot = match w.entities.get(boat_b) {
+            Some(e) => (e.body().motion[0], e.body().motion[2]),
+            None => (0.0, 0.0),
+        };
+        assert_eq!(bmot, (0.0, 0.0), "distant boat B must not receive shove impulse from boat A");
     }

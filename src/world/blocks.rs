@@ -623,32 +623,30 @@ impl World {
         let box_min = [x as f64 + 0.125, y as f64, z as f64 + 0.125];
         let box_max = [x as f64 + 0.875, y as f64 + 0.25, z as f64 + 0.875];
         let mut pressed = false;
-        for oid in self.entities.alive_ids() {
-            if let Some(e) = self.entities.get(oid) {
-                if e.body().dead {
-                    continue;
-                }
-                if bid == 70
-                    && !matches!(
-                        e,
-                        crate::entity::table::Entity::Mob(_)
-                            | crate::entity::table::Entity::Animal(_)
-                            | crate::entity::table::Entity::Player(_)
-                    )
-                {
-                    continue;
-                }
-                let bb = e.body().bounding_box;
-                if bb.max_x > box_min[0]
-                    && bb.min_x < box_max[0]
-                    && bb.max_y >= box_min[1]
-                    && bb.min_y <= box_max[1]
-                    && bb.max_z > box_min[2]
-                    && bb.min_z < box_max[2]
-                {
-                    pressed = true;
-                    break;
-                }
+        for (&_oid, e) in self.entities.iter() {
+            if e.body().dead {
+                continue;
+            }
+            if bid == 70
+                && !matches!(
+                    e,
+                    crate::entity::table::Entity::Mob(_)
+                        | crate::entity::table::Entity::Animal(_)
+                        | crate::entity::table::Entity::Player(_)
+                )
+            {
+                continue;
+            }
+            let bb = e.body().bounding_box;
+            if bb.max_x > box_min[0]
+                && bb.min_x < box_max[0]
+                && bb.max_y >= box_min[1]
+                && bb.min_y <= box_max[1]
+                && bb.max_z > box_min[2]
+                && bb.min_z < box_max[2]
+            {
+                pressed = true;
+                break;
             }
         }
         let new_meta = if pressed { 1 } else { 0 };
