@@ -65,6 +65,7 @@ fn can_stay(u: &mut ItemUseWorld, id: u8, pos: BlockPos) -> bool {
         37 | 38 => crate::block::ticks::block_flower_can_stay(w, pos),
         39 | 40 => crate::block::ticks::block_mushroom_can_stay(w, pos),
         50 | 75 | 76 => crate::block::ticks::block_torch_can_stay(w, pos),
+        51 => crate::block::fire::block_fire_can_place(w, pos),
         54 => crate::block::container::block_chest_can_place(w, 54, pos),
         65 => {
             w.attach_at(pos.offset(-1, 0, 0))

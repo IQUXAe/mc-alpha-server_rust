@@ -10,8 +10,13 @@ use crate::world::tiles::TileData;
 /// Strict count for a tile stack from a client NBT packet (unknown ids and
 /// non-positive counts become 0, i.e. the slot stays empty; the rest clamp
 /// to the per-item max stack like `apply_inventory`).
-fn strict_tile_count(item_id: i32, count: i32) -> i32 {
-    if !crate::item_data::item_is_obtainable(item_id) {
+fn strict_tile_count(item_id: i32, count: i32, is_op: bool) -> i32 {
+    let allowed = if is_op {
+        crate::item_data::item_is_valid(item_id)
+    } else {
+        crate::item_data::item_is_obtainable(item_id)
+    };
+    if !allowed {
         return 0;
     }
     count.clamp(0, crate::player::inventory::inventory_max_stack_size(item_id).max(1))
@@ -138,7 +143,13 @@ impl PlaySession {
             // the drop only when the id itself is unobtainable; a full
             // resync here punished the client for the gap and destroyed
             // the cursor stack (the evaporating-pumpkin bug).
-            if !crate::item_data::item_is_obtainable(item_id as i32) {
+            let is_op = self.is_op(ctx);
+            let allowed = if is_op {
+                crate::item_data::item_is_valid(item_id as i32)
+            } else {
+                crate::item_data::item_is_obtainable(item_id as i32)
+            };
+            if !allowed {
                 return;
             }
         } else {
@@ -168,13 +179,20 @@ impl PlaySession {
         // client stacks verbatim (`NetServerHandler.java:413`), so a hacked
         // client can grant itself 127-count stacks, out-of-range damage, or
         // unknown/unobtainable ids. Clamp to the same tables the survival
-        // code uses: unobtainable/unknown ids are dropped, counts to the
-        // per-item max stack, damage to the per-item max durability.
-        fn apply(bank: &mut [Option<ItemStack>], slots: &[crate::network::SlotData]) {
+        // code uses: unobtainable/unknown ids are dropped (ops may hold any
+        // valid id), counts to the per-item max stack, damage to the
+        // per-item max durability.
+        let is_op = self.is_op(ctx);
+        fn apply(bank: &mut [Option<ItemStack>], slots: &[crate::network::SlotData], is_op: bool) {
             let n = slots.len().min(bank.len());
             for i in 0..n {
                 let id = slots[i].item_id as i32;
-                if !crate::item_data::item_is_obtainable(id) {
+                let allowed = if is_op {
+                    crate::item_data::item_is_valid(id)
+                } else {
+                    crate::item_data::item_is_obtainable(id)
+                };
+                if !allowed {
                     bank[i] = None;
                     continue;
                 }
@@ -196,16 +214,16 @@ impl PlaySession {
         let me = self.player;
         if inv_type == -1 {
             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
-                apply(&mut p.inventory.main, slots);
+                apply(&mut p.inventory.main, slots, is_op);
             }
             self.sync_held(ctx.world);
         } else if inv_type == -2 {
             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
-                apply(&mut p.inventory.crafting, slots);
+                apply(&mut p.inventory.crafting, slots, is_op);
             }
         } else if inv_type == -3 {
             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
-                apply(&mut p.inventory.armor, slots);
+                apply(&mut p.inventory.armor, slots, is_op);
             }
         }
     }
@@ -233,10 +251,11 @@ impl PlaySession {
         if dist_sq > 64.0 {
             return;
         }
+        let is_op = self.is_op(ctx);
         if ctx.spawn_protection > 0 {
             let sp = ctx.world.spawn;
             let protected = crate::session::is_spawn_protected(x, z, sp, ctx.spawn_protection);
-            if protected && !self.is_op(ctx) {
+            if protected && !is_op {
                 return;
             }
         }
@@ -318,7 +337,7 @@ impl PlaySession {
                             };
                             if slot < s.slots.len() {
                                 let mut stack = crate::persist::read_stack(&im.map);
-                                stack.count = strict_tile_count(stack.item_id, stack.count);
+                                stack.count = strict_tile_count(stack.item_id, stack.count, is_op);
                                 stack.damage = strict_tile_damage(stack.item_id, stack.damage);
                                 if stack.count > 0 {
                                     s.slots[slot] = stack;
@@ -342,7 +361,7 @@ impl PlaySession {
                             };
                             if slot < s.slots.len() {
                                 let mut stack = crate::persist::read_stack(&im.map);
-                                stack.count = strict_tile_count(stack.item_id, stack.count);
+                                stack.count = strict_tile_count(stack.item_id, stack.count, is_op);
                                 stack.damage = strict_tile_damage(stack.item_id, stack.damage);
                                 if stack.count > 0 {
                                     s.slots[slot] = stack;

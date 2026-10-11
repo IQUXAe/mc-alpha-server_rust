@@ -2778,3 +2778,117 @@
         assert!(sess.teleport_wait.is_none(), "Exact match must clear teleport_wait");
     }
 
+    #[test]
+    fn test_op_can_place_unobtainable_blocks() {
+        let mut w = floor_world();
+        let mut ops_set = HashSet::new();
+        ops_set.insert("steve".to_string());
+        let player = spawn_player(&mut w, "Steve", 2.0, 64.0, 2.0);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // 1. Bedrock (7)
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(7, 64, 0));
+            p.inventory.current = 0;
+        }
+        sess.held_id = 7;
+        let out = sess.place(
+            &mut ctx(&mut w, &ops_set, &mut bc),
+            7, 4, 63, 4, 1,
+        );
+        assert!(out.is_none());
+        assert_eq!(w.get_block_id(4, 64, 4), 7, "OP must be able to place bedrock");
+        if let Some(Entity::Player(p)) = w.entities.get(player) {
+            assert_eq!(p.inventory.main[0].unwrap().count, 63);
+        }
+
+        // 2. Fire (51)
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(51, 64, 0));
+            p.inventory.current = 0;
+        }
+        sess.held_id = 51;
+        let out = sess.place(
+            &mut ctx(&mut w, &ops_set, &mut bc),
+            51, 5, 63, 4, 1,
+        );
+        assert!(out.is_none());
+        assert_eq!(w.get_block_id(5, 64, 4), 51, "OP must be able to place fire");
+        if let Some(Entity::Player(p)) = w.entities.get(player) {
+            assert_eq!(p.inventory.main[0].unwrap().count, 63);
+        }
+
+        // 3. Mob Spawner (52)
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(52, 64, 0));
+            p.inventory.current = 0;
+        }
+        sess.held_id = 52;
+        let out = sess.place(
+            &mut ctx(&mut w, &ops_set, &mut bc),
+            52, 4, 63, 5, 1,
+        );
+        assert!(out.is_none());
+        assert_eq!(w.get_block_id(4, 64, 5), 52, "OP must be able to place mob spawner");
+        assert!(matches!(w.tiles.get(&(4, 64, 5)), Some(crate::world::tiles::TileData::MobSpawner(_))));
+    }
+
+    #[test]
+    fn test_non_op_cannot_place_unobtainable_blocks() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Alex", 2.0, 64.0, 2.0);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // Non-OP attempts to place bedrock (7) with packet item_id = 7
+        let out = sess.place(
+            &mut ctx(&mut w, &ops, &mut bc),
+            7, 2, 63, 2, 1,
+        );
+        assert!(out.is_none());
+        assert_eq!(w.get_block_id(2, 64, 2), 0, "Non-OP must not be able to place bedrock");
+        assert!(!sess.outbox.is_empty(), "Rollback block changes must be sent");
+
+        // Non-OP attempts to place fire (51)
+        sess.outbox.clear();
+        let out = sess.place(
+            &mut ctx(&mut w, &ops, &mut bc),
+            51, 3, 63, 3, 1,
+        );
+        assert!(out.is_none());
+        assert_eq!(w.get_block_id(3, 64, 3), 0, "Non-OP must not be able to place fire");
+        assert!(!sess.outbox.is_empty(), "Rollback block changes must be sent");
+    }
+
+    #[test]
+    fn test_op_retains_unobtainable_items_in_inventory_apply() {
+        let mut w = floor_world();
+        let mut ops_set = HashSet::new();
+        ops_set.insert("steve".to_string());
+        let player = spawn_player(&mut w, "Steve", 2.0, 64.0, 2.0);
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        let mut slots = vec![crate::network::SlotData { item_id: -1, count: 0, damage: 0 }; 36];
+        slots[0] = crate::network::SlotData { item_id: 7, count: 64, damage: 0 };   // Bedrock
+        slots[1] = crate::network::SlotData { item_id: 51, count: 64, damage: 0 };  // Fire
+        slots[2] = crate::network::SlotData { item_id: 52, count: 64, damage: 0 };  // Spawner
+        slots[3] = crate::network::SlotData { item_id: 90, count: 64, damage: 0 };  // Portal
+        slots[4] = crate::network::SlotData { item_id: 9, count: 64, damage: 0 };   // Water block
+
+        sess.pump(
+            &mut ctx(&mut w, &ops_set, &mut bc),
+            PacketData::PlayerInventory { inventory_type: -1, slots },
+        );
+
+        if let Some(Entity::Player(p)) = w.entities.get(player) {
+            assert_eq!(p.inventory.main[0].map(|s| s.item_id), Some(7));
+            assert_eq!(p.inventory.main[1].map(|s| s.item_id), Some(51));
+            assert_eq!(p.inventory.main[2].map(|s| s.item_id), Some(52));
+            assert_eq!(p.inventory.main[3].map(|s| s.item_id), Some(90));
+            assert_eq!(p.inventory.main[4].map(|s| s.item_id), Some(9));
+        }
+    }
+

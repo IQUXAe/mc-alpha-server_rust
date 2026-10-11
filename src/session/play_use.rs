@@ -87,9 +87,38 @@ impl PlaySession {
             5 => (x + 1, y, z),
             _ => (x, y, z),
         };
+        let is_op = self.is_op(ctx);
+        let attempted_unobtainable = if item_id >= 0 && !crate::item_data::item_is_obtainable(item_id as i32) {
+            Some(item_id as i32)
+        } else if let Some(s) = self.selected_stack(ctx.world) {
+            if !crate::item_data::item_is_obtainable(s.item_id) {
+                Some(s.item_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(unobtainable_id) = attempted_unobtainable {
+            if !is_op {
+                let name = self.username(ctx.world);
+                crate::server_log::warning(&format!(
+                    "Player {name} attempted to place unobtainable block {unobtainable_id} at ({nx}, {ny}, {nz}) without OP permissions"
+                ));
+                self.send_block_change(ctx.world, x, y, z);
+                self.send_block_change(ctx.world, nx, ny, nz);
+                let clicked = ctx.world.get_block_id(x, y, z);
+                if clicked == 64 || clicked == 71 {
+                    self.send_block_change(ctx.world, x, y - 1, z);
+                    self.send_block_change(ctx.world, x, y + 1, z);
+                }
+                self.send_inventory(ctx.world);
+                return None;
+            }
+        }
         let prot = crate::session::is_spawn_protected(x, z, ctx.world.spawn, ctx.spawn_protection)
             || crate::session::is_spawn_protected(nx, nz, ctx.world.spawn, ctx.spawn_protection);
-        if prot && !self.is_op(ctx) {
+        if prot && !is_op {
             self.send_block_change(ctx.world, x, y, z);
             self.send_block_change(ctx.world, nx, ny, nz);
             let clicked = ctx.world.get_block_id(x, y, z);
