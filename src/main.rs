@@ -148,6 +148,9 @@ fn main() {
                     server.shutdown();
                     break;
                 }
+                if next_tick <= now {
+                    server.poll_network(Duration::ZERO);
+                }
             }
             if !server.running {
                 break;
@@ -159,4 +162,5 @@ fn main() {
         server.poll_network(poll_timeout);
     }
     log::info("Waiting for background threads to finish saving...");
+    log::flush();
 }
