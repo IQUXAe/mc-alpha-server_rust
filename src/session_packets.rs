@@ -308,6 +308,16 @@ pub fn pkt_subchunk_furnace_light(
     y: i32,
     z: i32,
 ) -> Vec<((i32, i32), Vec<u8>)> {
+    pkt_subchunk_furnace_light_filtered(world, x, y, z, |_, _| true)
+}
+
+pub fn pkt_subchunk_furnace_light_filtered<F: Fn(i32, i32) -> bool>(
+    world: &crate::world::World,
+    x: i32,
+    y: i32,
+    z: i32,
+    is_chunk_watched: F,
+) -> Vec<((i32, i32), Vec<u8>)> {
     if !(0..crate::world::WORLD_HEIGHT).contains(&y) {
         return Vec::new();
     }
@@ -329,6 +339,9 @@ pub fn pkt_subchunk_furnace_light(
         let x_start = wx0.max(cx * 16);
         let x_end = wx_end.min((cx + 1) * 16);
         for cz in cz0..=cz1 {
+            if !is_chunk_watched(cx, cz) {
+                continue;
+            }
             let z_start = wz0.max(cz * 16);
             let z_end = wz_end.min((cz + 1) * 16);
             if let Some(pkt) = pkt_subchunk_in_chunk(

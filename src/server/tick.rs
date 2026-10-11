@@ -3,14 +3,12 @@
 
 use crate::entity::table::{Entity, EntityId};
 use crate::server::sessions::{Session, SessionState};
-use crate::server::{Server, chunk_map_key};
+use crate::server::{ChunkMapKey, ConnId, Server, TrackerScratch, chunk_map_key};
 use crate::server_constants::TICKS_PER_SECOND;
 use crate::session::{pkt_block_change, pkt_explosion, pkt_health, pkt_time};
 use crate::tracker::{Observer, TrackedEntity};
 use crate::world::World;
-use std::collections::HashMap;
-use crate::server::ConnId;
-use crate::server::TrackerScratch;
+use std::collections::{HashMap, HashSet};
 
 impl Server {
     /// Tracker pass (mirrors `EntityTracker::tick`): destroy packets for
@@ -404,12 +402,24 @@ impl Server {
             return;
         };
         world.refresh_light();
-        for [x, y, z] in world.take_block_updates() {
+        let players_by_chunk = &self.players_by_chunk;
+        const MAX_BLOCK_UPDATES_PER_TICK: usize = 1024;
+        for [x, y, z] in world.take_block_updates_budgeted(MAX_BLOCK_UPDATES_PER_TICK) {
+            let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+            if !Self::has_conn_in_chunk(players_by_chunk, dim, cx, cz) {
+                continue;
+            }
             let id = world.get_block_id(x, y, z);
             let meta = world.get_block_meta(x, y, z);
             if matches!(id, 61 | 62) {
                 for ((lcx, lcz), sc) in
-                    crate::session_packets::pkt_subchunk_furnace_light(world, x, y, z)
+                    crate::session_packets::pkt_subchunk_furnace_light_filtered(
+                        world,
+                        x,
+                        y,
+                        z,
+                        |cx, cz| Self::has_conn_in_chunk(players_by_chunk, dim, cx, cz),
+                    )
                 {
                     Self::for_each_conn_in_chunk(
                         &self.players_by_chunk,
@@ -443,7 +453,7 @@ impl Server {
             Self::for_each_conn_in_chunk(
                 &self.players_by_chunk,
                 &self.players,
-                chunk_map_key(dim, x.div_euclid(16), z.div_euclid(16)),
+                chunk_map_key(dim, cx, cz),
                 |cid| {
                     if let Some(sess) = self.sessions.get(&cid) {
                         sess.conn.queue(&bytes);
@@ -457,6 +467,17 @@ impl Server {
                 },
             );
         }
+    }
+
+    fn has_conn_in_chunk(
+        players_by_chunk: &HashMap<ChunkMapKey, HashSet<EntityId>>,
+        dim: i32,
+        cx: i32,
+        cz: i32,
+    ) -> bool {
+        players_by_chunk
+            .get(&chunk_map_key(dim, cx, cz))
+            .is_some_and(|s| !s.is_empty())
     }
 
     /// Ship queued tile-entity updates (`Packet59ComplexEntity`) to chunk-loaded players.
@@ -478,13 +499,17 @@ impl Server {
         } else {
             return;
         };
+        let players_by_chunk = &self.players_by_chunk;
         for [x, y, z] in world.take_tile_updates() {
             if !self.sent_tiles_scratch.insert((dim, x, y, z)) {
                 continue;
             }
             if let Some(tile) = world.tiles.get(&(x, y, z)).copied() {
                 let bytes = crate::session_packets::tile_packet(x, y, z, &tile);
-                let subchunk = if matches!(tile, crate::world::TileData::Furnace(_)) {
+                let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+                let subchunk = if matches!(tile, crate::world::TileData::Furnace(_))
+                    && Self::has_conn_in_chunk(players_by_chunk, dim, cx, cz)
+                {
                     crate::session_packets::pkt_subchunk_block(world, x, y, z)
                 } else {
                     None
@@ -492,7 +517,7 @@ impl Server {
                 Self::for_each_conn_in_chunk(
                     &self.players_by_chunk,
                     &self.players,
-                    chunk_map_key(dim, x.div_euclid(16), z.div_euclid(16)),
+                    chunk_map_key(dim, cx, cz),
                     |cid| {
                         if let Some(sess) = self.sessions.get(&cid) {
                             sess.conn.queue(&bytes);
@@ -512,6 +537,7 @@ impl Server {
             return;
         }
         self.chunks_generated_this_tick = 0;
+        self.chunks_loaded_this_tick = 0;
         self.poll_network(std::time::Duration::ZERO);
         self.tick_count += 1;
         if self.tick_count.is_multiple_of(crate::server::LOGIN_WINDOW_TICKS) {
@@ -552,9 +578,14 @@ impl Server {
         self.push_health_changes();
         if self.settings.auto_save_interval > 0
             && self.tick_count.is_multiple_of(self.settings.auto_save_interval as u64)
+            && !self.auto_save_active
         {
             self.save_players();
-            self.save_world();
+            let _ = self.world.save_level_to(&self.level_dir);
+            self.begin_autosave();
+        }
+        if self.auto_save_active {
+            self.step_autosave(8);
         }
         self.tracker_tick();
         self.sent_tiles_scratch.clear();
