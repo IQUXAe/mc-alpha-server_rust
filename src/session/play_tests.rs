@@ -1173,8 +1173,11 @@
         );
         match w.tiles.get(&(3, 64, 4)) {
             Some(TileData::Furnace(s)) => {
-                assert_eq!(s.burn_time, 20000);
-                assert_eq!(s.cook_time, 200);
+                // Timers are server-authoritative: forged BurnTime /
+                // CookTime / ItemBurnTime must be ignored entirely (a
+                // clamped copy still granted free smelts/burn time).
+                assert_eq!(s.burn_time, 0);
+                assert_eq!(s.cook_time, 0);
                 assert_eq!(s.current_item_burn_time, 0);
                 assert_eq!(s.slots[0].count, 64);
             }
@@ -1279,6 +1282,54 @@
                 assert_eq!(s.current_item_burn_time, 1600);
                 assert_eq!(s.slots[0].item_id, 15);
                 assert_eq!(s.slots[0].count, 4);
+            }
+            _ => panic!("furnace tile missing"),
+        }
+    }
+
+    #[test]
+    fn test_furnace_slot_2_accepts_client_placements() {
+        use crate::nbt::{NbtCompound, NbtList, NbtTag, write_root};
+        use std::collections::BTreeMap;
+        use std::io::Write as _;
+
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        w.set_block_id(3, 64, 4, 61);
+        let f = crate::tile_entity::furnace::furnace_create();
+        w.tiles.insert((3, 64, 4), TileData::Furnace(f));
+
+        // Client places 5 stone (id 1) into slot 2
+        let mut items = NbtList::with_type(10);
+        let mut im = BTreeMap::new();
+        im.insert("Slot".to_string(), NbtTag::Byte(2));
+        im.insert("id".to_string(), NbtTag::Short(1));
+        im.insert("Count".to_string(), NbtTag::Byte(5));
+        im.insert("Damage".to_string(), NbtTag::Short(0));
+        items.push(NbtTag::Compound(NbtCompound { map: im }));
+        let mut map = BTreeMap::new();
+        map.insert("x".to_string(), NbtTag::Int(3));
+        map.insert("y".to_string(), NbtTag::Int(64));
+        map.insert("z".to_string(), NbtTag::Int(4));
+        map.insert("Items".to_string(), NbtTag::List(items));
+        let mut raw = Vec::new();
+        write_root(&mut raw, "", &NbtCompound { map }).unwrap();
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&raw).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::ComplexEntity { x: 3, y: 64, z: 4, nbt_data: gz },
+        );
+
+        match w.tiles.get(&(3, 64, 4)) {
+            Some(TileData::Furnace(s)) => {
+                assert_eq!(s.slots[2].item_id, 1);
+                assert_eq!(s.slots[2].count, 5);
             }
             _ => panic!("furnace tile missing"),
         }

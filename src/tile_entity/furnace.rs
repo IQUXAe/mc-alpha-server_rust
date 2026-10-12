@@ -107,11 +107,20 @@ fn tick_core(state: &mut FurnaceState, fuel: i32) -> FurnaceTickResult {
             state.burn_time = fuel as i16;
             changed = true;
             let fuel_slot = &mut state.slots[SLOT_FUEL];
+            let consumed_lava_bucket = fuel_slot.item_id == 327;
             fuel_slot.count -= 1;
             if fuel_slot.count <= 0 {
-                fuel_slot.item_id = -1;
-                fuel_slot.count = 0;
-                fuel_slot.damage = 0;
+                if consumed_lava_bucket {
+                    // Java `TileEntityFurnace`: a spent lava bucket is
+                    // replaced with an empty bucket, not destroyed.
+                    fuel_slot.item_id = 325;
+                    fuel_slot.count = 1;
+                    fuel_slot.damage = 0;
+                } else {
+                    fuel_slot.item_id = -1;
+                    fuel_slot.count = 0;
+                    fuel_slot.damage = 0;
+                }
             }
         }
 
@@ -154,7 +163,8 @@ fn can_smelt(state: &FurnaceState) -> bool {
     if output.item_id != result_id {
         return false;
     }
-    output.count < 64
+    let max_stack = crate::player::inventory::inventory_max_stack_size(result_id);
+    output.count < max_stack
 }
 
 fn smelt_item(state: &mut FurnaceState) {
@@ -165,11 +175,12 @@ fn smelt_item(state: &mut FurnaceState) {
 
     {
         let output = &mut state.slots[SLOT_OUTPUT];
+        let max_stack = crate::player::inventory::inventory_max_stack_size(result_id);
         if output.is_empty() {
             output.item_id = result_id;
             output.count = 1;
             output.damage = 0;
-        } else if output.item_id == result_id {
+        } else if output.item_id == result_id && output.count < max_stack {
             output.count += 1;
         }
     }
@@ -280,5 +291,19 @@ mod tests {
         let r = furnace_tick_native(&mut s);
         assert!(!r.changed);
         assert!(!r.needs_block_update);
+    }
+
+    #[test]
+    fn cooked_porkchop_output_stack_limit_is_one() {
+        // Raw porkchop = 319, Cooked porkchop = 320.
+        // Cooked porkchop max stack size is 1 in Alpha 1.2.6.
+        let mut s = state_with(stack(319, 2), stack(263, 1));
+        s.slots[SLOT_OUTPUT] = stack(320, 1);
+        assert!(!can_smelt(&s), "Cannot smelt cooked porkchop past max stack size 1");
+
+        // Smelting iron ore (15) to iron ingot (265) can stack up to 64:
+        let mut s2 = state_with(stack(15, 2), stack(263, 1));
+        s2.slots[SLOT_OUTPUT] = stack(265, 1);
+        assert!(can_smelt(&s2), "Iron ingots can stack in output slot");
     }
 }

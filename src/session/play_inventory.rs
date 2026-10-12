@@ -294,39 +294,26 @@ impl PlaySession {
             TileData::Sign(mut s) => {
                 for i in 0..4 {
                     if let Some(NbtTag::String(text)) = nbt.map.get(&format!("Text{}", i + 1)) {
-                        let bytes = text.as_bytes();
-                        let len = bytes.len().min(15);
-                        s.lines[i] = [0u8; 16];
-                        s.lines[i][..len].copy_from_slice(&bytes[..len]);
+                        // Sanitized storage (NUL/astral chars would crash
+                        // every vanilla client reading the tile packet).
+                        crate::tile_entity::sign::sign_set_line(&mut s, i as i32, text);
                     }
                 }
                 ctx.world.tiles.insert((x, y, z), TileData::Sign(s));
             }
             TileData::Furnace(mut s) => {
-                // Strict (vanilla `readFromNBT` copies the shorts
-                // verbatim): clamp to the survival ranges — cook progress
-                // never exceeds the 200-tick recipe, burn timers never
-                // exceed the hottest fuel (lava bucket, 20000 ticks).
-                // Otherwise a hacked sign-update packet grants free smelts.
-                // When the furnace is already burning/cooking on the server
-                // and the client sends an inventory update (`writeToNBT`,
-                // which omits `"ItemBurnTime"` and echoes scaled/stale
-                // timers), keep the server's authoritative timers intact.
-                let server_active =
-                    s.burn_time > 0 || s.cook_time > 0 || s.current_item_burn_time > 0;
-                if !server_active || nbt.map.contains_key("ItemBurnTime") {
-                    if let Some(NbtTag::Short(v)) = nbt.map.get("BurnTime") {
-                        s.burn_time = (*v).clamp(0, 20000);
-                    }
-                    if let Some(NbtTag::Short(v)) = nbt.map.get("CookTime") {
-                        s.cook_time = (*v).clamp(0, 200);
-                    }
-                    if let Some(NbtTag::Short(v)) = nbt.map.get("ItemBurnTime") {
-                        s.current_item_burn_time = (*v).clamp(0, 20000);
-                    }
-                }
+                // Timers are server-authoritative: burn/cook state is
+                // driven by `furnace_tick_native` alone. Accepting client
+                // `BurnTime`/`CookTime`/`ItemBurnTime` (vanilla
+                // `readFromNBT` copies them verbatim — a known Alpha
+                // exploit) let a forged packet set a cold furnace to
+                // `CookTime=200` for instant smelts or 20000 free burn
+                // ticks. The vanilla client never needs its timers
+                // reflected: its GUI copy keeps animating from the
+                // per-tick tile broadcasts.
                 // Same replace-not-merge rule as chests (vanilla
                 // readFromNBT starts from a fresh bank).
+                //
                 s.slots = crate::tile_entity::furnace::furnace_create().slots;
                 if let Some(NbtTag::List(l)) = nbt.map.get("Items") {
                     for elem in &l.elements {
