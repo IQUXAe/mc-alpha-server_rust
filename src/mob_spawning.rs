@@ -133,6 +133,14 @@ fn spawn_pass(
     }
     eligible.sort_unstable();
     eligible.dedup();
+    eligible.retain(|&key| {
+        let chunk_x = (key >> 32) as i32;
+        let chunk_z = (key & 0xFFFF_FFFF) as i32;
+        world.spawn_chunk_exists(chunk_x, chunk_z)
+    });
+    if eligible.is_empty() {
+        return 0;
+    }
 
     let budget = if hostile { HOSTILE_BUDGET } else { PASSIVE_BUDGET };
     if current_count > spawn_max_count(eligible.len() as i32, budget) {
@@ -143,9 +151,6 @@ fn spawn_pass(
     for key in &eligible {
         let chunk_x = (key >> 32) as i32;
         let chunk_z = (key & 0xFFFF_FFFF) as i32;
-        if !world.spawn_chunk_exists(chunk_x, chunk_z) {
-            continue;
-        }
 
         let base_x = chunk_x.wrapping_mul(16);
         let base_z = chunk_z.wrapping_mul(16);
