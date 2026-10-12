@@ -50,8 +50,12 @@ pub struct ItemMotion {
 }
 
 pub fn item_damp(on_ground: bool, io: &mut ItemMotion) -> bool {
-    // Java: 0.98 air, slipperiness(0.6) * 0.98 on ground.
-    let var1: f32 = if on_ground { 0.6f32 * 0.98f32 } else { 0.98f32 };
+    item_damp_slip(on_ground, 0.6, io)
+}
+
+pub fn item_damp_slip(on_ground: bool, slipperiness: f32, io: &mut ItemMotion) -> bool {
+    // Java: 0.98 air, slipperiness * 0.98 on ground (ice 0.98, default 0.6).
+    let var1: f32 = if on_ground { slipperiness * 0.98f32 } else { 0.98f32 };
     io.mx *= var1 as f64;
     io.my *= 0.98;
     io.mz *= var1 as f64;

@@ -84,7 +84,12 @@ pub fn living_attack_run(input: &AttackInput, next_f01: &mut dyn FnMut() -> f64)
         if input.amount <= input.last_damage {
             return None;
         }
-        r.health = input.health.wrapping_sub((input.amount - input.last_damage) as i16);
+        // Java `damageEntity(var2 - lastDamage)`: the difference can be
+        // small-negative in the resist window (vanilla quirk); clamp to
+        // the i16 range before narrowing so a huge forged amount can't
+        // alias (i32::MAX as i16 == -1) and heal the victim.
+        let reduced = (input.amount - input.last_damage).clamp(i16::MIN as i32, i16::MAX as i32);
+        r.health = ((input.health as i32) - reduced).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         r.last_damage = input.amount;
         knockback = false;
     } else {
@@ -92,41 +97,50 @@ pub fn living_attack_run(input: &AttackInput, next_f01: &mut dyn FnMut() -> f64)
         r.hurt_resist = input.max_hurt_resist;
         r.hurt_time = 10;
         r.attack_time = 10;
-        r.health = input.health.wrapping_sub(input.amount as i16);
+        // Compute in i32 with saturation: the old `as i16` narrowing plus
+        // `wrapping_sub` turned oversized damage into small (even
+        // negative → healing) values.
+        let dmg = input.amount.clamp(0, i16::MAX as i32);
+        r.health = ((input.health as i32) - dmg).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     }
 
-    if knockback && input.has_attacker {
-        let mut dx = input.atk_x - input.self_x;
-        let mut dz = input.atk_z - input.self_z;
-        // Degenerate direction: jitter until non-trivial (C++ draw order kept).
-        let mut guard = 0;
-        while dx * dx + dz * dz < 1.0e-4 {
-            let a = next_f01();
-            let b = next_f01();
-            let c = next_f01();
-            let d = next_f01();
-            dx = (a - b) * 0.01;
-            dz = (c - d) * 0.01;
-            guard += 1;
-            if guard > 64 {
-                break;
-            }
-        }
-        let dist = (dx * dx + dz * dz).sqrt();
-        if dist > 0.0 {
-            let (mut mx, mut my, mut mz) = (input.motion_x * 0.5, input.motion_y * 0.5, input.motion_z * 0.5);
-            mx -= dx / dist * 0.4;
-            my += 0.4;
-            mz -= dz / dist * 0.4;
-            if my > 0.4 {
-                my = 0.4;
-            }
-            r.knocked = true;
-            r.kmx = mx;
-            r.kmy = my;
-            r.kmz = mz;
-        }
+    // Fresh hit: always send the hurt status (red flash), attacker or
+    // not — fall/lava/fire/drown/void damage flashed on clients only
+    // when an attacker existed. Knockback itself still requires one.
+    if knockback {
         r.send_status = true;
+        if input.has_attacker {
+            let mut dx = input.atk_x - input.self_x;
+            let mut dz = input.atk_z - input.self_z;
+            // Degenerate direction: jitter until non-trivial (C++ draw order kept).
+            let mut guard = 0;
+            while dx * dx + dz * dz < 1.0e-4 {
+                let a = next_f01();
+                let b = next_f01();
+                let c = next_f01();
+                let d = next_f01();
+                dx = (a - b) * 0.01;
+                dz = (c - d) * 0.01;
+                guard += 1;
+                if guard > 64 {
+                    break;
+                }
+            }
+            let dist = (dx * dx + dz * dz).sqrt();
+            if dist > 0.0 {
+                let (mut mx, mut my, mut mz) = (input.motion_x * 0.5, input.motion_y * 0.5, input.motion_z * 0.5);
+                mx -= dx / dist * 0.4;
+                my += 0.4;
+                mz -= dz / dist * 0.4;
+                if my > 0.4 {
+                    my = 0.4;
+                }
+                r.knocked = true;
+                r.kmx = mx;
+                r.kmy = my;
+                r.kmz = mz;
+            }
+        }
     }
 
     if r.health <= 0 {
@@ -475,7 +489,9 @@ mod tests {
         assert_eq!((r.health, r.last_damage), (14, 6));
         assert_eq!((r.hurt_resist, r.hurt_time, r.attack_time), (20, 10, 10));
         assert!(!r.knocked); // no attacker
-        assert!(!r.send_status);
+        // Fresh hit always flashes the client, attacker or not (Java
+        // `EntityLiving.java:328`: status 2 for every non-resisted hit).
+        assert!(r.send_status);
         assert!(!r.died);
     }
 
