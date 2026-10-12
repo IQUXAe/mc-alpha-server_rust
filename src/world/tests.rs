@@ -2368,7 +2368,7 @@
     #[test]
     fn test_apply_decoded_chunk_clears_modified_and_slab_farmland_light_value() {
         let mut w = world_with_floor();
-        let encoded = crate::persist::encode_chunk_blob(&w, 0, 0, true).expect("chunk must encode");
+        let encoded = crate::persist::encode_chunk_blob(&w, 0, 0, true, true).expect("chunk must encode");
         let decoded = crate::persist::decode_chunk_blob(&encoded, 0, 0).expect("chunk must decode");
         let mut w2 = World::new(12345);
         w2.apply_decoded_chunk(decoded);
@@ -2740,13 +2740,30 @@
             m.set_slime_size(2);
             m.living.health = 4;
         }
-        w.attack_living(id, 100, None);
+        // Java `EntitySlime.setEntityDead`: split only when health lands
+        // EXACTLY on 0 (`field_770_c > 1 && this.health == 0`) — an
+        // overkill leaves negative health and vanilla skips the split.
+        w.attack_living(id, 4, None);
         let kids: Vec<_> = w.entities.alive_ids().into_iter().filter_map(|oid| match w.entities.get(oid) {
             Some(Entity::Mob(m)) if m.kind == MobKind::Slime && oid != id => Some(m.slime_size),
             _ => None,
         }).collect();
-        assert_eq!(kids.len(), 4, "size-2 slime must split into 4");
+        assert_eq!(kids.len(), 4, "exact-kill size-2 slime must split into 4");
         assert!(kids.iter().all(|s| *s == 1));
+
+        // Overkill: no split (vanilla quirk, not a bug).
+        let mut w2 = world_with_floor();
+        let id2 = add_mob(&mut w2, MobKind::Slime, 4.5, 65.0, 4.5);
+        if let Some(Entity::Mob(m)) = w2.entities.get_mut(id2) {
+            m.set_slime_size(2);
+            m.living.health = 4;
+        }
+        w2.attack_living(id2, 100, None);
+        let kids2: Vec<_> = w2.entities.alive_ids().into_iter().filter_map(|oid| match w2.entities.get(oid) {
+            Some(Entity::Mob(m)) if m.kind == MobKind::Slime && oid != id2 => Some(m.slime_size),
+            _ => None,
+        }).collect();
+        assert_eq!(kids2.len(), 0, "overkilled slime must not split (vanilla)");
     }
 
     #[test]
@@ -3141,3 +3158,127 @@
         };
         assert_eq!(bmot, (0.0, 0.0), "distant boat B must not receive shove impulse from boat A");
     }
+
+    #[test]
+    fn test_spatial_entity_grid_and_queries() {
+        let mut w = world_with_floor();
+        let z1 = add_mob(&mut w, MobKind::Zombie, 5.0, 64.0, 5.0);
+        let z2 = add_mob(&mut w, MobKind::Zombie, 20.0, 64.0, 20.0);
+        let z3 = add_mob(&mut w, MobKind::Zombie, 5.2, 64.0, 5.2);
+
+        w.rebuild_entity_grid();
+        let c00 = w.entity_grid.get(&(0, 0)).expect("chunk 0,0 must be present in grid");
+        assert!(c00.contains(&z1));
+        assert!(c00.contains(&z3));
+        assert!(!c00.contains(&z2));
+
+        let c11 = w.entity_grid.get(&(1, 1)).expect("chunk 1,1 must be present in grid");
+        assert!(c11.contains(&z2));
+
+        // push_neighbors with populated entity_grid should shove overlapping neighbors
+        w.push_neighbors(z1, &[]);
+        let m3 = w.entities.get(z3).unwrap().body().motion;
+        assert!(m3[0] != 0.0 || m3[2] != 0.0, "z3 should be shoved by z1 via spatial grid");
+
+        // distant z2 in chunk (1,1) should not be shoved by z1
+        let m2 = w.entities.get(z2).unwrap().body().motion;
+        assert_eq!(m2, [0.0, 0.0, 0.0], "distant z2 must not be shoved");
+    }
+
+    #[test]
+    fn test_cactus_destroys_item() {
+        let mut w = world_with_floor();
+        w.set_block_id(3, 64, 4, 81);
+        let item = add_item(&mut w, 3.5, 64.5, 4.5);
+        assert!(!w.entities.get(item).unwrap().body().dead);
+        w.cactus_contact(item);
+        assert!(w.entities.get(item).unwrap().body().dead, "Item touching cactus must be destroyed");
+    }
+
+    #[test]
+    fn test_item_push_out_of_1x1_hole() {
+        let mut w = world_with_floor();
+        // Create 1x1 hole at (3, 64, 3) surrounded by solid blocks
+        w.set_block_id(2, 64, 3, 1);
+        w.set_block_id(4, 64, 3, 1);
+        w.set_block_id(3, 64, 2, 1);
+        w.set_block_id(3, 64, 4, 1);
+        w.set_block_id(3, 64, 3, 1);
+        // Open air above at (3, 65, 3)
+        w.set_block_id(3, 65, 3, 0);
+
+        let item = add_item(&mut w, 3.5, 64.5, 3.5);
+        w.tick_item(item);
+        let b = w.entities.get(item).unwrap().body();
+        assert!(b.motion[1] > 0.0, "Item enclosed in 1x1 hole must be pushed upwards");
+    }
+
+    #[test]
+    fn test_leaf_decay_cascade_and_persistence() {
+        let mut w = world_with_floor();
+        // Wood trunk at (5, 64, 5) and (5, 65, 5)
+        w.set_block_id(5, 64, 5, 17);
+        w.set_block_id(5, 65, 5, 17);
+        // Canopy leaves connected to wood
+        w.set_block_id(5, 66, 5, 18);
+        w.set_block_id(6, 65, 5, 18);
+        w.set_block_id(7, 65, 5, 18);
+        w.set_block_id(8, 65, 5, 18);
+
+        // Player placed leaf with meta 4 at (10, 64, 10) (no wood nearby)
+        w.set_block_id(10, 64, 10, 18);
+        w.set_block_meta(10, 64, 10, 4);
+
+        // While trunk is present, no leaves should decay
+        crate::block::ticks::leaves_pump(&mut w);
+        assert_eq!(w.get_block_id(5, 66, 5), 18);
+        assert_eq!(w.get_block_id(6, 65, 5), 18);
+        assert_eq!(w.get_block_id(7, 65, 5), 18);
+        assert_eq!(w.get_block_id(8, 65, 5), 18);
+        assert_eq!(w.get_block_id(10, 64, 10), 18);
+
+        // Destroy wood trunk
+        w.apply_set_notify(5, 64, 5, 0);
+        w.apply_set_notify(5, 65, 5, 0);
+
+        // Pump leaf decay
+        for _ in 0..10 {
+            crate::block::ticks::leaves_pump(&mut w);
+        }
+
+        // All orphaned canopy leaves must decay
+        assert_eq!(w.get_block_id(5, 66, 5), 0, "Top leaf must decay");
+        assert_eq!(w.get_block_id(6, 65, 5), 0, "Adjacent leaf must decay");
+        assert_eq!(w.get_block_id(7, 65, 5), 0, "Cascaded leaf at dist 2 must decay");
+        assert_eq!(w.get_block_id(8, 65, 5), 0, "Cascaded leaf at dist 3 must decay");
+
+        // Player placed leaf with meta 4 must NOT decay
+        assert_eq!(w.get_block_id(10, 64, 10), 18, "Player placed leaf (meta 4) must persist");
+    }
+
+    #[test]
+    fn test_wooden_door_toggle_by_hand_opens_and_closes() {
+        let mut w = world_with_floor();
+        // Place wooden door at (5, 64, 5) lower, (5, 65, 5) upper
+        w.set_block_id(5, 64, 5, 64);
+        w.set_block_meta(5, 64, 5, 0); // closed
+        w.set_block_id(5, 65, 5, 64);
+        w.set_block_meta(5, 65, 5, 8); // closed upper half
+
+        // 1. Toggle door lower half by hand -> opens
+        assert!(w.toggle_door(5, 64, 5));
+        assert_eq!(w.get_block_meta(5, 64, 5) & 4, 4, "Lower half must be open");
+        assert_eq!(w.get_block_meta(5, 65, 5) & 4, 4, "Upper half must be open");
+
+        // 2. Placing a neighbor non-redstone block (dirt) must NOT close the open door
+        w.apply_set_notify(6, 64, 5, 3);
+        assert_eq!(w.get_block_meta(5, 64, 5) & 4, 4, "Door must stay open after neighbor block placed");
+        assert_eq!(w.get_block_meta(5, 65, 5) & 4, 4, "Upper half must stay open after neighbor block placed");
+
+        // 3. Toggle door upper half by hand -> closes
+        assert!(w.toggle_door(5, 65, 5));
+        assert_eq!(w.get_block_meta(5, 64, 5) & 4, 0, "Lower half must be closed");
+        assert_eq!(w.get_block_meta(5, 65, 5) & 4, 0, "Upper half must be closed");
+    }
+
+

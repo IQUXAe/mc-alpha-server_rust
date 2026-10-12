@@ -9,7 +9,12 @@ use crate::world::World;
 impl World {
     pub(crate) fn living_eye_height(e: &Entity) -> f64 {
         match e {
-            Entity::Player(_) => 1.62,
+            // Java samples the player's eyes at posY + 1.62 + 0.12
+            // (`func_373_s`): feet + 1.74. The old 1.62 made the server
+            // treat players as submerged (drowning!) a hair before the
+            // client's own bubbles ran out, and disagreed with the
+            // dig-speed water probe in the session layer (also 1.74).
+            Entity::Player(_) => 1.74,
             _ => e.body().height as f64 * 0.85,
         }
     }
@@ -288,13 +293,16 @@ impl World {
                     }
                 }
             }
-            // Slime split (`EntitySlime.setEntityDead`): damage deaths
-            // (`health <= 0`, not despawns) of size>1 spawn 4 children at
-            // half size around the corpse. No player cap needed: sizes
-            // halve, so depth is bounded by log2(size) <= 2.
+            // Slime split (`EntitySlime.setEntityDead`): damage deaths of
+            // size>1 spawn 4 children at half size around the corpse —
+            // but only when health hit EXACTLY 0 (Java
+            // `field_770_c > 1 && this.health == 0`): an overkill leaves
+            // negative health and vanilla skips the split entirely.
+            // No player cap needed: sizes halve, so depth is bounded by
+            // log2(size) <= 2.
             let split = match self.entities.get(id) {
                 Some(Entity::Mob(m))
-                    if m.kind == MobKind::Slime && m.slime_size > 1 && m.living.health <= 0 =>
+                    if m.kind == MobKind::Slime && m.slime_size > 1 && m.living.health == 0 =>
                 {
                     Some((m.slime_size, m.living.body.pos))
                 }
@@ -593,6 +601,11 @@ impl World {
         let fire_damage = match self.entities.get_mut(id) {
             Some(Entity::Mob(m)) => {
                 if in_water_for_fire {
+                    // Java `Entity.onEntityUpdate`: touching water resets
+                    // `fallDistance` EVERY tick — without this a mob
+                    // sinking to a lakebed took (often lethal) fall damage
+                    // on landing, killing cattle pushed into lakes.
+                    m.living.body.fall_distance = 0.0;
                     m.living.body.fire = 0;
                     m.burn_ticks = 0;
                     false
@@ -607,6 +620,7 @@ impl World {
             }
             Some(Entity::Animal(a)) => {
                 if in_water_for_fire {
+                    a.living.body.fall_distance = 0.0;
                     a.living.body.fire = 0;
                     false
                 } else if a.living.body.fire > 0 {
@@ -618,6 +632,7 @@ impl World {
             }
             Some(Entity::Player(p)) => {
                 if in_water_for_fire {
+                    p.living.body.fall_distance = 0.0;
                     p.living.body.fire = 0;
                     false
                 } else if p.living.body.fire > 0 {

@@ -311,9 +311,7 @@ impl World {
                 );
             }
             18 => {
-                let mut guard = self.leaves_guard;
-                block_leaves_neighbor(&mut *self, bid, bid, &mut guard, BlockPos::new(x, y, z));
-                self.leaves_guard = guard;
+                block_leaves_neighbor(&mut *self, bid, bid, BlockPos::new(x, y, z));
             }
             6 => {
                 block_sapling_neighbor(
@@ -679,9 +677,7 @@ impl World {
         let has_upper = self.get_block_id(x, y + 1, z) == bid;
         if has_upper {
             self.set_block_meta(x, y + 1, z, toggled | 8);
-            self.notify_neighbors_of(x, y + 1, z);
         }
-        self.notify_neighbors_of(x, y, z);
         true
     }
 
@@ -705,10 +701,22 @@ impl World {
             let has_upper = self.get_block_id(x, y + 1, z) == bid;
             if has_upper {
                 self.set_block_meta(x, y + 1, z, next | 8);
-                self.notify_neighbors_of(x, y + 1, z);
             }
-            self.notify_neighbors_of(x, y, z);
         }
+    }
+
+    fn has_redstone_neighbor(&self, x: i32, y: i32, z: i32) -> bool {
+        const OFF: [(i32, i32, i32); 10] = [
+            (-1, 0, 0), (1, 0, 0), (0, 0, -1), (0, 0, 1), (0, -1, 0),
+            (-1, 1, 0), (1, 1, 0), (0, 1, -1), (0, 1, 1), (0, 2, 0),
+        ];
+        for (dx, dy, dz) in OFF {
+            let nid = self.get_block_id(x + dx, y + dy, z + dz);
+            if matches!(nid, 55 | 69 | 70 | 72 | 75 | 76 | 77) {
+                return true;
+            }
+        }
+        false
     }
 
     fn door_neighbor(&mut self, x: i32, y: i32, z: i32, bid: u8) {
@@ -737,7 +745,9 @@ impl World {
             self.drop_block_for(bid, meta, x, y, z);
         } else {
             let powered = self.is_block_powered(x, y, z) || self.is_block_powered(x, y + 1, z);
-            self.set_door_open(x, y, z, powered);
+            if bid == 71 || powered || self.has_redstone_neighbor(x, y, z) {
+                self.set_door_open(x, y, z, powered);
+            }
         }
     }
 
@@ -1001,7 +1011,6 @@ impl World {
                 block_reed_tick(&mut *self, bid, Self::native_drop_spec(bid), BlockPos::new(x, y, z));
             }
             18 => {
-                let mut guard = self.leaves_guard;
                 // Decayed leaves drop a sapling 1/20 (BlockLeaves);
                 // the tick itself always clears the cell.
                 let (did, dqty) = if self.rng.next_int_bound(20) == 0 { (6, 1) } else { (0, 0) };
@@ -1010,10 +1019,8 @@ impl World {
                     bid,
                     bid,
                     DropSpec::new(did, dqty, 0),
-                    &mut guard,
                     BlockPos::new(x, y, z),
                 );
-                self.leaves_guard = guard;
             }
             6 => {
                 let action = block_sapling_tick(
@@ -1202,13 +1209,33 @@ impl World {
                 continue;
             }
             self.update_block_tick(x, y, z);
-            if ran % 64 == 0 && start.elapsed().as_millis() > 10 {
+            // Fresh wall-clock check every iteration: the old every-64
+            // gate let 64 of the heaviest fluid/fire ticks run past the
+            // 10 ms budget before looking at the clock again.
+            if start.elapsed().as_millis() > 10 {
                 break;
             }
         }
     }
 
     /// Random block ticks (mirrors the 80-cells-per-chunk pass over the
+const CHUNK_OFFSETS_19X19: [(i32, i32); 361] = {
+    let mut arr = [(0, 0); 361];
+    let mut i = 0;
+    let mut dx = -9;
+    while dx <= 9 {
+        let mut dz = -9;
+        while dz <= 9 {
+            arr[i] = (dx, dz);
+            i += 1;
+            dz += 1;
+        }
+        dx += 1;
+    }
+    arr
+};
+
+    /// Periodic random block ticking (mirrors `doRandomBlockTicks`: 80 blocks in
     /// radius-9 loaded chunks around every joined player (Java World:1345);
     /// chunk order is sorted for determinism where C++ iterates an
     /// unordered set).
@@ -1220,10 +1247,8 @@ impl World {
                 let b = &p.living.body;
                 let cx = (b.pos[0] / 16.0).floor() as i32;
                 let cz = (b.pos[2] / 16.0).floor() as i32;
-                for dx in -9..=9 {
-                    for dz in -9..=9 {
-                        keys.push((cx + dx, cz + dz));
-                    }
+                for &(dx, dz) in &Self::CHUNK_OFFSETS_19X19 {
+                    keys.push((cx + dx, cz + dz));
                 }
             }
         }
@@ -1233,7 +1258,8 @@ impl World {
         }
         keys.sort_unstable();
         keys.dedup();
-        let mut to_tick = Vec::new();
+        let mut to_tick = std::mem::take(&mut self.random_tick_to_tick);
+        to_tick.clear();
         {
             let World {
                 ref mut rng,
@@ -1262,10 +1288,11 @@ impl World {
                 }
             }
         }
-        for (bx, by, bz) in to_tick {
-            self.update_block_tick(bx, by, bz);
+        for (bx, by, bz) in &to_tick {
+            self.update_block_tick(*bx, *by, *bz);
         }
         self.random_tick_keys = keys;
+        self.random_tick_to_tick = to_tick;
     }
 
     /// Periodic unload (mirrors the `worldTime % 100` pass): chunks outside
@@ -1340,6 +1367,7 @@ impl World {
     /// unload spill; boats included).
     fn spill_chunk(&mut self, cx: i32, cz: i32) {
         let mut gone: Vec<EntityId> = Vec::new();
+        let mut dead_ephemeral: Vec<EntityId> = Vec::new();
         for (&oid, e) in self.entities.iter() {
             if e.body().dead {
                 continue;
@@ -1398,10 +1426,20 @@ impl World {
                     damage_taken: c.damage_taken,
                     time_since_hit: c.time_since_hit,
                 }),
-                _ => continue,
+                Entity::Player(_) => continue,
+                _ => {
+                    dead_ephemeral.push(oid);
+                    continue;
+                }
             }
             chunk.is_modified = true;
             gone.push(oid);
+        }
+        for oid in dead_ephemeral {
+            if let Some(e) = self.entities.get_mut(oid) {
+                e.body_mut().dead = true;
+            }
+            self.entities.remove(oid);
         }
         gone.sort_unstable();
         for oid in gone {

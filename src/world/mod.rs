@@ -40,6 +40,65 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const WORLD_HEIGHT: i32 = 128;
 
+/// Full-chunk skylight regenerations allowed per world tick; the rest
+/// stay dirty and refresh next tick. One regen walks 32k cells plus a
+/// BFS, so an unbounded set (fluid/fire storms dirty dozens of chunks)
+/// used to blow the 50 ms budget by itself.
+pub(crate) const MAX_LIGHT_REGENS_PER_TICK: usize = 16;
+
+/// Deduplicating, bounded queue of changed block cells awaiting the
+/// broadcast fan-out. Dedup happens on push (a cell written five times
+/// per tick broadcasts once), the backlog is hard-capped, and the
+/// per-tick drain no longer needs the O(n log n) global sort the old
+/// "sort the whole backlog every tick" scheme paid under fluid storms.
+#[derive(Default)]
+pub struct BlockUpdateQueue {
+    cells: Vec<[i32; 3]>,
+    queued: HashSet<[i32; 3]>,
+}
+
+impl BlockUpdateQueue {
+    /// Hard backlog cap: pushes beyond this are dropped (the next write
+    /// to the same cell re-queues it).
+    pub const MAX_BACKLOG: usize = 16384;
+
+    #[inline]
+    pub fn push(&mut self, pos: [i32; 3]) {
+        if self.cells.len() >= Self::MAX_BACKLOG {
+            return;
+        }
+        if self.queued.insert(pos) {
+            self.cells.push(pos);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// Drain up to `cap` cells; leftovers stay queued for the next tick.
+    pub fn take_budgeted(&mut self, cap: usize) -> Vec<[i32; 3]> {
+        if self.cells.len() <= cap {
+            let drained = std::mem::take(&mut self.cells);
+            self.queued.clear();
+            drained
+        } else {
+            let mut drained = Vec::with_capacity(cap);
+            for _ in 0..cap {
+                // Unwraps are safe: len > cap >= 1.
+                let pos = self.cells.pop().unwrap();
+                self.queued.remove(&pos);
+                drained.push(pos);
+            }
+            drained
+        }
+    }
+}
+
 /// World explosion event payload `(x, y, z, radius, destroyed_cells)`.
 pub type ExplosionEvent = (f64, f64, f64, f32, Vec<(i32, i32, i32)>);
 
@@ -163,9 +222,10 @@ pub struct World {
     /// (Java `scheduledTickSet`); the BTreeMap scan per schedule was
     /// quadratic under fluid/fire load and stalled the tick loop.
     pub(crate) scheduled_set: std::collections::HashSet<(i32, i32, i32, u8)>,
-    /// Leaves-decay search guard (mirrors the singleton `BlockLeaves`
-    /// instance field threaded through the decay drivers).
-    pub(crate) leaves_guard: i32,
+    /// Leaves-decay worklist (replaces the singleton recursion guard:
+    /// neighbor changes enqueue, `leaves_pump` recomputes a bounded
+    /// number of cells per tick — no recursion, no stale counter).
+    pub(crate) leaves_queue: Vec<(u8, u8, crate::block::pos::BlockPos)>,
     /// Chunk unload radius in chunks (mirrors view distance + 2).
     pub unload_radius: i32,
     /// Unloaded chunks with their entity spill (mirrors the leveldb
@@ -179,7 +239,7 @@ pub struct World {
     /// through [`World::set_block_id`] / [`World::set_block_meta`], plus
     /// tree growth via the world accessor); the server tick drains these
     /// and fans out block changes to chunk-loaded players.
-    pub block_updates: Vec<[i32; 3]>,
+    pub block_updates: BlockUpdateQueue,
     /// Tile entities changed since the last server tick (e.g. furnace smelt
     /// completion or burn change); drained by the server tick to broadcast
     /// `Packet59ComplexEntity`.
@@ -251,6 +311,12 @@ pub struct World {
     pub(crate) pickup_players_scratch: Vec<EntityId>,
     /// Scratch buffer for candidate entities in push_neighbors across ticks.
     pub(crate) push_others_scratch: Vec<(EntityId, f64, f64)>,
+    /// Scratch buffer for active furnace coordinates across ticks.
+    pub(crate) furnace_cells_scratch: Vec<(i32, i32, i32)>,
+    /// Scratch buffer for blocks queued in random_block_ticks across ticks.
+    pub(crate) random_tick_to_tick: Vec<(i32, i32, i32)>,
+    /// Spatial grid mapping chunk (cx, cz) -> alive entity IDs, rebuilt for spatial queries.
+    pub(crate) entity_grid: HashMap<(i32, i32), Vec<EntityId>>,
 }
 
 impl std::fmt::Debug for World {
@@ -287,11 +353,11 @@ impl World {
             spawn_animals: true,
             scheduled: BTreeMap::new(),
             scheduled_set: std::collections::HashSet::new(),
-            leaves_guard: 0,
+            leaves_queue: Vec::new(),
             unload_radius: 12,
             unloaded: HashMap::new(),
             tiles: WorldTiles::new(),
-            block_updates: Vec::new(),
+            block_updates: BlockUpdateQueue::default(),
             tile_updates: Vec::new(),
             item_pickups: Vec::new(),
             death_events: Vec::new(),
@@ -317,6 +383,37 @@ impl World {
             pickup_items_scratch: Vec::new(),
             pickup_players_scratch: Vec::new(),
             push_others_scratch: Vec::new(),
+            furnace_cells_scratch: Vec::new(),
+            random_tick_to_tick: Vec::new(),
+            entity_grid: HashMap::new(),
+        }
+    }
+
+    /// Rebuild the spatial entity grid mapping chunk (cx, cz) -> entity IDs.
+    pub fn rebuild_entity_grid(&mut self) {
+        for v in self.entity_grid.values_mut() {
+            v.clear();
+        }
+        for (&id, e) in self.entities.iter() {
+            if !e.body().dead {
+                let cx = (e.body().pos[0].floor() as i32).div_euclid(16);
+                let cz = (e.body().pos[2].floor() as i32).div_euclid(16);
+                self.entity_grid.entry((cx, cz)).or_default().push(id);
+            }
+        }
+    }
+
+    /// Register a newly spawned or modified entity into the spatial grid.
+    pub fn register_entity_in_grid(&mut self, id: EntityId) {
+        if let Some(e) = self.entities.get(id) {
+            if !e.body().dead {
+                let cx = (e.body().pos[0].floor() as i32).div_euclid(16);
+                let cz = (e.body().pos[2].floor() as i32).div_euclid(16);
+                let bucket = self.entity_grid.entry((cx, cz)).or_default();
+                if !bucket.contains(&id) {
+                    bucket.push(id);
+                }
+            }
         }
     }
 
@@ -516,12 +613,16 @@ impl World {
     /// Missing chunk or out-of-range Y: no-op returning false (mirrors the
     /// NoChunkLoad setters swallowing silently). Every real change lands
     /// in [`World::block_updates`] for broadcast and marks its chunk in
-    /// `light_dirty`; skylight itself regenerates once per chunk in
+    /// `light_dirty` **only when the block's light profile actually
+    /// changed** (opacity/emission — a 61<->62 furnace flip or any
+    /// meta-only edit is light-neutral and skips the relight storm);
+    /// skylight itself regenerates once per chunk in
     /// [`World::refresh_light`] at the end of the world tick.
     pub fn set_block_id(&mut self, x: i32, y: i32, z: i32, id: u8) -> bool {
+        let old = Self::block_id_in(&self.chunks, x, y, z);
         if Self::set_block_id_in(&mut self.chunks, self.populating, x, y, z, id, false) {
             self.block_updates.push([x, y, z]);
-            if !self.populating {
+            if !self.populating && Self::block_light_profile_changed(old, id) {
                 let (cx, cz, _, _) = Self::chunk_of(x, z);
                 self.light_dirty.insert((cx, cz));
             }
@@ -531,9 +632,25 @@ impl World {
         }
     }
 
+    /// True when a block swap can affect light at all (opacity or emission
+    /// differ). Light-neutral swaps — furnace lit/unlit, same-opacity
+    /// swaps — skip the chunk relight entirely.
+    fn block_light_profile_changed(old: u8, new: u8) -> bool {
+        if old == new {
+            return false;
+        }
+        let o = crate::block::table::block_properties_get(old as u32);
+        let n = crate::block::table::block_properties_get(new as u32);
+        o.light_opacity != n.light_opacity || o.light_value != n.light_value
+    }
+
     /// Regenerate skylight once per dirty chunk and propagate light across
     /// loaded chunk borders. Runs at the end of the world tick so chunk
-    /// packets go out with fresh light.
+    /// packets go out with fresh light. At most
+    /// [`MAX_LIGHT_REGENS_PER_TICK`] full-chunk regenerations run per
+    /// tick; the remainder stays dirty and refreshes next tick (light
+    /// lag of a tick or two is invisible next to the freeze a
+    /// 9-regens-per-edit storm used to cause).
     pub(crate) fn refresh_light(&mut self) {
         let dirty = std::mem::take(&mut self.light_dirty);
         if dirty.is_empty() {
@@ -568,9 +685,25 @@ impl World {
                     }
                 }
             }
-            for &(cx, cz) in &regen_set {
+            let mut it = regen_set.iter().copied();
+            let mut regen_done = 0usize;
+            for (cx, cz) in it.by_ref() {
+                if regen_done >= MAX_LIGHT_REGENS_PER_TICK {
+                    break;
+                }
                 if let Some(c) = self.chunks.get_mut(&(cx, cz)) {
                     c.generate_skylight_map();
+                    regen_done += 1;
+                }
+            }
+            // Anything past the budget (and its unprocessed neighbors)
+            // stays dirty for the next tick.
+            let deferred: Vec<(i32, i32)> =
+                it.collect();
+            if !deferred.is_empty() {
+                for pos in deferred {
+                    regen_set.remove(&pos);
+                    self.light_dirty.insert(pos);
                 }
             }
             regen_set
@@ -752,20 +885,12 @@ impl World {
         self.take_block_updates_budgeted(usize::MAX)
     }
 
-    /// Drain up to `cap` queued block changes, deduplicated, retaining
-    /// leftovers for subsequent ticks.
+    /// Drain up to `cap` queued block changes, deduplicated on push,
+    /// retaining leftovers for subsequent ticks (no global sort: the
+    /// backlog used to be fully sorted every tick, which stalled the
+    /// loop for as long as a fluid/fire storm kept it growing).
     pub(crate) fn take_block_updates_budgeted(&mut self, cap: usize) -> Vec<[i32; 3]> {
-        if self.block_updates.is_empty() {
-            return Vec::new();
-        }
-        self.block_updates.sort_unstable();
-        self.block_updates.dedup();
-        if self.block_updates.len() <= cap {
-            std::mem::take(&mut self.block_updates)
-        } else {
-            let remaining = self.block_updates.split_off(cap);
-            std::mem::replace(&mut self.block_updates, remaining)
-        }
+        self.block_updates.take_budgeted(cap)
     }
 
     /// Drain queued tile entity changes, deduplicated.

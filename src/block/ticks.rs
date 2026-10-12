@@ -20,7 +20,7 @@ use crate::material::Material;
 use crate::world::{has_collision_box, has_collision_id, World};
 
 pub const PLANT_GROWTH_STAGE_MAX: u8 = 15;
-pub const LEAVES_DECAY_GUARD_MAX: i32 = 100;
+
 
 /// Sapling tick outcome. `GrowTree` carries the `World::rand()` draw; the
 /// caller runs tree generation for it.
@@ -66,6 +66,7 @@ fn q_solid(w: &World, pos: BlockPos) -> bool {
     // Material-solid like blockTickIsSolid (NOT the id list).
     w.id_at(pos) != 0 && w.material_at_pos(pos).is_solid()
 }
+#[allow(dead_code)]
 fn q_solid_nc(w: &World, pos: BlockPos) -> bool {
     w.id_at(pos) != 0 && w.material_at_pos(pos).is_solid()
 }
@@ -107,6 +108,7 @@ fn u_set_and_meta(w: &mut World, pos: BlockPos, id: u8, meta: u8) {
 fn u_schedule(w: &mut World, pos: BlockPos, id: u8, delay: i32) {
     w.schedule_at(pos, id, delay);
 }
+#[allow(dead_code)]
 fn u_notify(w: &mut World, pos: BlockPos, _id: u8) {
     w.notify_at(pos);
 }
@@ -694,106 +696,137 @@ pub fn block_reed_tick(w: &mut World, block_id: u8, drop: DropSpec, pos: BlockPo
     stalk_tick_inner(w, block_id, true, pos, false);
 }
 
-// ---- leaves (recursion guard passed by mutable borrow) ----
+// ---- leaves (iterative worklist: no recursion, no shared guard) ----
+//
+// Java propagates leaf metadata via two mutually recursive paths
+// (`func_6361_f` chains and `onNeighborBlockChange` re-entry through
+// block notify) gated by a shared instance counter. That design can
+// nest arbitrarily deep on large canopies (stack overflow risk) and
+// the counter goes stale between ticks, permanently killing the 1-in-10
+// random refresh that drives decay. Here the wave runs through a
+// per-tick-budgeted queue instead: neighbor changes enqueue, the pump
+// recomputes up to `LEAVES_QUEUE_PER_TICK` cells per tick, and every
+// meta change re-enqueues its leaf neighbors through the block notify.
+// Decay itself (meta == 1) still only happens on random ticks, exactly
+// like `BlockLeaves.updateTick`.
 
-fn leaf_propagate(w: &World, leaves_id: u8, pos: BlockPos, current: i32) -> i32 {
-    let id = q_id_nc(w, pos);
-    if id == 17 {
-        return 16;
+/// Queue hard cap: pushes beyond this are dropped (decay resumes via
+/// random ticks).
+pub const LEAVES_QUEUE_MAX: usize = 16384;
+/// Queue pump budget per tick.
+pub const LEAVES_QUEUE_PER_TICK: usize = 512;
+
+pub fn leaves_enqueue(w: &mut World, block_id: u8, leaves_id: u8, pos: BlockPos) {
+    if w.leaves_queue.len() < LEAVES_QUEUE_MAX {
+        w.leaves_queue.push((block_id, leaves_id, pos));
     }
-    if id == leaves_id {
-        let meta = q_meta(w, pos) as i32;
-        if meta != 0 && meta > current {
-            return meta;
+}
+
+fn leaf_has_wood(w: &World, pos: BlockPos) -> bool {
+    if q_meta(w, pos) & 4 != 0 {
+        return true;
+    }
+
+    let mut visited = [0u64; 12];
+
+    #[inline(always)]
+    fn is_visited(v: &[u64; 12], idx: usize) -> bool {
+        (v[idx / 64] & (1u64 << (idx % 64))) != 0
+    }
+
+    #[inline(always)]
+    fn set_visited(v: &mut [u64; 12], idx: usize) {
+        v[idx / 64] |= 1u64 << (idx % 64);
+    }
+
+    let mut queue = [(0i8, 0i8, 0i8, 0u8); 256];
+    let mut head = 0usize;
+    let mut tail = 0usize;
+
+    // Center is (0, 0, 0), idx = 4 * 81 + 4 * 9 + 4 = 364.
+    set_visited(&mut visited, 364);
+    queue[tail] = (0, 0, 0, 0);
+    tail += 1;
+
+    const DIRS: [(i8, i8, i8); 6] = [
+        (1, 0, 0), (-1, 0, 0),
+        (0, 1, 0), (0, -1, 0),
+        (0, 0, 1), (0, 0, -1),
+    ];
+
+    while head < tail {
+        let (cx, cy, cz, dist) = queue[head];
+        head += 1;
+
+        for &(dx, dy, dz) in &DIRS {
+            let nx = cx + dx;
+            let ny = cy + dy;
+            let nz = cz + dz;
+            if !(-4..=4).contains(&nx) || !(-4..=4).contains(&ny) || !(-4..=4).contains(&nz) {
+                continue;
+            }
+            let n_idx = ((nx + 4) as usize) * 81 + ((ny + 4) as usize) * 9 + ((nz + 4) as usize);
+            if is_visited(&visited, n_idx) {
+                continue;
+            }
+            set_visited(&mut visited, n_idx);
+
+            let n_pos = pos.offset(nx as i32, ny as i32, nz as i32);
+            let n_id = q_id_nc(w, n_pos);
+            if n_id == 17 {
+                return true;
+            }
+            if n_id == 18 && dist + 1 < 4 {
+                if tail < queue.len() {
+                    queue[tail] = (nx, ny, nz, dist + 1);
+                    tail += 1;
+                }
+            }
         }
     }
-    current
+
+    false
 }
 
-fn update_leaf_distance(
-    w: &mut World,
-    block_id: u8,
-    leaves_id: u8,
-    pos: BlockPos,
-    guard: &mut i32,
-) {
-    *guard += 1;
-    if *guard > LEAVES_DECAY_GUARD_MAX {
-        return;
+pub fn block_leaves_decay(w: &mut World, pos: BlockPos) {
+    if chance_one_in(w, 20) {
+        u_drop_at(w, DropSpec::new(6, 1, 0), pos, 0.05, 0.15);
     }
-
-    // Server fix: leaves on solid ground don't decay.
-    let mut candidate = 0;
-    if q_solid_nc(w, pos.below()) {
-        candidate = 16;
-    }
-
-    let metadata = q_meta(w, pos) as i32;
-    if metadata == 0 {
-        u_set_meta(w, pos, 1);
-    }
-
-    candidate = leaf_propagate(w, leaves_id, pos.offset(-1, 0, 0), candidate);
-    candidate = leaf_propagate(w, leaves_id, pos.offset(1, 0, 0), candidate);
-    candidate = leaf_propagate(w, leaves_id, pos.offset(0, -1, 0), candidate);
-    candidate = leaf_propagate(w, leaves_id, pos.offset(0, 1, 0), candidate);
-    candidate = leaf_propagate(w, leaves_id, pos.offset(0, 0, -1), candidate);
-    candidate = leaf_propagate(w, leaves_id, pos.offset(0, 0, 1), candidate);
-
-    let mut new_meta = candidate - 1;
-    if new_meta < 10 {
-        new_meta = 1;
-    }
-
-    if new_meta != metadata {
-        u_set_meta(w, pos, new_meta as u8);
-        // Server fix: force neighbors to recalculate, otherwise the
-        // flood-fill chain reaction stops here.
-        u_notify(w, pos, block_id);
-        update_neighbor_leaf(
-            w,
-            block_id,
-            leaves_id,
-            pos.offset(-1, 0, 0),
-            metadata,
-            guard,
-        );
-        update_neighbor_leaf(w, block_id, leaves_id, pos.offset(1, 0, 0), metadata, guard);
-        update_neighbor_leaf(
-            w,
-            block_id,
-            leaves_id,
-            pos.offset(0, -1, 0),
-            metadata,
-            guard,
-        );
-        update_neighbor_leaf(w, block_id, leaves_id, pos.offset(0, 1, 0), metadata, guard);
-        update_neighbor_leaf(
-            w,
-            block_id,
-            leaves_id,
-            pos.offset(0, 0, -1),
-            metadata,
-            guard,
-        );
-        update_neighbor_leaf(w, block_id, leaves_id, pos.offset(0, 0, 1), metadata, guard);
-    }
+    u_set_notify(w, pos, 0);
 }
 
-fn update_neighbor_leaf(
-    w: &mut World,
-    block_id: u8,
-    leaves_id: u8,
-    pos: BlockPos,
-    previous: i32,
-    guard: &mut i32,
-) {
+/// Recompute one leaf's attachment to wood. If disconnected, decay it.
+pub fn block_leaves_recompute(w: &mut World, _block_id: u8, leaves_id: u8, pos: BlockPos) {
     if q_id_nc(w, pos) != leaves_id {
         return;
     }
-    let meta = q_meta(w, pos) as i32;
-    if meta != 0 && meta == previous - 1 {
-        update_leaf_distance(w, block_id, leaves_id, pos, guard);
+    if q_meta(w, pos) & 4 != 0 {
+        return;
+    }
+    if !leaf_has_wood(w, pos) {
+        block_leaves_decay(w, pos);
+    }
+}
+
+/// Drain up to [`LEAVES_QUEUE_PER_TICK`] queued leaf recomputes; the
+/// rest spill into the next tick.
+pub fn leaves_pump(w: &mut World) {
+    let mut budget = LEAVES_QUEUE_PER_TICK;
+    while budget > 0 {
+        let Some((_block_id, leaves_id, pos)) = w.leaves_queue.pop() else {
+            break;
+        };
+        if q_id_nc(w, pos) != leaves_id {
+            // Stale entry (block replaced/decayed since enqueue).
+            continue;
+        }
+        if q_meta(w, pos) & 4 != 0 {
+            continue;
+        }
+        if !leaf_has_wood(w, pos) {
+            block_leaves_decay(w, pos);
+        }
+        budget -= 1;
     }
 }
 
@@ -801,34 +834,30 @@ pub fn block_leaves_added(w: &mut World, block_id: u8, pos: BlockPos) {
     u_schedule(w, pos, block_id, 40);
 }
 
-pub fn block_leaves_neighbor(
-    w: &mut World,
-    block_id: u8,
-    leaves_id: u8,
-    guard: &mut i32,
-    pos: BlockPos,
-) {
-    *guard = 0;
-    update_leaf_distance(w, block_id, leaves_id, pos, guard);
+/// Neighbor change: queue this leaf for decay check on the pump.
+pub fn block_leaves_neighbor(w: &mut World, block_id: u8, leaves_id: u8, pos: BlockPos) {
+    if q_meta(w, pos) & 4 != 0 {
+        return;
+    }
+    leaves_enqueue(w, block_id, leaves_id, pos);
 }
 
 pub fn block_leaves_tick(
     w: &mut World,
-    block_id: u8,
+    _block_id: u8,
     leaves_id: u8,
     drop: DropSpec,
-    guard: &mut i32,
     pos: BlockPos,
 ) {
-    let metadata = q_meta(w, pos) as i32;
-    if metadata == 0 {
-        *guard = 0;
-        update_leaf_distance(w, block_id, leaves_id, pos, guard);
-    } else if metadata == 1 {
+    if q_id_nc(w, pos) != leaves_id {
+        return;
+    }
+    if q_meta(w, pos) & 4 != 0 {
+        return;
+    }
+    if !leaf_has_wood(w, pos) {
         base_drop(w, drop, pos, 1.0);
         u_set_notify(w, pos, 0);
-    } else if chance_one_in(w, 10) {
-        update_leaf_distance(w, block_id, leaves_id, pos, guard);
     }
 }
 
@@ -1271,8 +1300,7 @@ mod tests {
         // 14. Decayed leaves (meta 1) drop and clear on tick.
         let mut w = harness(7);
         stage(&mut w, &[(0, 5, 0, 18, 1)]);
-        let mut guard = 0;
-        block_leaves_tick(&mut w, 18, 18, d(6, 1, 0), &mut guard, p(0, 5, 0));
+        block_leaves_tick(&mut w, 18, 18, d(6, 1, 0), p(0, 5, 0));
         assert_eq!(w.get_block_id(0, 5, 0), 0);
         let drops = items_at(&w, 6);
         assert_eq!(drops.len(), 1, "{drops:?}");

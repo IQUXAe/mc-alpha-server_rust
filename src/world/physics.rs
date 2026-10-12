@@ -3,7 +3,7 @@
 
 use crate::entity::table::{Body, Entity, EntityId};
 use crate::math_helper::floor_double;
-use crate::world::{World, is_replaceable};
+use crate::world::{Material, World, is_replaceable};
 
 impl World {
     /// Spawn a loose item into the table (mirrors the common drop shape:
@@ -66,8 +66,11 @@ impl World {
         // sneaking, trim each horizontal axis in 0.05 steps so the destination
         // still has ground below.
         if was_ground && sneaking {
+            if !mx.is_finite() {
+                mx = 0.0;
+            }
             let mut nx = mx;
-            while nx != 0.0 && self.colliding_boxes(&orig.get_offset_bounding_box(nx, -1.0, 0.0)).is_empty() {
+            while nx != 0.0 && nx.is_finite() && self.colliding_boxes(&orig.get_offset_bounding_box(nx, -1.0, 0.0)).is_empty() {
                 if (-0.05..0.05).contains(&nx) {
                     nx = 0.0;
                 } else if nx > 0.0 {
@@ -77,8 +80,11 @@ impl World {
                 }
             }
             mx = nx;
+            if !mz.is_finite() {
+                mz = 0.0;
+            }
             let mut nz = mz;
-            while nz != 0.0 && self.colliding_boxes(&orig.get_offset_bounding_box(0.0, -1.0, nz)).is_empty() {
+            while nz != 0.0 && nz.is_finite() && self.colliding_boxes(&orig.get_offset_bounding_box(0.0, -1.0, nz)).is_empty() {
                 if (-0.05..0.05).contains(&nz) {
                     nz = 0.0;
                 } else if nz > 0.0 {
@@ -307,11 +313,16 @@ impl World {
         }
     }
 
-    fn cactus_contact(&mut self, id: EntityId) {
-        let bbox = match self.entities.get(id) {
-            Some(Entity::Mob(m)) => m.living.body.bounding_box,
-            Some(Entity::Animal(a)) => a.living.body.bounding_box,
-            Some(Entity::Player(p)) => p.living.body.bounding_box,
+    pub(crate) fn cactus_contact(&mut self, id: EntityId) {
+        let (bbox, is_item, cx, cz) = match self.entities.get(id) {
+            Some(Entity::Mob(m)) => (m.living.body.bounding_box, false, 0, 0),
+            Some(Entity::Animal(a)) => (a.living.body.bounding_box, false, 0, 0),
+            Some(Entity::Player(p)) => (p.living.body.bounding_box, false, 0, 0),
+            Some(Entity::Item(it)) => {
+                let cx = (it.body.pos[0].floor() as i32) >> 4;
+                let cz = (it.body.pos[2].floor() as i32) >> 4;
+                (it.body.bounding_box, true, cx, cz)
+            }
             _ => return,
         };
         let (x0, y0, z0) = (
@@ -328,7 +339,14 @@ impl World {
             for y in y0..=y1 {
                 for z in z0..=z1 {
                     if self.get_block_id(x, y, z) == 81 {
-                        self.attack_living(id, 1, None);
+                        if is_item {
+                            if let Some(Entity::Item(it)) = self.entities.get_mut(id) {
+                                it.body.dead = true;
+                            }
+                            self.mark_chunk_modified(cx, cz);
+                        } else {
+                            self.attack_living(id, 1, None);
+                        }
                         return;
                     }
                 }
@@ -409,7 +427,28 @@ impl World {
     /// Loose-item tick (mirrors `EntityItem::tick`).
     pub fn tick_item(&mut self, id: EntityId) {
         self.entities.tick_base(id);
-        let alive = match self.entities.get_mut(id) {
+        let in_lava = match self.entities.get(id) {
+            Some(Entity::Item(e)) => {
+                let bb = e.body.bounding_box.expand(-0.1, -0.4, -0.1);
+                let (x0, x1) = (bb.min_x.floor() as i32, (bb.max_x + 1.0).floor() as i32);
+                let (y0, y1) = (bb.min_y.floor() as i32, (bb.max_y + 1.0).floor() as i32);
+                let (z0, z1) = (bb.min_z.floor() as i32, (bb.max_z + 1.0).floor() as i32);
+                let mut found = false;
+                'lava: for x in x0..x1 {
+                    for y in y0..y1 {
+                        for z in z0..z1 {
+                            if self.material_at(x, y, z) == Material::LAVA {
+                                found = true;
+                                break 'lava;
+                            }
+                        }
+                    }
+                }
+                found
+            }
+            _ => false,
+        };
+        match self.entities.get_mut(id) {
             Some(Entity::Item(e)) => {
                 if e.pickup_delay > 0 {
                     e.pickup_delay -= 1;
@@ -424,16 +463,36 @@ impl World {
                     self.mark_chunk_modified(cx, cz);
                     return;
                 }
-                e.body.motion[1] -= 0.04;
-                (e.body.motion[0], e.body.motion[1], e.body.motion[2])
+                if in_lava {
+                    e.body.motion[1] = 0.2;
+                    e.body.motion[0] = (self.rng.next_float() - self.rng.next_float()) as f64 * 0.2;
+                    e.body.motion[2] = (self.rng.next_float() - self.rng.next_float()) as f64 * 0.2;
+                } else {
+                    e.body.motion[1] -= 0.04;
+                }
             }
             _ => return,
         };
         self.item_push_out(id);
-        self.move_body(id, alive.0, alive.1, alive.2);
+        let motion = match self.entities.get(id) {
+            Some(Entity::Item(e)) => (e.body.motion[0], e.body.motion[1], e.body.motion[2]),
+            _ => return,
+        };
+        self.move_body(id, motion.0, motion.1, motion.2);
+        let (on_ground, under_block) = match self.entities.get(id) {
+            Some(Entity::Item(e)) if e.body.on_ground => {
+                let bx = e.body.pos[0].floor() as i32;
+                let by = (e.body.bounding_box.min_y.floor() as i32) - 1;
+                let bz = e.body.pos[2].floor() as i32;
+                (true, self.get_block_id(bx, by, bz))
+            }
+            Some(Entity::Item(e)) => (e.body.on_ground, 0),
+            _ => (false, 0),
+        };
         if let Some(Entity::Item(e)) = self.entities.get_mut(id) {
+            let slip = if on_ground && under_block == 79 { 0.98 } else { 0.6 };
             let mut m = crate::entity::misc::ItemMotion { mx: e.body.motion[0], my: e.body.motion[1], mz: e.body.motion[2] };
-            crate::entity::misc::item_damp(e.body.on_ground, &mut m);
+            crate::entity::misc::item_damp_slip(e.body.on_ground, slip, &mut m);
             e.body.motion = [m.mx, m.my, m.mz];
         }
     }
@@ -679,22 +738,40 @@ impl World {
             Some(e) => e.body().pos,
             None => return,
         };
-        let boats: Vec<EntityId> = self
-            .entities
-            .iter()
-            .filter_map(|(&oid, e)| {
-                if oid != id
-                    && !e.body().dead
-                    && matches!(e, Entity::Boat(_))
-                    && (e.body().pos[0] - boat_pos[0]).abs() <= 1.5
-                    && (e.body().pos[2] - boat_pos[2]).abs() <= 1.5
-                {
-                    Some(oid)
-                } else {
-                    None
+        let (cx, cz) = (
+            (boat_pos[0].floor() as i32).div_euclid(16),
+            (boat_pos[2].floor() as i32).div_euclid(16),
+        );
+        let mut boats: Vec<EntityId> = Vec::new();
+        let check_boat = |oid: EntityId, e: &Entity, boats: &mut Vec<EntityId>| {
+            if oid != id
+                && !e.body().dead
+                && matches!(e, Entity::Boat(_))
+                && (e.body().pos[0] - boat_pos[0]).abs() <= 1.5
+                && (e.body().pos[2] - boat_pos[2]).abs() <= 1.5
+            {
+                boats.push(oid);
+            }
+        };
+        if !self.entity_grid.is_empty() {
+            for ncx in (cx - 1)..=(cx + 1) {
+                for ncz in (cz - 1)..=(cz + 1) {
+                    if let Some(cands) = self.entity_grid.get(&(ncx, ncz)) {
+                        for &oid in cands {
+                            if let Some(e) = self.entities.get(oid) {
+                                check_boat(oid, e, &mut boats);
+                            }
+                        }
+                    }
                 }
-            })
-            .collect();
+            }
+            boats.sort_unstable();
+            boats.dedup();
+        } else {
+            for (&oid, e) in self.entities.iter() {
+                check_boat(oid, e, &mut boats);
+            }
+        }
         for oid in boats {
             let (ax, az, bx, bz) = match (self.entities.get(id), self.entities.get(oid)) {
                 (Some(a), Some(b)) => (a.body().pos[0], a.body().pos[2], b.body().pos[0], b.body().pos[2]),
@@ -875,29 +952,47 @@ impl World {
             Some(e) => (e.body().pos, e.body().ridden_by),
             None => return,
         };
-        let shovers: Vec<EntityId> = self
-            .entities
-            .iter()
-            .filter_map(|(&oid, e)| {
-                if oid != id
-                    && oid != rider
-                    && !e.body().dead
-                    && (e.body().pos[0] - cart_pos[0]).abs() <= 1.5
-                    && (e.body().pos[2] - cart_pos[2]).abs() <= 1.5
-                    && matches!(
-                        e,
-                        Entity::Player(_)
-                            | Entity::Mob(_)
-                            | Entity::Animal(_)
-                            | Entity::Minecart(_)
-                    )
-                {
-                    Some(oid)
-                } else {
-                    None
+        let (cx, cz) = (
+            (cart_pos[0].floor() as i32).div_euclid(16),
+            (cart_pos[2].floor() as i32).div_euclid(16),
+        );
+        let mut shovers: Vec<EntityId> = Vec::new();
+        let check_shover = |oid: EntityId, e: &Entity, shovers: &mut Vec<EntityId>| {
+            if oid != id
+                && oid != rider
+                && !e.body().dead
+                && (e.body().pos[0] - cart_pos[0]).abs() <= 1.5
+                && (e.body().pos[2] - cart_pos[2]).abs() <= 1.5
+                && matches!(
+                    e,
+                    Entity::Player(_)
+                        | Entity::Mob(_)
+                        | Entity::Animal(_)
+                        | Entity::Minecart(_)
+                )
+            {
+                shovers.push(oid);
+            }
+        };
+        if !self.entity_grid.is_empty() {
+            for ncx in (cx - 1)..=(cx + 1) {
+                for ncz in (cz - 1)..=(cz + 1) {
+                    if let Some(cands) = self.entity_grid.get(&(ncx, ncz)) {
+                        for &oid in cands {
+                            if let Some(e) = self.entities.get(oid) {
+                                check_shover(oid, e, &mut shovers);
+                            }
+                        }
+                    }
                 }
-            })
-            .collect();
+            }
+            shovers.sort_unstable();
+            shovers.dedup();
+        } else {
+            for (&oid, e) in self.entities.iter() {
+                check_shover(oid, e, &mut shovers);
+            }
+        }
         for oid in shovers {
             let (ax, az, bx, bz, pmx, pmz, is_player_moving) =
                 match (self.entities.get(id), self.entities.get(oid)) {

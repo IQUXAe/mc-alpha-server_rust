@@ -663,7 +663,7 @@ impl World {
     /// id-sorted snapshot from [`World::tick_world`]: no per-entity
     /// allocate-and-sort, and mid-tick spawns wait a tick like C++
     /// (they are not dispatched this tick either).
-    fn push_neighbors(&mut self, id: EntityId, ids: &[EntityId]) {
+    pub(crate) fn push_neighbors(&mut self, id: EntityId, ids: &[EntityId]) {
         let (mask, self_pos, self_pushable) = match self.entities.get(id) {
             Some(e) => (
                 e.body().bounding_box.expand(0.2, 0.0, 0.2),
@@ -674,10 +674,13 @@ impl World {
         };
         let mut others = std::mem::take(&mut self.push_others_scratch);
         others.clear();
-        for oid in ids {
-            let oid = *oid;
+        let (cx, cz) = (
+            (self_pos[0].floor() as i32).div_euclid(16),
+            (self_pos[2].floor() as i32).div_euclid(16),
+        );
+        let check_candidate = |oid: EntityId, others: &mut Vec<(EntityId, f64, f64)>| {
             if oid == id {
-                continue;
+                return;
             }
             if let Some(o) = self.entities.get(oid) {
                 let pushable = matches!(
@@ -688,8 +691,25 @@ impl World {
                     others.push((oid, o.body().pos[0], o.body().pos[2]));
                 }
             }
+        };
+        if !self.entity_grid.is_empty() {
+            for ncx in (cx - 1)..=(cx + 1) {
+                for ncz in (cz - 1)..=(cz + 1) {
+                    if let Some(cands) = self.entity_grid.get(&(ncx, ncz)) {
+                        for &oid in cands {
+                            check_candidate(oid, &mut others);
+                        }
+                    }
+                }
+            }
+            others.sort_by_key(|&(oid, _, _)| oid);
+            others.dedup_by_key(|&mut (oid, _, _)| oid);
+        } else {
+            for &oid in ids {
+                check_candidate(oid, &mut others);
+            }
         }
-        // `ids` arrives sorted, so `others` is already sorted.
+        // Candidates sorted by EntityId for determinism.
         for &(oid, ox, oz) in &others {
             let (sx, sz) = match self.entities.get(id) {
                 Some(e) => (e.body().pos[0], e.body().pos[2]),
@@ -883,7 +903,8 @@ impl World {
     /// (/3 when a target is near) with jump velocity `0.42*size` and
     /// forward lunge, gravity between hops, touch damage `size` inside
     /// `0.6*size`. Slimes take no fall damage and never pathfind.
-    /// The shared `attack_cooldown` doubles as the hop timer.
+    /// The dedicated `hop_cooldown` mirrors `field_769_d` (separate
+    /// from the melee `attackTime`).
     fn tick_slime_hop(&mut self, id: EntityId) {
         let (size, on_ground) = match self.entities.get(id) {
             Some(Entity::Mob(m)) => (m.slime_size.max(1), m.living.body.on_ground),
@@ -901,14 +922,14 @@ impl World {
                     }
                 }
             }
-            let ready = matches!(self.entities.get(id), Some(Entity::Mob(m)) if m.attack_cooldown == 0);
+            let ready = matches!(self.entities.get(id), Some(Entity::Mob(m)) if m.hop_cooldown <= 0);
             if ready {
                 if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
                     let mut wait = 10 + self.rng.next_int_bound(20);
                     if target.is_some() {
                         wait /= 3;
                     }
-                    m.attack_cooldown = wait;
+                    m.hop_cooldown = wait;
                     let yaw_r = m.living.body.yaw * (std::f32::consts::PI / 180.0);
                     let lunge = 0.4 * size as f32;
                     m.living.body.motion[0] = (-yaw_r.sin() * lunge) as f64;
@@ -1066,6 +1087,10 @@ impl World {
         if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
             if m.attack_cooldown > 0 {
                 m.attack_cooldown -= 1;
+            }
+            // Java decrements the slime hop timer only while grounded.
+            if m.living.body.on_ground && m.hop_cooldown > 0 {
+                m.hop_cooldown -= 1;
             }
             if m.burn_ticks <= 0 && m.living.body.fire <= 20 {
                 m.living.body.fire = 0;

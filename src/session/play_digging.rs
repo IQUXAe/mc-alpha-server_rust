@@ -101,6 +101,9 @@ impl PlaySession {
             }
             if bid == 64 {
                 ctx.world.toggle_door(x, y, z);
+                self.send_block_change(ctx.world, x, y, z);
+                self.send_block_change(ctx.world, x, y - 1, z);
+                self.send_block_change(ctx.world, x, y + 1, z);
             } else if bid == 69 {
                 ctx.world.toggle_lever(x, y, z);
             } else if bid == 77 {

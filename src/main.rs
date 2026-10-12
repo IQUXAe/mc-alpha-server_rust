@@ -100,7 +100,9 @@ fn main() {
         libc::signal(libc::SIGTERM, handler);
     }
 
-    let (console_tx, console_rx) = std::sync::mpsc::channel::<String>();
+    // Bounded: a `yes` flood at the terminal must not grow an unbounded
+    // queue; the reader thread simply blocks (backpressure) instead.
+    let (console_tx, console_rx) = std::sync::mpsc::sync_channel::<String>(1024);
     let waker = std::sync::Arc::clone(&server.waker);
     std::thread::Builder::new()
         .name("console".to_string())
@@ -122,6 +124,10 @@ fn main() {
 
     // Fixed-timestep tick loop (20 TPS = 50ms ticks).
     let tick_duration = Duration::from_millis(50);
+    // Backlog ticks per catch-up burst (vanilla-style small catch-up so a
+    // short stall is absorbed, but a long one is dropped instead of
+    // simulated at full speed).
+    const MAX_CATCHUP_TICKS_PER_BURST: u32 = 10;
     let mut next_tick = Instant::now();
     loop {
         while let Ok(line) = console_rx.try_recv() {
@@ -141,15 +147,30 @@ fn main() {
                 );
                 next_tick = now;
             }
-            while next_tick <= now {
+            // Wall-clock allowance for one whole burst. If catch-up has
+            // already cost this much, drop the remaining backlog: running
+            // more backlog ticks would only amplify the stall (each one
+            // re-polls nothing and executes while clients wait).
+            let burst_budget = tick_duration + tick_duration / 2;
+            let mut ran = 0u32;
+            while next_tick <= now && ran < MAX_CATCHUP_TICKS_PER_BURST {
                 next_tick += tick_duration;
                 server.tick();
                 if !server.running {
                     server.shutdown();
                     break;
                 }
+                ran += 1;
                 if next_tick <= now {
                     server.poll_network(Duration::ZERO);
+                }
+                if ran < MAX_CATCHUP_TICKS_PER_BURST
+                    && next_tick <= now
+                    && Instant::now().duration_since(now) > burst_budget
+                {
+                    // Can't keep up: skip the missed ticks entirely.
+                    next_tick = Instant::now() + tick_duration;
+                    break;
                 }
             }
             if !server.running {

@@ -40,7 +40,7 @@ pub trait BlockAccess {
 pub struct WorldAccess<'a> {
     pub chunks: &'a mut HashMap<(i32, i32), Box<Chunk>>,
     pub populating: bool,
-    pub queue: Option<&'a mut Vec<[i32; 3]>>,
+    pub queue: Option<&'a mut crate::world::BlockUpdateQueue>,
 }
 
 impl<'a> BlockAccess for WorldAccess<'a> {

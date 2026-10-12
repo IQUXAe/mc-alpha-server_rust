@@ -468,6 +468,8 @@ pub fn item_block_use(w: &mut ItemUseWorld, place: BlockPlace, pos: BlockPos) ->
     } else if place.block_id == 86 || place.block_id == 91 {
         let meta = ((place.yaw * 4.0 / 360.0 + 0.5).floor() as i32 & 3) as u8;
         w.world.set_meta_at(target, meta);
+    } else if place.block_id == 18 {
+        w.world.set_meta_at(target, 4);
     }
     if let Some(m) = attach_meta {
         w.world.set_meta_at(target, m);

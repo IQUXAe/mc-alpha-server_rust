@@ -397,8 +397,11 @@ impl World {
         let scheduled = t.elapsed();
         let t = Instant::now();
         self.random_block_ticks();
+        // Leaf metadata wave (queue-driven decay propagation).
+        crate::block::ticks::leaves_pump(self);
         let random = t.elapsed();
         let t = Instant::now();
+        self.rebuild_entity_grid();
         let mut ids = std::mem::take(&mut self.tick_ids);
         self.entities.collect_alive_ids(&mut ids);
         ids.sort_unstable();
@@ -454,19 +457,14 @@ impl World {
     /// server tick to broadcast, and inventory/burn changes queue
     /// `tile_updates` (`Packet59ComplexEntity`) and mark the chunk dirty.
     pub fn tick_furnaces(&mut self) {
-        let mut cells: Vec<(i32, i32, i32)> = self
-            .tiles
-            .iter()
-            .filter_map(|(&k, tile)| {
-                if matches!(tile, TileData::Furnace(_)) {
-                    Some(k)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        if self.tiles.furnaces_is_empty() {
+            return;
+        }
+        let mut cells = std::mem::take(&mut self.furnace_cells_scratch);
+        cells.clear();
+        cells.extend(self.tiles.furnace_coords());
         cells.sort_unstable();
-        for (x, y, z) in cells {
+        for &(x, y, z) in &cells {
             // Vanilla only ticks loaded tile entities; unloaded staged
             // chunks wait for recall (also saves CPU on big tile maps).
             let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
@@ -498,6 +496,7 @@ impl World {
                 self.set_block_meta(x, y, z, meta);
             }
         }
+        self.furnace_cells_scratch = cells;
     }
 
     /// Tick dungeon mob spawners (`TileEntityMobSpawner::updateEntity`).
@@ -544,32 +543,34 @@ impl World {
                 self.mark_chunk_modified(cx, cz);
                 continue;
             }
+            let mkind = match entity_id.as_str() {
+                "Skeleton" => Some((true, 2u8)),
+                "Zombie" => Some((true, 1u8)),
+                "Spider" => Some((true, 0u8)),
+                "Creeper" => Some((true, 3u8)),
+                "Sheep" => Some((false, 0u8)),
+                "Pig" => Some((false, 1u8)),
+                "Chicken" => Some((false, 2u8)),
+                "Cow" => Some((false, 3u8)),
+                _ => None,
+            };
+            let Some((hostile, kind_idx)) = mkind else {
+                continue;
+            };
+            let area = crate::aabb::AxisAlignedBB::get_bounding_box(
+                x as f64,
+                y as f64,
+                z as f64,
+                (x + 1) as f64,
+                (y + 1) as f64,
+                (z + 1) as f64,
+            )
+            .expand(8.0, 4.0, 8.0);
+            let alive = self.entities.alive_ids();
+            let mut spawned_any = 0;
             for _ in 0..4 {
-                let mkind = match entity_id.as_str() {
-                    "Skeleton" => Some((true, 2u8)),
-                    "Zombie" => Some((true, 1u8)),
-                    "Spider" => Some((true, 0u8)),
-                    "Creeper" => Some((true, 3u8)),
-                    "Sheep" => Some((false, 0u8)),
-                    "Pig" => Some((false, 1u8)),
-                    "Chicken" => Some((false, 2u8)),
-                    "Cow" => Some((false, 3u8)),
-                    _ => None,
-                };
-                let Some((hostile, kind_idx)) = mkind else {
-                    break;
-                };
-                let area = crate::aabb::AxisAlignedBB::get_bounding_box(
-                    x as f64,
-                    y as f64,
-                    z as f64,
-                    (x + 1) as f64,
-                    (y + 1) as f64,
-                    (z + 1) as f64,
-                )
-                .expand(8.0, 4.0, 8.0);
-                let mut nearby = 0;
-                for oid in self.entities.alive_ids() {
+                let mut nearby = spawned_any;
+                for &oid in &alive {
                     if let Some(e) = self.entities.get(oid) {
                         let same = match (hostile, kind_idx, e) {
                             (true, 0, Entity::Mob(m)) => m.kind == MobKind::Spider,
@@ -610,6 +611,7 @@ impl World {
                 )
                 .is_some()
                 {
+                    spawned_any += 1;
                     let new_delay = (200 + self.rng.next_int_bound(600)) as i16;
                     if let Some(TileData::MobSpawner(s)) = self.tiles.get_mut(&(x, y, z)) {
                         s.delay = new_delay;

@@ -269,40 +269,127 @@ impl World {
 
     /// Swept-box segment test for [`World::attack_los`] (mirrors
     /// `rayHitsSolidBlock`): any collidable cell box clipped by the
-    /// segment strictly inside counts.
+    /// segment strictly inside counts. Walks the cells the segment
+    /// actually passes through (DDA) instead of the whole bounding
+    /// cube, so a 64-block ghast LOS probe costs ~200 cells instead
+    /// of ~262k.
     fn segment_blocked(&self, from: &crate::vec3d::Vec3D, to: &crate::vec3d::Vec3D) -> bool {
-        let min_x = floor_double(from.x_coord.min(to.x_coord));
-        let min_y = floor_double(from.y_coord.min(to.y_coord));
-        let min_z = floor_double(from.z_coord.min(to.z_coord));
-        let max_x = floor_double(from.x_coord.max(to.x_coord));
-        let max_y = floor_double(from.y_coord.max(to.y_coord));
-        let max_z = floor_double(from.z_coord.max(to.z_coord));
+        let coords = [
+            from.x_coord,
+            from.y_coord,
+            from.z_coord,
+            to.x_coord,
+            to.y_coord,
+            to.z_coord,
+        ];
+        if !coords.iter().all(|v| v.is_finite()) {
+            return false;
+        }
         let target_sq = (from.x_coord - to.x_coord).powi(2)
             + (from.y_coord - to.y_coord).powi(2)
             + (from.z_coord - to.z_coord).powi(2);
-        for x in min_x..=max_x {
-            for y in min_y..=max_y {
-                for z in min_z..=max_z {
-                    let bid = self.get_block_id(x, y, z);
-                    if bid == 0 {
-                        continue;
-                    }
-                    let props = block_properties_get(bid as u32);
-                    if !has_collision_box(props.block_type) || !has_collision_id(bid) {
-                        continue;
-                    }
-                    let mut boxes = Vec::with_capacity(2);
-                    self.block_collision_boxes(x, y, z, bid, &mut boxes);
-                    for bb in boxes {
-                        if let Some(hit) = bb.clip(from, to) {
-                            let d = (from.x_coord - hit.hit_vec.x_coord).powi(2)
-                                + (from.y_coord - hit.hit_vec.y_coord).powi(2)
-                                + (from.z_coord - hit.hit_vec.z_coord).powi(2);
-                            if d + 1.0e-6 < target_sq {
-                                return true;
-                            }
-                        }
-                    }
+        if !(target_sq > 0.0) {
+            return false;
+        }
+        let (mut cx, mut cy, mut cz) = (from.x_coord, from.y_coord, from.z_coord);
+        let (mut ccx, mut ccy, mut ccz) =
+            (cx.floor() as i32, cy.floor() as i32, cz.floor() as i32);
+        let (tx, ty, tz) = (
+            to.x_coord.floor() as i32,
+            to.y_coord.floor() as i32,
+            to.z_coord.floor() as i32,
+        );
+        // The bounding-cube version tested the origin cell too.
+        if self.cell_blocks_segment(ccx, ccy, ccz, from, to, target_sq) {
+            return true;
+        }
+        // At most ~3 cells crossed per axis-unit of segment length; 600
+        // steps covers the 64-block melee/ghast ceiling several times.
+        for _ in 0..600 {
+            if ccx == tx && ccy == ty && ccz == tz {
+                return false;
+            }
+            let (mut nbx, mut nby, mut nbz) = (999.0f64, 999.0f64, 999.0f64);
+            if tx > ccx {
+                nbx = ccx as f64 + 1.0;
+            }
+            if tx < ccx {
+                nbx = ccx as f64;
+            }
+            if ty > ccy {
+                nby = ccy as f64 + 1.0;
+            }
+            if ty < ccy {
+                nby = ccy as f64;
+            }
+            if tz > ccz {
+                nbz = ccz as f64 + 1.0;
+            }
+            if tz < ccz {
+                nbz = ccz as f64;
+            }
+            let (dx, dy, dz) = (to.x_coord - cx, to.y_coord - cy, to.z_coord - cz);
+            let (mut sx, mut sy, mut sz) = (999.0f64, 999.0f64, 999.0f64);
+            if nbx != 999.0 && dx.abs() > 1.0e-7 {
+                sx = (nbx - cx) / dx;
+            }
+            if nby != 999.0 && dy.abs() > 1.0e-7 {
+                sy = (nby - cy) / dy;
+            }
+            if nbz != 999.0 && dz.abs() > 1.0e-7 {
+                sz = (nbz - cz) / dz;
+            }
+            if sx < sy && sx < sz {
+                cx = nbx;
+                cy += dy * sx;
+                cz += dz * sx;
+            } else if sy < sz {
+                cx += dx * sy;
+                cy = nby;
+                cz += dz * sy;
+            } else {
+                cx += dx * sz;
+                cy += dy * sz;
+                cz = nbz;
+            }
+            ccx = cx.floor() as i32;
+            ccy = cy.floor() as i32;
+            ccz = cz.floor() as i32;
+            if self.cell_blocks_segment(ccx, ccy, ccz, from, to, target_sq) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// One cell of the [`World::segment_blocked`] walk: does any
+    /// collision box of this cell clip the segment strictly inside?
+    fn cell_blocks_segment(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        from: &crate::vec3d::Vec3D,
+        to: &crate::vec3d::Vec3D,
+        target_sq: f64,
+    ) -> bool {
+        let bid = self.get_block_id(x, y, z);
+        if bid == 0 {
+            return false;
+        }
+        let props = block_properties_get(bid as u32);
+        if !has_collision_box(props.block_type) || !has_collision_id(bid) {
+            return false;
+        }
+        let mut boxes = Vec::with_capacity(2);
+        self.block_collision_boxes(x, y, z, bid, &mut boxes);
+        for bb in boxes {
+            if let Some(hit) = bb.clip(from, to) {
+                let d = (from.x_coord - hit.hit_vec.x_coord).powi(2)
+                    + (from.y_coord - hit.hit_vec.y_coord).powi(2)
+                    + (from.z_coord - hit.hit_vec.z_coord).powi(2);
+                if d + 1.0e-6 < target_sq {
+                    return true;
                 }
             }
         }
@@ -333,9 +420,11 @@ impl World {
         }
     }
 
-    /// Base melee (mirrors `EntityMob::attackTarget`): in-reach, vertical
-    /// overlap, cooldown-gated. Strength by kind (`mob_melee_damage`:
-    /// zombie-line 5, giant 50).
+    /// Base melee (mirrors `EntityMobs.attackEntity`): in-reach + vertical
+    /// overlap, every tick — Java sets `attackTime = 20` for animation but
+    /// never *gates* on it, pacing damage purely through the victim's
+    /// hurt-resist window (fresh hit every ~11 ticks). Strength by kind
+    /// (`mob_melee_damage`: zombie-line 5, giant 50).
     fn zombie_punch(
         &mut self,
         id: EntityId,
@@ -348,15 +437,14 @@ impl World {
             _ => 1,
         };
         let damage = crate::entity::table::mob_melee_damage(kind, size);
-        let (overlap, ready) = match (self.entities.get(id), self.entities.get(target)) {
-            (Some(s), Some(t)) => (
+        let overlap = match (self.entities.get(id), self.entities.get(target)) {
+            (Some(s), Some(t)) => {
                 t.body().bounding_box.max_y > s.body().bounding_box.min_y
-                    && t.body().bounding_box.min_y < s.body().bounding_box.max_y,
-                matches!(s, Entity::Mob(m) if m.attack_cooldown == 0),
-            ),
+                    && t.body().bounding_box.min_y < s.body().bounding_box.max_y
+            }
             _ => return Some(target),
         };
-        if dist < 2.5 && overlap && ready {
+        if dist < 2.5 && overlap {
             if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
                 m.attack_cooldown = 20;
             }
@@ -443,22 +531,44 @@ impl World {
         }
         let mut entity_hit: Option<EntityId> = None;
         let mut cands: Vec<EntityId> = Vec::new();
-        for (&oid, o) in self.entities.iter() {
+        let check_cand = |oid: EntityId, o: &Entity, cands: &mut Vec<EntityId>| {
             if o.body().dead || oid == id || (oid == owner && ticks_in_air < grace_ticks) {
-                continue;
+                return;
             }
             // Projectiles don't hit items, other shots, or vehicles.
             if !matches!(
                 o,
                 Entity::Mob(_) | Entity::Animal(_) | Entity::Player(_)
             ) {
-                continue;
+                return;
             }
             if sweep.intersects_with(&o.body().bounding_box) {
                 cands.push(oid);
             }
+        };
+        if !self.entity_grid.is_empty() {
+            let min_cx = (sweep.min_x.floor() as i32).div_euclid(16);
+            let max_cx = (sweep.max_x.floor() as i32).div_euclid(16);
+            let min_cz = (sweep.min_z.floor() as i32).div_euclid(16);
+            let max_cz = (sweep.max_z.floor() as i32).div_euclid(16);
+            for cx in min_cx..=max_cx {
+                for cz in min_cz..=max_cz {
+                    if let Some(chunk_cands) = self.entity_grid.get(&(cx, cz)) {
+                        for &oid in chunk_cands {
+                            if let Some(o) = self.entities.get(oid) {
+                                check_cand(oid, o, &mut cands);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            for (&oid, o) in self.entities.iter() {
+                check_cand(oid, o, &mut cands);
+            }
         }
         cands.sort_unstable();
+        cands.dedup();
         for oid in cands {
             let (ox, oy, oz) = match self.entities.get(oid) {
                 Some(o) => (o.body().pos[0], o.body().pos[1], o.body().pos[2]),
@@ -1156,7 +1266,6 @@ impl World {
             }
             return Some(target);
         }
-        let ready = matches!(self.entities.get(id), Some(Entity::Mob(m)) if m.attack_cooldown == 0);
         let overlap = match (self.entities.get(id), self.entities.get(target)) {
             (Some(s), Some(t)) => {
                 t.body().bounding_box.max_y > s.body().bounding_box.min_y
@@ -1164,7 +1273,9 @@ impl World {
             }
             _ => false,
         };
-        if dist < 2.5 && overlap && ready {
+        // No cooldown gate: Java's `super.attackEntity` paces through the
+        // victim's hurt-resist window (fresh hit every ~11 ticks).
+        if dist < 2.5 && overlap {
             if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
                 m.attack_cooldown = 20;
             }
@@ -1232,13 +1343,62 @@ impl World {
     }
 
     /// Shared blast (vanilla `Explosion`): entity damage with the Java
-    /// formula `(v*v+v)/2*8*size+1` followed by blast velocity impulse
-    /// (`Explosion.java:103-106`), LOS-gated by the eye raytrace; blocks in
+    /// formula `(v*v+v)/2*8*size+1` scaled by the box-sampled exposure
+    /// factor (`World.func_675_a`), blast velocity impulse
+    /// (`Explosion.java:103-106`); blocks in
     /// the sphere destroyed unless unbreakable, drops at 0.3 via the harvest
     /// table, TNT cells chain-ignite instead of dropping, and queues an
     /// explosion event for `Packet60` (`WorldServer.java:92-96`).
     pub(crate) fn blast(&mut self, px: f64, py: f64, pz: f64, radius: f32, attacker: Option<EntityId>) {
         self.blast_flaming(px, py, pz, radius, attacker, false);
+    }
+
+    /// Exposure of a box to the blast center (port of `World.func_675_a`,
+    /// `Explosion.java:96-100`): sample points across the entity's
+    /// bounding box, raytrace each to the center, return the fraction of
+    /// unobstructed rays. Vanilla pacing for wall-hugging victims.
+    fn explosion_exposure(&self, center: [f64; 3], bbox: &crate::aabb::AxisAlignedBB) -> f32 {
+        let dims = [
+            bbox.max_x - bbox.min_x,
+            bbox.max_y - bbox.min_y,
+            bbox.max_z - bbox.min_z,
+        ];
+        if !dims.iter().all(|v| v.is_finite()) || dims.iter().any(|&v| v < 0.0) {
+            return 1.0;
+        }
+        let step = [
+            (1.0 / (dims[0] * 2.0 + 1.0)) as f32,
+            (1.0 / (dims[1] * 2.0 + 1.0)) as f32,
+            (1.0 / (dims[2] * 2.0 + 1.0)) as f32,
+        ];
+        if step.iter().any(|&s| !(s > 0.0) || !s.is_finite()) {
+            return 1.0;
+        }
+        let (mut seen, mut total) = (0u32, 0u32);
+        let mut fx = 0.0f32;
+        while fx <= 1.0 {
+            let mut fy = 0.0f32;
+            while fy <= 1.0 {
+                let mut fz = 0.0f32;
+                while fz <= 1.0 {
+                    let sx = bbox.min_x + dims[0] * fx as f64;
+                    let sy = bbox.min_y + dims[1] * fy as f64;
+                    let sz = bbox.min_z + dims[2] * fz as f64;
+                    if self.ray_trace_face([sx, sy, sz], center, false).is_none() {
+                        seen += 1;
+                    }
+                    total += 1;
+                    fz += step[2];
+                }
+                fy += step[1];
+            }
+            fx += step[0];
+        }
+        if total == 0 {
+            1.0
+        } else {
+            seen as f32 / total as f32
+        }
     }
 
     /// Shared blast with optional fire ignition (`Explosion.field_12031_a`,
@@ -1252,16 +1412,17 @@ impl World {
         attacker: Option<EntityId>,
         is_flaming: bool,
     ) {
-        // Phase 1: living victims in the blast radius.
+        // Phase 1: living victims and items in the blast radius.
         let mut victims: Vec<EntityId> = Vec::new();
         for oid in self.entities.alive_ids() {
-            let is_living = match self.entities.get(oid) {
+            let is_victim = match self.entities.get(oid) {
                 Some(Entity::Mob(m)) if !m.living.body.dead => true,
                 Some(Entity::Animal(a)) if !a.living.body.dead => true,
                 Some(Entity::Player(p)) if !p.living.body.dead => true,
+                Some(Entity::Item(it)) if !it.body.dead => true,
                 _ => false,
             };
-            if !is_living {
+            if !is_victim {
                 continue;
             }
             if Some(oid) == attacker {
@@ -1280,8 +1441,13 @@ impl World {
         }
         victims.sort_unstable();
         for v in victims {
-            let (qx, qy, qz, h) = match self.entities.get(v) {
-                Some(e) => (e.body().pos[0], e.body().pos[1], e.body().pos[2], e.body().height as f64),
+            let (qx, qy, qz, bbox) = match self.entities.get(v) {
+                Some(e) => (
+                    e.body().pos[0],
+                    e.body().pos[1],
+                    e.body().pos[2],
+                    e.body().bounding_box,
+                ),
                 None => continue,
             };
             let (dx, dy, dz) = (qx - px, qy - py, qz - pz);
@@ -1289,23 +1455,34 @@ impl World {
             if d > radius {
                 continue;
             }
-            // LOS from the blast center to the victim's eye.
-            if !self.ray_trace_clear([px, py, pz], [qx, qy + h * 0.85, qz]) {
-                continue;
-            }
-            let vfrac = 1.0 - d / radius;
-            let damage = ((vfrac as f64 * vfrac as f64 + vfrac as f64) / 2.0 * 8.0 * radius as f64 + 1.0) as i32;
-            // Explosion.java:103-106: attackEntity runs FIRST, then the blast
-            // velocity is added on top of post-hit motion.
-            self.attack_living(v, damage.max(1), attacker);
-            let len = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
-            if let Some(e) = self.entities.get_mut(v) {
-                let b = e.body_mut();
-                b.motion[0] += dx / len * vfrac as f64;
-                b.motion[1] += dy / len * vfrac as f64;
-                b.motion[2] += dz / len * vfrac as f64;
-                let m = b.motion;
-                self.velocity_events.push((v, m));
+            // Exposure factor (`World.func_675_a`): fraction of sample
+            // rays from the blast center onto the victim's box that are
+            // unobstructed. Replaces the old single-eye all-or-nothing
+            // gate; a fully shielded victim takes the vanilla minimum
+            // of 1 damage and no blast velocity, like Explosion.java.
+            let exposure = self.explosion_exposure([px, py, pz], &bbox) as f64;
+            let var41 = (1.0 - d as f64 / radius as f64) * exposure;
+            let damage = ((var41 * var41 + var41) / 2.0 * 8.0 * radius as f64 + 1.0) as i32;
+            let is_item = matches!(self.entities.get(v), Some(Entity::Item(_)));
+            if is_item {
+                if damage > 0 {
+                    if let Some(e) = self.entities.get_mut(v) {
+                        e.body_mut().dead = true;
+                    }
+                }
+            } else {
+                // Explosion.java:103-106: attackEntity runs FIRST, then the blast
+                // velocity is added on top of post-hit motion.
+                self.attack_living(v, damage.max(1), attacker);
+                let len = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
+                if let Some(e) = self.entities.get_mut(v) {
+                    let b = e.body_mut();
+                    b.motion[0] += dx / len * var41;
+                    b.motion[1] += dy / len * var41;
+                    b.motion[2] += dz / len * var41;
+                    let m = b.motion;
+                    self.velocity_events.push((v, m));
+                }
             }
         }
         // Phase 2: 16x16x16 border raycasting with per-step resistance attenuation (Explosion.java:46-75).
@@ -1653,21 +1830,43 @@ impl World {
         let mut best = block_hit.map(|(_, _, _, _, _, d)| d).unwrap_or(f64::MAX);
         let mut entity_hit: Option<EntityId> = None;
         let mut cands: Vec<EntityId> = Vec::new();
-        for (&oid, o) in self.entities.iter() {
+        let check_arrow_cand = |oid: EntityId, o: &Entity, cands: &mut Vec<EntityId>| {
             if o.body().dead || oid == id {
-                continue;
+                return;
             }
             if matches!(o, Entity::Arrow(_)) {
-                continue;
+                return;
             }
             if oid == shooter && ticks_in_air < 5 {
-                continue;
+                return;
             }
             if sweep.intersects_with(&o.body().bounding_box) {
                 cands.push(oid);
             }
+        };
+        if !self.entity_grid.is_empty() {
+            let min_cx = (sweep.min_x.floor() as i32).div_euclid(16);
+            let max_cx = (sweep.max_x.floor() as i32).div_euclid(16);
+            let min_cz = (sweep.min_z.floor() as i32).div_euclid(16);
+            let max_cz = (sweep.max_z.floor() as i32).div_euclid(16);
+            for cx in min_cx..=max_cx {
+                for cz in min_cz..=max_cz {
+                    if let Some(chunk_cands) = self.entity_grid.get(&(cx, cz)) {
+                        for &oid in chunk_cands {
+                            if let Some(o) = self.entities.get(oid) {
+                                check_arrow_cand(oid, o, &mut cands);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            for (&oid, o) in self.entities.iter() {
+                check_arrow_cand(oid, o, &mut cands);
+            }
         }
         cands.sort_unstable();
+        cands.dedup();
         for oid in cands {
             let expanded = match self.entities.get(oid) {
                 Some(o) => o.body().bounding_box.expand(0.3, 0.3, 0.3),
@@ -1720,24 +1919,19 @@ impl World {
         let horizontal = sqrt_float((mx * mx + mz * mz) as f32);
         let mut yaw = (mx.atan2(mz) * 180.0 / std::f64::consts::PI) as f32;
         let mut pitch = (my.atan2(horizontal as f64) * 180.0 / std::f64::consts::PI) as f32;
-        let (mut prev_yaw, mut prev_pitch) = match self.entities.get(id) {
+        let (prev_yaw, prev_pitch) = match self.entities.get(id) {
             Some(Entity::Arrow(a)) => (a.body.prev_yaw, a.body.prev_pitch),
             _ => return,
         };
-        while pitch - prev_pitch < -180.0 {
-            prev_pitch -= 360.0;
-        }
-        while pitch - prev_pitch >= 180.0 {
-            prev_pitch -= 360.0;
-        }
-        while yaw - prev_yaw < -180.0 {
-            prev_yaw -= 360.0;
-        }
-        while yaw - prev_yaw >= 180.0 {
-            prev_yaw -= 360.0;
-        }
-        pitch = prev_pitch + (pitch - prev_pitch) * 0.2;
-        yaw = prev_yaw + (yaw - prev_yaw) * 0.2;
+        // Wrap the deltas into [-180, 180) in one step. Java loops
+        // (`prev += 360` while `delta >= 180`, `prev -= 360` while
+        // `delta < -180`) reach exactly this fixed point; the branch-free
+        // wrap is equivalent without the loops, so a >180 jump (bounce,
+        // explosion impulse) can never spin the tick thread forever.
+        let dyaw = (yaw - prev_yaw + 180.0).rem_euclid(360.0) - 180.0;
+        let dpitch = (pitch - prev_pitch + 180.0).rem_euclid(360.0) - 180.0;
+        pitch = prev_pitch + dpitch * 0.2;
+        yaw = prev_yaw + dyaw * 0.2;
         // Water drag (local probe; the env slice will own `in_water`).
         let probe = match self.entities.get(id) {
             Some(Entity::Arrow(a)) => a.body.bounding_box.expand(0.0, -0.4, 0.0),

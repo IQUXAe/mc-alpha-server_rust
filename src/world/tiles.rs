@@ -58,6 +58,7 @@ type ChunkTileMap = std::collections::HashMap<(i32, i32), Vec<(i32, i32, i32)>>;
 pub struct WorldTiles {
     tiles: std::collections::HashMap<(i32, i32, i32), TileData>,
     by_chunk: ChunkTileMap,
+    furnaces: std::collections::HashSet<(i32, i32, i32)>,
 }
 
 pub struct TileEntry<'a> {
@@ -86,6 +87,11 @@ impl WorldTiles {
         if !chunk_vec.contains(&pos) {
             chunk_vec.push(pos);
         }
+        if matches!(data, TileData::Furnace(_)) {
+            self.furnaces.insert(pos);
+        } else {
+            self.furnaces.remove(&pos);
+        }
         self.tiles.insert(pos, data)
     }
 
@@ -97,12 +103,14 @@ impl WorldTiles {
                 self.by_chunk.remove(&chunk_pos);
             }
         }
+        self.furnaces.remove(pos);
         self.tiles.remove(pos)
     }
 
     pub fn remove_chunk(&mut self, cx: i32, cz: i32) {
         if let Some(cells) = self.by_chunk.remove(&(cx, cz)) {
             for pos in cells {
+                self.furnaces.remove(&pos);
                 self.tiles.remove(&pos);
             }
         }
@@ -151,6 +159,7 @@ impl WorldTiles {
     pub fn clear(&mut self) {
         self.tiles.clear();
         self.by_chunk.clear();
+        self.furnaces.clear();
     }
 
     pub fn retain<F>(&mut self, mut f: F)
@@ -159,10 +168,22 @@ impl WorldTiles {
     {
         self.tiles.retain(&mut f);
         self.by_chunk.clear();
-        for &pos in self.tiles.keys() {
+        self.furnaces.clear();
+        for (&pos, tile) in &self.tiles {
             let chunk_pos = (pos.0.div_euclid(16), pos.2.div_euclid(16));
             self.by_chunk.entry(chunk_pos).or_default().push(pos);
+            if matches!(tile, TileData::Furnace(_)) {
+                self.furnaces.insert(pos);
+            }
         }
+    }
+
+    pub fn furnaces_is_empty(&self) -> bool {
+        self.furnaces.is_empty()
+    }
+
+    pub fn furnace_coords(&self) -> impl Iterator<Item = &(i32, i32, i32)> {
+        self.furnaces.iter()
     }
 
     pub fn entry(&mut self, pos: (i32, i32, i32)) -> TileEntry<'_> {
