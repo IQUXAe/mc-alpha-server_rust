@@ -71,58 +71,60 @@ pub fn parse_console_command(cmd: &str) -> ParsedCommand {
     let mut arg2 = "";
     let mut count = 1;
 
-    if lower.starts_with("help") || lower.starts_with("?") {
+    let verb = lower.split_whitespace().next().unwrap_or("");
+
+    if verb == "help" || verb == "?" {
         tag = ConsoleCommandTag::Help;
-    } else if lower.starts_with("list") {
+    } else if verb == "list" {
         tag = ConsoleCommandTag::List;
-    } else if lower.starts_with("stop") {
+    } else if verb == "stop" {
         tag = ConsoleCommandTag::Stop;
-    } else if lower.starts_with("save-all") {
+    } else if verb == "save-all" {
         tag = ConsoleCommandTag::SaveAll;
-    } else if lower.starts_with("save-off") {
+    } else if verb == "save-off" {
         tag = ConsoleCommandTag::SaveOff;
-    } else if lower.starts_with("save-on") {
+    } else if verb == "save-on" {
         tag = ConsoleCommandTag::SaveOn;
-    } else if lower.starts_with("op ") {
+    } else if verb == "op" {
         tag = ConsoleCommandTag::Op;
-        arg1 = arg_of(cmd, 3);
-    } else if lower.starts_with("deop ") {
+        arg1 = arg_of(cmd, 2);
+    } else if verb == "deop" {
         tag = ConsoleCommandTag::Deop;
-        arg1 = arg_of(cmd, 5);
-    } else if lower.starts_with("ban-ip ") {
-        tag = ConsoleCommandTag::BanIp;
-        arg1 = arg_of(cmd, 7);
-    } else if lower.starts_with("pardon-ip ") {
-        tag = ConsoleCommandTag::PardonIp;
-        arg1 = arg_of(cmd, 10);
-    } else if lower.starts_with("ban ") {
-        tag = ConsoleCommandTag::Ban;
         arg1 = arg_of(cmd, 4);
-    } else if lower.starts_with("pardon ") {
+    } else if verb == "ban-ip" {
+        tag = ConsoleCommandTag::BanIp;
+        arg1 = arg_of(cmd, 6);
+    } else if verb == "pardon-ip" {
+        tag = ConsoleCommandTag::PardonIp;
+        arg1 = arg_of(cmd, 9);
+    } else if verb == "ban" {
+        tag = ConsoleCommandTag::Ban;
+        arg1 = arg_of(cmd, 3);
+    } else if verb == "pardon" {
         tag = ConsoleCommandTag::Pardon;
-        arg1 = arg_of(cmd, 7);
-    } else if lower.starts_with("kick ") {
+        arg1 = arg_of(cmd, 6);
+    } else if verb == "kick" {
         tag = ConsoleCommandTag::Kick;
-        arg1 = arg_of(cmd, 5);
-    } else if lower.starts_with("tp ") {
+        arg1 = arg_of(cmd, 4);
+    } else if verb == "tp" {
         tag = ConsoleCommandTag::Tp;
-        let rest = arg_of(cmd, 3);
+        let rest = arg_of(cmd, 2);
         let (p1, p2) = split_two(rest);
         arg1 = p1;
         arg2 = p2;
-    } else if lower.starts_with("say ") {
+    } else if verb == "say" {
         tag = ConsoleCommandTag::Say;
-        arg1 = arg_of(cmd, 4);
-    } else if lower.starts_with("tell ") {
+        arg1 = arg_of(cmd, 3);
+    } else if verb == "tell" {
         tag = ConsoleCommandTag::Tell;
-        let rest = arg_of(cmd, 5);
+        let rest = arg_of(cmd, 4);
         let (target, msg) = split_two(rest);
         arg1 = target;
         arg2 = msg;
-    } else if lower.starts_with("give ") {
+    } else if verb == "give" {
         // Java: give <player> <id> [count]. count clamps 1..64.
         tag = ConsoleCommandTag::Give;
-        let rest = arg_of(cmd, 5);
+        let rest = arg_of(cmd, 4);
         let (target, tail) = split_two(rest);
         arg1 = target;
         let (id_str, count_str) = split_two(tail);
@@ -132,9 +134,9 @@ pub fn parse_console_command(cmd: &str) -> ParsedCommand {
                 count = c.clamp(1, 64);
             }
         }
-    } else if lower.starts_with("summon ") {
+    } else if verb == "summon" {
         tag = ConsoleCommandTag::Summon;
-        let rest = arg_of(cmd, 7);
+        let rest = arg_of(cmd, 6);
         let (entity_name, tail) = split_two(rest);
         arg1 = entity_name;
 
@@ -152,10 +154,10 @@ pub fn parse_console_command(cmd: &str) -> ParsedCommand {
                 }
             }
         }
-    } else if lower == "boost" || lower.starts_with("boost ") {
+    } else if verb == "boost" {
         tag = ConsoleCommandTag::Boost;
         arg1 = arg_of(cmd, 5);
-    } else if lower == "seed" {
+    } else if verb == "seed" {
         tag = ConsoleCommandTag::Seed;
     }
 
@@ -177,5 +179,20 @@ mod tests {
         assert_eq!(cmd.tag, ConsoleCommandTag::Seed);
         let cmd_upper = parse_console_command("SEED");
         assert_eq!(cmd_upper.tag, ConsoleCommandTag::Seed);
+    }
+
+    #[test]
+    fn test_strict_prefix() {
+        let cmd = parse_console_command("stopEverything");
+        assert_eq!(cmd.tag, ConsoleCommandTag::Unknown);
+        let cmd = parse_console_command("stop");
+        assert_eq!(cmd.tag, ConsoleCommandTag::Stop);
+        let cmd = parse_console_command("listUsers");
+        assert_eq!(cmd.tag, ConsoleCommandTag::Unknown);
+        let cmd = parse_console_command("list");
+        assert_eq!(cmd.tag, ConsoleCommandTag::List);
+        let cmd = parse_console_command("op notch");
+        assert_eq!(cmd.tag, ConsoleCommandTag::Op);
+        assert_eq!(cmd.arg1, "notch");
     }
 }

@@ -10,16 +10,13 @@ use crate::session::pkt_kick;
 impl Server {
     /// Owning world for an entity id (portal travelers keep their id,
     /// only the world moves; unknown ids read as overworld).
-    fn world_dim_of(&self, eid: EntityId) -> i32 {
-        if self.hell.is_some() {
-            if self.world.entities.get(eid).is_some() {
-                0
-            } else {
-                -1
+    pub(crate) fn world_dim_of(&self, eid: EntityId) -> i32 {
+        if let Some(h) = self.hell.as_ref() {
+            if h.entities.get(eid).is_some() {
+                return -1;
             }
-        } else {
-            self.world.dimension
         }
+        self.world.dimension
     }
 
     /// Log a player out (mirrors `playerLoggedOut`): unmount both ways,

@@ -222,17 +222,13 @@ pub fn chat_command(
             return;
         }
         let count = count.clamp(1, 64);
-        if item_id <= 0 || item_id >= 32000 {
-            say(sess, "Invalid item id");
-            return;
-        }
-        if item_id < 256 {
-            let registered =
-                (0..256).contains(&item_id) && World::native_registered(item_id as u8);
-            if !registered {
+        if item_id <= 0 || item_id >= 32000 || !crate::item_data::item_is_valid(item_id) {
+            if (1..256).contains(&item_id) {
                 say(sess, &format!("Unknown block id: {item_id}"));
-                return;
+            } else {
+                say(sess, "Invalid item id");
             }
+            return;
         }
         if let Some(e) = world.entities.get(sess.player) {
             let (px, py, pz) = (e.body().pos[0], e.body().pos[1], e.body().pos[2]);

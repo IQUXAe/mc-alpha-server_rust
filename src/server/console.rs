@@ -15,16 +15,9 @@ use crate::session::{pkt_chat, pkt_kick};
 impl Server {
     /// Kick a player by name (mirrors the console `kick`).
     fn kick_player(&mut self, name: &str, reason: &str) -> bool {
-        let lower = admin_normalize(name);
-        let found =
-            self.players
-                .iter()
-                .find_map(|(eid, cid)| match self.world.entities.get(*eid) {
-                    Some(Entity::Player(p)) if admin_normalize(&p.username) == lower => {
-                        Some((*eid, *cid))
-                    }
-                    _ => None,
-                });
+        let found = self
+            .entity_named(name)
+            .and_then(|eid| self.players.get(&eid).copied().map(|cid| (eid, cid)));
         match found {
             Some((eid, cid)) => {
                 if let Some(mut sess) = self.sessions.remove(&cid) {
@@ -130,14 +123,34 @@ impl Server {
                     (None, _) => log::info(&format!("Can't find user {arg1}. No tp.")),
                     (_, None) => log::info(&format!("Can't find user {arg2}. No tp.")),
                     (Some(e1), Some(e2)) => {
-                        let (pos, yaw, pitch) = match self.world.entities.get(e2) {
-                            Some(e) => (e.body().pos, e.body().yaw, e.body().pitch),
-                            None => return,
+                        let dim2 = self.world_dim_of(e2);
+                        let dim1 = self.world_dim_of(e1);
+                        let (pos, yaw, pitch) = {
+                            let world2 = if dim2 == -1 {
+                                match self.hell.as_ref() {
+                                    Some(h) => h,
+                                    None => &self.world,
+                                }
+                            } else {
+                                &self.world
+                            };
+                            match world2.entities.get(e2) {
+                                Some(e) => (e.body().pos, e.body().yaw, e.body().pitch),
+                                None => return,
+                            }
                         };
                         if let Some(cid) = self.players.get(&e1).copied() {
                             if let Some(sess) = self.sessions.get_mut(&cid) {
                                 if let SessionState::Play(play, _) = &mut sess.state {
-                                    play.teleport_to(&mut self.world, e1, pos, yaw, pitch);
+                                    let target_world = if dim1 == -1 {
+                                        match self.hell.as_mut() {
+                                            Some(h) => h,
+                                            None => &mut self.world,
+                                        }
+                                    } else {
+                                        &mut self.world
+                                    };
+                                    play.teleport_to(target_world, e1, pos, yaw, pitch);
                                 }
                             }
                         }
@@ -199,7 +212,10 @@ impl Server {
             .keys()
             .filter_map(|eid| match self.world.entities.get(*eid) {
                 Some(Entity::Player(p)) => Some(p.username.clone()),
-                _ => None,
+                _ => match self.hell.as_ref().and_then(|h| h.entities.get(*eid)) {
+                    Some(Entity::Player(p)) => Some(p.username.clone()),
+                    _ => None,
+                },
             })
             .collect();
         names.sort();
@@ -266,13 +282,26 @@ impl Server {
         // the client merges the stack itself. No full `Packet5` resync:
         // it fought the client's 1-second bank sync and could erase
         // in-flight GUI edits.
-        let pos = self
-            .world
-            .entities
-            .get(eid)
-            .map(|e| (e.body().pos[0], e.body().pos[1], e.body().pos[2]));
+        let dim = self.world_dim_of(eid);
+        let pos = if dim == -1 {
+            self.hell
+                .as_ref()
+                .and_then(|h| h.entities.get(eid))
+                .map(|e| (e.body().pos[0], e.body().pos[1], e.body().pos[2]))
+        } else {
+            self.world
+                .entities
+                .get(eid)
+                .map(|e| (e.body().pos[0], e.body().pos[1], e.body().pos[2]))
+        };
         if let Some((px, py, pz)) = pos {
-            self.world.spawn_item_entity(id, count, 0, px, py, pz);
+            if dim == -1 {
+                if let Some(hell) = self.hell.as_mut() {
+                    hell.spawn_item_entity(id, count, 0, px, py, pz);
+                }
+            } else {
+                self.world.spawn_item_entity(id, count, 0, px, py, pz);
+            }
             log::info(&format!("Gave {count} of {id} to {target}."));
         }
     }
