@@ -574,8 +574,7 @@
 
     #[test]
     fn test_held_switch_finds_slot_35() {
-        // Selecting the stack parked in slot 35 points current at it
-        // instead of fabricating a ghost and wiping the slot.
+        // Hotbar (0..9) matching: stack in bank slot 35 is ignored, current becomes -1.
         let mut w = floor_world();
         let ops = no_ops();
         let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
@@ -592,8 +591,22 @@
             Entity::Player(p) => (p.inventory.current, p.inventory.main[35].map(|s| s.item_id)),
             _ => unreachable!(),
         };
-        assert_eq!(cur, 35);
+        assert_eq!(cur, -1);
         assert_eq!(kept, Some(323));
+
+        // When item is in hotbar slot 5, it matches:
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[5] = Some(crate::inventory::ItemStack::new(323, 1, 0));
+        }
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockItemSwitch { entity_id: player, item_id: 323 },
+        );
+        let cur = match w.entities.get(player).unwrap() {
+            Entity::Player(p) => p.inventory.current,
+            _ => unreachable!(),
+        };
+        assert_eq!(cur, 5);
     }
 
     #[test]
@@ -666,12 +679,12 @@
             Entity::Player(p) => assert_eq!(p.inventory.current, 2),
             _ => unreachable!(),
         }
-        // Saved id gone: current is unchanged (never forced to 35) and selected_stack is None.
+        // Saved id gone: current becomes -1 (never stale) and selected_stack is None.
         sess.restore_held(&mut w, 9999);
         assert_eq!(sess.held_id, 9999);
         assert!(sess.selected_stack(&w).is_none());
         match w.entities.get(player).unwrap() {
-            Entity::Player(p) => assert_eq!(p.inventory.current, 2),
+            Entity::Player(p) => assert_eq!(p.inventory.current, -1),
             _ => unreachable!(),
         }
         // Non-positive id resets to the first slot.
@@ -735,7 +748,7 @@
         use std::io::Read;
         let mut c = crate::chunk::Chunk::new(0, 0);
         c.set_block_id(1, 64, 1, 1);
-        let payload = c.map_compressed();
+        let payload = c.map_compressed().expect("compression must succeed");
         let pkt = pkt_map_chunk(0, 0, 0, 16, 128, 16, &payload);
         let len = i32::from_be_bytes(pkt[14..18].try_into().unwrap());
         assert_eq!(len as usize, payload.len());
@@ -1538,7 +1551,7 @@
         let ops = no_ops();
         let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
         let mut sess = PlaySession::new(player);
-        sess.teleport_wait = Some([3.5, 64.0, 4.5]);
+        sess.teleport_wait = Some(([3.5, 64.0, 4.5], 0));
         let mut bc = Vec::new();
 
         // NaN position during teleport_wait must kick immediately with "Illegal position":
@@ -2793,7 +2806,7 @@
         let ops = no_ops();
         let player = spawn_player(&mut w, "Steve", 10.0, 64.0, 10.0);
         let mut sess = PlaySession::new(player);
-        sess.teleport_wait = Some([10.0, 64.0, 10.0]);
+        sess.teleport_wait = Some(([10.0, 64.0, 10.0], 0));
         let mut bc = Vec::new();
 
         // An in-flight packet with slight x offset (e.g. 10.005) must not prematurely clear teleport_wait:
@@ -2942,4 +2955,34 @@
             assert_eq!(p.inventory.main[4].map(|s| s.item_id), Some(9));
         }
     }
+
+    #[test]
+    fn test_player_opens_wooden_door_by_hand() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        // Wooden door at (3, 64, 3) lower, (3, 65, 3) upper
+        w.set_block_id(3, 64, 3, 64);
+        w.set_block_meta(3, 64, 3, 0); // closed
+        w.set_block_id(3, 65, 3, 64);
+        w.set_block_meta(3, 65, 3, 8); // closed upper
+
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        // Right-click lower door half with empty hand (item_id: -1, direction: 1)
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::Place { item_id: -1, x: 3, y: 64, z: 3, direction: 1 },
+        );
+
+        // Verification: Door lower and upper halves must now be OPEN
+        assert_eq!(w.get_block_meta(3, 64, 3) & 4, 4, "Lower half must be open");
+        assert_eq!(w.get_block_meta(3, 65, 3) & 4, 4, "Upper half must be open");
+
+        // Player must have received Packet53 block change
+        let has_block_change = sess.outbox.iter().any(|p| p.first() == Some(&53));
+        assert!(has_block_change, "Must send Packet53 BlockChange to player");
+    }
+
 

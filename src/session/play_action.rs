@@ -327,7 +327,7 @@ const CHAT_ALLOWED: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQR
         }
         self.last = [sx, sy, sz];
         self.has_moved = false;
-        self.teleport_wait = Some([sx, sy, sz]);
+        self.teleport_wait = Some(([sx, sy, sz], 0));
         // Packet order mirrors C++: respawn, health, teleport, inventory.
         self.outbox.push(pkt_respawn());
         self.outbox.push(pkt_teleport(sx, sy, sz, 0.0, 0.0));

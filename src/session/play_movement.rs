@@ -40,10 +40,20 @@ impl PlaySession {
         // client has not echoed the teleported spot, its packets are
         // stale pre-teleport traffic (e.g. the death position right after
         // respawn) and are held, never kicked or applied.
-        if let Some(t) = self.teleport_wait {
+        if let Some((t, age)) = self.teleport_wait {
             if x == t[0] && z == t[2] && (y - t[1]) * (y - t[1]) < 0.01 {
                 self.teleport_wait = None;
             } else {
+                // A modified/buggy client that never sends the echo would
+                // hold ALL movement forever (silent soft-lock). After
+                // ~5 s of held packets, give up on the echo and resume
+                // normal validation from the claimed position.
+                let age = age.saturating_add(1);
+                if age >= 100 {
+                    self.teleport_wait = None;
+                } else {
+                    self.teleport_wait = Some((t, age));
+                }
                 return None;
             }
         }
@@ -105,6 +115,7 @@ impl PlaySession {
                 stance: by + 1.62,
                 on_ground,
                 is_in_water: in_water,
+                on_ladder: Self::on_ladder(ctx.world, me),
                 fall_distance: fall,
             };
             let res = movement_validate(&input);
@@ -124,6 +135,7 @@ impl PlaySession {
             .get(me)
             .map(|e| e.body().fall_distance)
             .unwrap_or(0.0);
+        let on_ladder = Self::on_ladder(ctx.world, me);
         let input = MovementInput {
             from_x: bx,
             from_y: by,
@@ -134,6 +146,7 @@ impl PlaySession {
             stance,
             on_ground,
             is_in_water: in_water,
+            on_ladder,
             fall_distance: fall,
         };
         let res = movement_validate(&input);
@@ -225,6 +238,7 @@ impl PlaySession {
             stance,
             on_ground,
             is_in_water: in_water,
+            on_ladder,
             fall_distance: fall2,
         };
         let fall_res = movement_validate(&fall_input);

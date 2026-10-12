@@ -35,7 +35,9 @@ pub struct PlaySession {
     /// `NetServerHandler`): while set, movement packets that do not match
     /// the teleported spot are stale pre-teleport traffic and are held,
     /// never kicked (this is what made respawn disconnect far travelers).
-    pub teleport_wait: Option<[f64; 3]>,
+    /// The counter bounds the hold: a client that never echoes must not
+    /// freeze the player forever.
+    pub teleport_wait: Option<([f64; 3], u32)>,
     /// Portal dwell ticks: standing in a portal block (90) counts up,
     /// travel fires at [`crate::server::PORTAL_DWELL_TICKS`]. Reset when
     /// leaving the portal or switching dimensions.
@@ -101,7 +103,7 @@ impl PlaySession {
         if id == self.player {
             self.last = [x, y, z];
             self.has_moved = false;
-            self.teleport_wait = Some([x, y, z]);
+            self.teleport_wait = Some(([x, y, z], 0));
         }
         self.outbox.push(pkt_teleport(x, y, z, yaw, pitch));
     }
@@ -161,13 +163,18 @@ impl PlaySession {
             return;
         }
         if let Some(Entity::Player(p)) = world.entities.get_mut(self.player) {
-            for i in 0..36 {
+            let mut found = false;
+            for i in 0..9 {
                 if let Some(s) = p.inventory.main[i] {
                     if s.item_id == self.held_id {
                         p.inventory.current = i as i32;
+                        found = true;
                         break;
                     }
                 }
+            }
+            if !found {
+                p.inventory.current = -1;
             }
         }
     }
@@ -221,6 +228,23 @@ impl PlaySession {
             }
         }
         false
+    }
+
+    /// Ladder probe for movement fall bookkeeping (mirrors
+    /// `EntityLiving.isOnLadder` sampling at the bounding-box base).
+    pub(crate) fn on_ladder(world: &World, id: EntityId) -> bool {
+        let (px, min_y, pz) = match world.entities.get(id) {
+            Some(e) => (
+                e.body().pos[0],
+                e.body().bounding_box.min_y,
+                e.body().pos[2],
+            ),
+            None => return false,
+        };
+        let (x, y, z) = (floor_double(px), floor_double(min_y), floor_double(pz));
+        const LADDER_BLOCK_ID: u8 = 65;
+        world.get_block_id(x, y, z) == LADDER_BLOCK_ID
+            || world.get_block_id(x, y + 1, z) == LADDER_BLOCK_ID
     }
 
     /// Eye-in-water probe (mirrors vanilla `Entity::isInsideOfMaterial(Material.water)`).
@@ -348,7 +372,10 @@ impl PlaySession {
                 self.gone = true;
                 Some(SessionOutcome::Gone)
             }
-            _ => None,
+            _ => {
+                crate::server_log::debug(&format!("unexpected packet during play: {pkt:?}"));
+                None
+            }
         }
     }
 }

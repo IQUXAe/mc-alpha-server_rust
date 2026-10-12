@@ -19,6 +19,7 @@ pub struct MovementInput {
     pub stance: f64,
     pub on_ground: bool,
     pub is_in_water: bool,
+    pub on_ladder: bool,
     pub fall_distance: f32,
 }
 
@@ -71,8 +72,13 @@ pub fn movement_validate(input: &MovementInput) -> MovementResult {
         };
     }
 
-    // 2. Check world boundary
-    if inp.to_x.abs() > MAX_COORDINATE || inp.to_z.abs() > MAX_COORDINATE {
+    // 2. Check world boundary. Y included: the old X/Z-only check let a
+    // client park at y = 1e300 forever (finite, valid stance), stuck
+    // in an unreachable position with saturating tracker encodes.
+    if inp.to_x.abs() > MAX_COORDINATE
+        || inp.to_y.abs() > MAX_COORDINATE
+        || inp.to_z.abs() > MAX_COORDINATE
+    {
         return MovementResult {
             status: MovementValidationStatus::IllegalPosition as u8,
             new_fall_distance: inp.fall_distance,
@@ -122,6 +128,15 @@ pub fn movement_validate(input: &MovementInput) -> MovementResult {
         };
     }
 
+    // Java `EntityLiving.onUpdate`: standing on a ladder resets the
+    // fall distance every tick — sliding down or stepping off
+    // mid-height must never accumulate a drop (the old port only reset
+    // for mobs, so players took full-height fall damage at ladder
+    // bottoms).
+    if inp.on_ladder {
+        fall_distance = 0.0;
+    }
+
     if inp.on_ground {
         if fall_distance > 0.0 {
             let dmg = (fall_distance - 3.0).ceil() as i32;
@@ -158,6 +173,7 @@ mod tests {
             stance: 65.62,
             on_ground: true,
             is_in_water: false,
+            on_ladder: false,
             fall_distance: 0.0,
         };
         let res = movement_validate(&input);
@@ -178,6 +194,7 @@ mod tests {
             stance: 64.0, // difference = 0.0 < 0.1
             on_ground: true,
             is_in_water: false,
+            on_ladder: false,
             fall_distance: 0.0,
         };
         let res = movement_validate(&input);
@@ -196,6 +213,7 @@ mod tests {
             stance: 65.62,
             on_ground: true,
             is_in_water: false,
+            on_ladder: false,
             fall_distance: 0.0,
         };
         let res = movement_validate(&input);
@@ -214,6 +232,7 @@ mod tests {
             stance: 65.62,
             on_ground: true,
             is_in_water: false,
+            on_ladder: false,
             fall_distance: 0.0,
         };
         let res = movement_validate(&input);
@@ -239,6 +258,7 @@ mod tests {
                 stance: ny + 1.62,
                 on_ground: false,
                 is_in_water: false,
+                on_ladder: false,
                 fall_distance: fall,
             };
             let res = movement_validate(&input);
@@ -260,6 +280,7 @@ mod tests {
             stance: 65.62,
             on_ground: true,
             is_in_water: false,
+            on_ladder: false,
             fall_distance: fall,
         };
         let res2 = movement_validate(&input_landing);
@@ -280,6 +301,7 @@ mod tests {
             stance: 65.62,
             on_ground: true,
             is_in_water: true,
+            on_ladder: false,
             fall_distance: 20.0,
         };
         let res = movement_validate(&input);
@@ -300,6 +322,7 @@ mod tests {
             stance: 65.62,
             on_ground: false,
             is_in_water: false,
+            on_ladder: false,
             fall_distance: 0.0,
         };
         let res = movement_validate(&input);
@@ -320,6 +343,7 @@ mod tests {
             stance: 61.62,
             on_ground: false,
             is_in_water: true,
+            on_ladder: false,
             fall_distance: 5.0,
         };
         let res = movement_validate(&input);
@@ -341,6 +365,7 @@ mod tests {
             stance: 65.62,
             on_ground: false,
             is_in_water: false,
+            on_ladder: false,
             fall_distance: 0.0,
         };
         let res = movement_validate(&input);
