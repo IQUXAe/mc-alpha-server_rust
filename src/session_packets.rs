@@ -87,8 +87,9 @@ pub fn pkt_block_change(x: i32, y: i32, z: i32, block_type: u8, meta: u8) -> Vec
 fn put_slot(buf: &mut Vec<u8>, s: Option<ItemStack>) {
     match s {
         Some(v) if v.count > 0 => {
+            debug_assert!(v.count <= 127);
             put_i16(buf, v.item_id as i16);
-            put_i8(buf, v.count as i8);
+            put_i8(buf, v.count.clamp(1, 127) as i8);
             put_i16(buf, v.damage as i16);
         }
         // Vanilla writes empty slots as a bare -1 (2 bytes, no
@@ -131,6 +132,16 @@ pub fn pkt_add_to_inventory(item_id: i16, count: i8, damage: i16) -> Vec<u8> {
 }
 
 pub fn pkt_tile_entity(x: i32, y: i32, z: i32, nbt_gz: &[u8]) -> Vec<u8> {
+    // The client reads the length as an unsigned short; a larger blob
+    // would desync the stream. Unreachable in practice (tile NBT is
+    // capped at 32 KB raw), but guard instead of corrupting the wire.
+    if nbt_gz.len() > 65535 {
+        crate::server_log::severe(&format!(
+            "tile entity packet at ({x},{y},{z}) too large: {} bytes; dropping",
+            nbt_gz.len()
+        ));
+        return Vec::new();
+    }
     let mut b = Vec::with_capacity(13 + nbt_gz.len());
     put_u8(&mut b, 59);
     crate::network::put_i32(&mut b, x);
@@ -394,7 +405,10 @@ pub fn tile_packet(x: i32, y: i32, z: i32, tile: &TileData) -> Vec<u8> {
     }
     let mut bytes = Vec::new();
     write_root(&mut bytes, "", &comp).ok();
-    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    // Level 1: this packet is re-serialized for every burning furnace
+    // every tick (the GUI progress must animate); level 6 gzip cost 3-4x
+    // more CPU on these tiny payloads for negligible size wins.
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(1));
     enc.write_all(&bytes).ok();
     let gz = enc.finish().ok().unwrap_or_default();
     pkt_tile_entity(x, y, z, &gz)

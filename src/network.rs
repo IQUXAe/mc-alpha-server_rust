@@ -1,12 +1,13 @@
 use std::io::Read;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlotData {
     pub item_id: i16,
     pub count: i8,
     pub damage: i16,
 }
 
+#[derive(Clone, Debug)]
 pub enum PacketData {
     KeepAlive,
     Login {
@@ -468,11 +469,18 @@ pub(crate) fn put_f32(buf: &mut Vec<u8>, v: f32) { buf.extend_from_slice(&v.to_b
 pub(crate) fn put_f64(buf: &mut Vec<u8>, v: f64) { buf.extend_from_slice(&v.to_bits().to_be_bytes()); }
 pub(crate) fn put_str(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
-    // All wire strings here are short (usernames <=16, chat <=100);
-    // clamp instead of wrapping on absurd input to keep the stream in sync.
-    let len = bytes.len().min(i16::MAX as usize) as i16;
-    put_i16(buf, len);
-    buf.extend_from_slice(&bytes[..len as usize]);
+    // All wire strings here are short (usernames <=16, chat <=100).
+    // Clamp instead of wrapping on absurd input to keep the stream in
+    // sync, and cut at a UTF-8 character boundary so the truncated
+    // string stays valid for the client's readUTF.
+    let mut len = bytes.len().min(i16::MAX as usize);
+    if len < bytes.len() {
+        while len > 0 && (bytes[len] & 0xC0) == 0x80 {
+            len -= 1;
+        }
+    }
+    put_i16(buf, len as i16);
+    buf.extend_from_slice(&bytes[..len]);
 }
 /// Encode one outbound tracker packet (field order mirrors the vanilla
 /// readers byte-for-byte; see the audit against the java/ sources).
