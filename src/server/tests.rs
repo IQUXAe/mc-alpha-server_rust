@@ -454,6 +454,27 @@
     }
 
     #[test]
+    fn despawned_item_is_destroyed_for_watchers() {
+        let mut srv = mk_server("");
+        let (mut client, _cid) = pair(&mut srv);
+        join(&mut srv, &mut client, "Steve");
+        let eid = *srv.players.keys().next().unwrap();
+        let pos = match srv.world.entities.get(eid) {
+            Some(e) => e.body().pos,
+            _ => panic!("player row"),
+        };
+        let iid = srv.world.spawn_item_entity(35, 1, 0, pos[0], pos[1], pos[2]);
+        // Client receives Packet21 (PickupSpawn)
+        assert_eq!(pump_match(&mut client, &mut srv, &|p| p.0 == 21).0, 21);
+        // Fast-forward item age to despawn limit (6000)
+        if let Some(Entity::Item(it)) = srv.world.entities.get_mut(iid) {
+            it.age = 6000;
+        }
+        // Client must receive Packet29 (DestroyEntity)
+        assert_eq!(pump_match(&mut client, &mut srv, &|p| p.0 == 29).0, 29);
+    }
+
+    #[test]
     fn fall_damage_pushes_health_packet() {
         //Like a 9-block fall: 6 damage must reach the HUD as 0x08 on the
         // next tick (mirrors the Packet8 diff-check in EntityPlayerMP).
@@ -706,15 +727,17 @@
             "ignition tick must send Packet59 once (not duplicated by drain_tile_updates): {flip_pkts:?}"
         );
         assert_eq!(srv.world.get_block_id(fx, 64, fz), 62);
-        // Tick again and verify dynamic progress updates (Packet59ComplexEntity, id 59)
-        // arrive followed by a Packet51MapChunk (id 51) subchunk that preserves facing metadata.
+        // Tick again and verify dynamic progress updates (Packet59ComplexEntity, id 59).
+        // No Packet51 subchunk is sent on cooking ticks: light does not change
+        // while a furnace cooks (61/62 share opacity/emission), and the flip-time
+        // send through the block-update drain already covers the relight.
         srv.tick();
         let mut cook_pkts = Vec::new();
         while let Some((id, _)) = next_pkt_opt(&mut a, Duration::from_millis(100)) {
             cook_pkts.push(id);
         }
         assert!(cook_pkts.contains(&59), "cooking ticks must stream Packet59 updates: {cook_pkts:?}");
-        assert!(cook_pkts.contains(&51), "cooking Packet59 must be followed by Packet51 subchunk: {cook_pkts:?}");
+        assert!(!cook_pkts.contains(&51), "cooking ticks must not re-send identical light subchunks: {cook_pkts:?}");
     }
 
     #[test]
@@ -1151,7 +1174,7 @@
         srv.world.unloaded.insert((50, 50), Box::new(clean));
         srv.flush_unloaded_chunks();
         assert!(
-            srv.store.get_chunk(50, 50).is_none(),
+            srv.store.get_chunk(50, 50).ok().flatten().is_none(),
             "clean spilled chunk must not be written to LMDB store"
         );
 
@@ -1166,6 +1189,7 @@
         let blob = srv
             .store
             .get_chunk(20, 20)
+            .expect("chunk store read must not fail")
             .expect("chunk with live item entity must be saved by save_world");
         let decoded = crate::persist::decode_chunk_blob(&blob, 20, 20).unwrap();
         assert_eq!(decoded.items.len(), 1, "saved chunk blob must contain the live item entity");
@@ -1462,11 +1486,13 @@
             srv.world.unloaded.insert((100 + i, 100), Box::new(c));
         }
         assert_eq!(srv.world.unloaded.len(), 100);
-        // With limit 4, clean drops are paced up to limit * 8 = 32 per call
+        // The budget is split across dimensions: the overworld gets
+        // `limit / 2 = 2`, so clean drops are paced up to half*8 = 16 per
+        // call.
+        srv.flush_unloaded_chunks_limit(4);
+        assert_eq!(srv.world.unloaded.len(), 100 - 16);
         srv.flush_unloaded_chunks_limit(4);
         assert_eq!(srv.world.unloaded.len(), 100 - 32);
-        srv.flush_unloaded_chunks_limit(4);
-        assert_eq!(srv.world.unloaded.len(), 100 - 64);
     }
 
     #[test]

@@ -165,6 +165,8 @@ impl Server {
             auto_save_active: false,
             auto_save_queue: std::collections::VecDeque::new(),
             auto_save_saved: 0,
+            closing_sessions: Vec::new(),
+            last_tile_packets: HashMap::new(),
         })
     }
 
@@ -192,18 +194,29 @@ impl Server {
     }
 
     /// Load chunk from store with negative caching (avoids repeatedly querying LevelDB for missing chunks).
+    /// Disk errors stay retryable (never cached); corrupt blobs are
+    /// quarantined inside `load_chunk_from` and only then count as
+    /// missing.
     pub(crate) fn load_chunk(&mut self, cx: i32, cz: i32) -> bool {
         if self.store_missing.contains(&(cx, cz)) {
             return false;
         }
-        let ok = self.world.load_chunk_from(&mut self.store, cx, cz);
-        if !ok {
-            if self.store_missing.len() >= 16384 {
-                self.store_missing.clear();
+        match self.world.load_chunk_from(&mut self.store, cx, cz) {
+            crate::persist::LoadChunkStatus::Loaded => true,
+            crate::persist::LoadChunkStatus::Missing => {
+                if self.store_missing.len() >= 16384 {
+                    let mut n = 0;
+                    self.store_missing.retain(|_| { n += 1; n % 2 == 0 });
+                }
+                self.store_missing.insert((cx, cz));
+                false
             }
-            self.store_missing.insert((cx, cz));
+            crate::persist::LoadChunkStatus::Failed => {
+                // I/O error: do NOT negative-cache — regeneration would
+                // overwrite whatever is on disk once it comes back.
+                false
+            }
         }
-        ok
     }
 
     /// Fresh-world spawn search (mirrors `findSafeSpawnPoint`: random
@@ -211,7 +224,11 @@ impl Server {
     /// the native RNG stream stands in for the C++ mt19937).
     fn find_safe_spawn(world: &mut World) {
         let (mut sx, mut sz) = (0, 0);
+        let start = std::time::Instant::now();
         for _ in 0..10000 {
+            if start.elapsed() > std::time::Duration::from_secs(5) {
+                break;
+            }
             world.ensure_chunk(sx, sz);
             let mut found = None;
             for x in 0..16 {
@@ -237,6 +254,9 @@ impl Server {
             sx += world.rng_next_int(3) - 1;
             sz += world.rng_next_int(3) - 1;
         }
+        world.ensure_chunk(0, 0);
+        let y = world.get_height_value(0, 0).max(64);
+        world.spawn = [0, y, 0];
     }
 
     /// Queue a console line (mirrors `addCommand`).
@@ -253,7 +273,8 @@ impl Server {
 
     /// Accept an already-constructed mio socket.
     pub fn accept_mio(&mut self, stream: mio::net::TcpStream) -> Option<ConnId> {
-        let remote = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+        // No peer address = no per-IP limiting/banning possible; drop.
+        let remote = stream.peer_addr().map(|a| a.to_string()).ok()?;
         let conn = Conn::from_mio(stream, remote);
         self.register_conn(conn)
     }
@@ -267,6 +288,10 @@ impl Server {
             return None;
         }
         let ip = ip_of(&conn.remote).to_string();
+        if ip.is_empty() {
+            // Peer address unavailable: cannot enforce any IP policy.
+            return None;
+        }
         if self.login_rate_limited(&ip) {
             log::info(&format!("Login rate limit reached for IP {ip}"));
             return None;
@@ -278,7 +303,7 @@ impl Server {
         }
         let id = self.next_conn;
         self.next_conn += 1;
-        *self.ip_count.entry(ip).or_insert(0) += 1;
+        *self.ip_count.entry(ip.clone()).or_insert(0) += 1;
         // A failed poll registration used to be swallowed (`let _`),
         // leaving a ghost session that held its fd but was never polled.
         // Drop the connection and roll the IP slot back instead.
@@ -300,7 +325,8 @@ impl Server {
             return None;
         }
         let login = LoginSession::new(self.settings.online_mode)
-            .with_auth_url(self.settings.auth_server_url.clone());
+            .with_auth_url(self.settings.auth_server_url.clone())
+            .with_remote(ip.clone());
         self.sessions.insert(id, Session { conn, state: SessionState::Login(login), idle: 0 });
         Some(id)
     }
@@ -413,19 +439,44 @@ impl Session {
 }
 
 impl Server {
-    /// Drop a removed session: close the socket, release its IP slot.
+    /// Drop a removed session: release its IP slot and move the socket to
+    /// the closing graveyard. The kick reason bytes must actually reach
+    /// the client — dropping the fd with the reason still queued made
+    /// clients show "Connection lost" instead of the real reason (e.g.
+    /// "You logged in from another location").
     pub(crate) fn remove_session(&mut self, _cid: ConnId, sess: Session) {
         let ip = ip_of(&sess.conn.remote).to_string();
         let _ = sess.conn.with_stream_mut(|s| {
             self.poll.registry().deregister(s)
         });
+        // Marks closing + one flush attempt; `pump_closing_sessions`
+        // keeps writing until drained, then FINs the socket.
         sess.conn.close();
+        self.closing_sessions.push((sess, 0));
         if let Some(n) = self.ip_count.get_mut(&ip) {
             *n -= 1;
             if *n <= 0 {
                 self.ip_count.remove(&ip);
             }
         }
+    }
+
+    /// Drain kick bytes of removed sessions: flush until the queue is
+    /// empty (then the socket FINs itself) or the grace window expires.
+    pub(crate) fn pump_closing_sessions(&mut self) {
+        use crate::session::transport::CLOSING_SESSION_MAX_TICKS;
+        let mut keep = Vec::with_capacity(self.closing_sessions.len());
+        for (sess, mut age) in self.closing_sessions.drain(..) {
+            sess.conn.flush_outbound();
+            if sess.conn.is_closed() || age >= CLOSING_SESSION_MAX_TICKS {
+                // Drop: socket closes, kernel still delivers the bytes
+                // that made it into the send buffer.
+            } else {
+                age += 1;
+                keep.push((sess, age));
+            }
+        }
+        self.closing_sessions = keep;
     }
 
     /// Send and drain tracker bytes without dropping the caller buffer capacity.
@@ -632,22 +683,78 @@ impl Server {
             if dropped {
                 login.on_drop();
             }
-            for p in packets {
+            let mut remaining_packets = Vec::new();
+            let mut accepted_username = None;
+            let mut done = false;
+
+            let mut iter = packets.into_iter();
+            while let Some(p) = iter.next() {
+                // Pre-verification gates: banned names/IPs are rejected
+                // before spawning the HTTP verifier, so a banned flood
+                // can no longer pin every global verification slot and
+                // lock legitimate logins out ("Too many login attempts").
+                if let PacketData::Login { username, .. } = &p {
+                    let mut uname = username.as_str().to_owned();
+                    while uname.ends_with(['\0', '\r', '\n', ' ']) {
+                        uname.pop();
+                    }
+                    let ip_banned = self.banned_ips.contains(ip_of(&sess.conn.remote));
+                    let name_banned = !uname.is_empty()
+                        && uname.len() <= 16
+                        && uname.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                        && self.banned_players.contains(&admin_normalize(&uname));
+                    if ip_banned || name_banned {
+                        login.kick_now(if ip_banned {
+                            "Your IP address is banned from this server!"
+                        } else {
+                            "You are banned from this server!"
+                        });
+                        break;
+                    }
+                }
                 login.on_packet(p);
+                match login.poll() {
+                    Some(LoginEvent::Accepted { username }) => {
+                        accepted_username = Some(username);
+                        remaining_packets.extend(iter);
+                        break;
+                    }
+                    Some(LoginEvent::Done) => {
+                        done = true;
+                        break;
+                    }
+                    None => {}
+                }
             }
-            let event = login.poll();
+            if accepted_username.is_none() && !done {
+                match login.poll() {
+                    Some(LoginEvent::Accepted { username }) => {
+                        accepted_username = Some(username);
+                    }
+                    Some(LoginEvent::Done) => {
+                        done = true;
+                    }
+                    None => {}
+                }
+            }
             sess.flush();
-            match event {
-                None => {
-                    self.sessions.insert(cid, sess);
-                }
-                Some(LoginEvent::Done) => {
-                    self.remove_session(cid, sess);
-                }
-                Some(LoginEvent::Accepted { username }) => {
-                    self.join(cid, sess, username);
-                }
+            if done {
+                self.remove_session(cid, sess);
+                return;
             }
+            if let Some(username) = accepted_username {
+                // Authenticated: lift the login-phase receive cap.
+                sess.conn
+                    .set_recv_limit(crate::session::transport::RECV_QUEUE_MAX_BYTES);
+                self.join(cid, sess, username);
+                if !remaining_packets.is_empty() {
+                    if let Some(s) = self.sessions.remove(&cid) {
+                        self.play_leg(cid, s, remaining_packets, dropped);
+                    }
+                }
+                return;
+            }
+            self.sessions.insert(cid, sess);
             return;
         }
         self.play_leg(cid, sess, packets, dropped);
@@ -1014,7 +1121,7 @@ impl Server {
             play.travel_cooldown = crate::server::PORTAL_COOLDOWN_TICKS;
             play.last = [tx, ty, tz];
             play.has_moved = false;
-            play.teleport_wait = Some([tx, ty, tz]);
+            play.teleport_wait = Some(([tx, ty, tz], 0));
             // In Alpha 1.2.6 SMP, we must NOT send Packet1Login during portal travel:
             // NetClientHandler.handleLogin unconditionally displays GuiDownloadTerrain,
             // but field_1210_g is already true from the initial connection, so
@@ -1144,7 +1251,7 @@ impl Server {
             play.travel_cooldown = crate::server::PORTAL_COOLDOWN_TICKS;
             play.last = [sx, sy, sz];
             play.has_moved = false;
-            play.teleport_wait = Some([sx, sy, sz]);
+            play.teleport_wait = Some(([sx, sy, sz], 0));
             play.outbox.push(crate::session::pkt_respawn());
             play.outbox.push(crate::session::pkt_spawn_pos(sp[0], sp[1], sp[2]));
             play.outbox.push(crate::session::pkt_teleport(sx, sy, sz, 0.0, 0.0));

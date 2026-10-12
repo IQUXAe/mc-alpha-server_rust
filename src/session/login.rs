@@ -8,13 +8,21 @@ use crate::session_packets::{pkt_handshake, pkt_kick};
 
 // ---- login state machine (mirrors NetLoginHandler) ----
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 pub const DEFAULT_AUTH_URL: &str =
     "http://session.betacraft.uk/game/checkserver.jsp?user={user}&serverId={serverId}";
 
 static ACTIVE_VERIFICATIONS: AtomicUsize = AtomicUsize::new(0);
 const MAX_CONCURRENT_VERIFICATIONS: usize = 8;
+/// Concurrent HTTP verifications a single IP may run (login floods from
+/// a botnet all pass the per-IP *connection* cap but used to be able to
+/// pin every global verifier slot and lock out legitimate logins).
+const MAX_CONCURRENT_VERIFICATIONS_PER_IP: usize = 2;
+static ACTIVE_VERIFICATIONS_PER_IP: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Session verification: the default hits the BetaCraft / custom check endpoint
 /// (blocking HTTP, run on a bounded worker thread); tests inject a stub.
@@ -90,6 +98,8 @@ pub struct LoginSession {
     online_mode: bool,
     server_id: String,
     username: String,
+    /// Remote IP (empty in tests): gates concurrent verifications per IP.
+    remote_ip: String,
     ticks: u32,
     state: LoginState,
     verifying: bool,
@@ -112,6 +122,7 @@ impl LoginSession {
             online_mode,
             server_id,
             username: String::new(),
+            remote_ip: String::new(),
             ticks: 0,
             state: LoginState::WaitHandshake,
             verifying: false,
@@ -127,6 +138,18 @@ impl LoginSession {
     pub fn with_verify(mut self, f: VerifyFn) -> Self {
         self.verify = Some(f);
         self
+    }
+
+    /// Set the remote IP for per-IP verification gating.
+    pub fn with_remote(mut self, ip: String) -> Self {
+        self.remote_ip = ip;
+        self
+    }
+
+    /// Queue a kick for a server-side rejection (ban lists etc.) and end
+    /// the handshake without touching the verifier pool.
+    pub fn kick_now(&mut self, reason: &str) {
+        self.kick(reason);
     }
 
     /// Set the authentication URL template.
@@ -202,9 +225,27 @@ impl LoginSession {
                 if self.server_id.is_empty() || self.server_id == "-" {
                     self.server_id = format!("{:x}", nonce_i64() as u64);
                 }
+                // Per-IP concurrent cap: real connections carry the IP;
+                // tests leave it empty and skip the gate.
+                if !self.remote_ip.is_empty() {
+                    let per_ip = ACTIVE_VERIFICATIONS_PER_IP
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    let n = per_ip.get(&self.remote_ip).copied().unwrap_or(0);
+                    if n >= MAX_CONCURRENT_VERIFICATIONS_PER_IP {
+                        self.kick("Too many login attempts, please try again shortly");
+                        return;
+                    }
+                }
                 if ACTIVE_VERIFICATIONS.load(Ordering::Relaxed) >= MAX_CONCURRENT_VERIFICATIONS {
                     self.kick("Too many login attempts, please try again shortly");
                     return;
+                }
+                if !self.remote_ip.is_empty() {
+                    let mut per_ip = ACTIVE_VERIFICATIONS_PER_IP
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    *per_ip.entry(self.remote_ip.clone()).or_insert(0) += 1;
                 }
                 ACTIVE_VERIFICATIONS.fetch_add(1, Ordering::SeqCst);
                 self.verifying = true;
@@ -214,16 +255,28 @@ impl LoginSession {
                 let verify = self.verify.take();
                 let sid = self.server_id.clone();
                 let uname = username.clone();
+                let guard_ip = self.remote_ip.clone();
                 if thread::Builder::new()
                     .name(format!("login-verify-{uname}"))
                     .spawn(move || {
-                        struct VerifyGuard;
+                        struct VerifyGuard {
+                            ip: String,
+                        }
                         impl Drop for VerifyGuard {
                             fn drop(&mut self) {
                                 ACTIVE_VERIFICATIONS.fetch_sub(1, Ordering::SeqCst);
+                                let mut per_ip = ACTIVE_VERIFICATIONS_PER_IP
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner());
+                                if let Some(n) = per_ip.get_mut(&self.ip) {
+                                    *n -= 1;
+                                    if *n == 0 {
+                                        per_ip.remove(&self.ip);
+                                    }
+                                }
                             }
                         }
-                        let _guard = VerifyGuard;
+                        let _guard = VerifyGuard { ip: guard_ip };
                         let res = match verify {
                             Some(f) => f(&uname, &sid),
                             None => Err("no verifier".to_string()),
@@ -235,6 +288,7 @@ impl LoginSession {
                     // Thread spawn failed (EMFILE/OOM): release the slot or
                     // the counter leaks and all future logins get rejected.
                     ACTIVE_VERIFICATIONS.fetch_sub(1, Ordering::SeqCst);
+                    self.release_per_ip_slot();
                     self.verifying = false;
                     self.verify_rx = None;
                     self.kick("Login service unavailable, try again shortly");
@@ -245,7 +299,25 @@ impl LoginSession {
                 self.on_drop();
             }
             _ => {
+                crate::server_log::debug(&format!("unexpected packet during login: {pkt:?}"));
                 self.kick("Protocol error");
+            }
+        }
+    }
+
+    /// Release this session's per-IP verification reservation
+    /// (spawn-failure path; the worker thread's guard handles the rest).
+    fn release_per_ip_slot(&mut self) {
+        if self.remote_ip.is_empty() {
+            return;
+        }
+        let mut per_ip = ACTIVE_VERIFICATIONS_PER_IP
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(n) = per_ip.get_mut(&self.remote_ip) {
+            *n -= 1;
+            if *n == 0 {
+                per_ip.remove(&self.remote_ip);
             }
         }
     }
@@ -304,17 +376,39 @@ impl LoginSession {
     }
 }
 
-/// Cheap nonce (server ids need uniqueness, not determinism).
+/// Unpredictable nonce for the session-server `serverId`. Drawn from the
+/// OS CSPRNG (/dev/urandom) when available, with a time/pid/ASLR-address
+/// mix as fallback. The old implementation was wall-clock nanoseconds
+/// through a fixed invertible xorshift: on coarse-clock systems two
+/// concurrent logins could receive the *same* serverId, and a stalled
+/// handshake released in the same window could inherit a victim's
+/// verified session.
 fn nonce_i64() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    use std::io::Read;
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let mut buf = [0u8; 8];
+        if f.read_exact(&mut buf).is_ok() {
+            return i64::from_ne_bytes(buf);
+        }
+    }
+    // Fallback: wall clock x process counter x ASLR'd static address,
+    // splitmix64-finalized. Not predictable from the clock alone.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x9E3779B97F4A7C15);
-    let mut x = nanos | 1;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
+    let addr = std::ptr::addr_of!(COUNTER) as u64;
+    let mut x = nanos
+        ^ addr.rotate_left(17)
+        ^ counter.wrapping_mul(0x9E3779B97F4A7C15);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58476D1CE4E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D049BB133111EB);
+    x ^= x >> 31;
     x as i64
 }
 

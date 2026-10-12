@@ -73,6 +73,19 @@ impl Server {
             match world.entities.get(id) {
                 None => scratch.gone_ids.push(id),
                 Some(Entity::Player(p)) if p.living.body.dead => scratch.gone_ids.push(id),
+                Some(Entity::Mob(m))
+                    if m.living.body.dead && (m.living.health > 0 || m.living.death_time >= 20) =>
+                {
+                    scratch.gone_ids.push(id)
+                }
+                Some(Entity::Animal(a))
+                    if a.living.body.dead && (a.living.health > 0 || a.living.death_time >= 20) =>
+                {
+                    scratch.gone_ids.push(id)
+                }
+                Some(e) if e.body().dead && !matches!(e, Entity::Mob(_) | Entity::Animal(_)) => {
+                    scratch.gone_ids.push(id)
+                }
                 Some(_) => {}
             }
         }
@@ -499,21 +512,25 @@ impl Server {
         } else {
             return;
         };
-        let players_by_chunk = &self.players_by_chunk;
         for [x, y, z] in world.take_tile_updates() {
             if !self.sent_tiles_scratch.insert((dim, x, y, z)) {
                 continue;
             }
             if let Some(tile) = world.tiles.get(&(x, y, z)).copied() {
                 let bytes = crate::session_packets::tile_packet(x, y, z, &tile);
+                // Identical payload => watchers already have this exact
+                // state; skip the re-broadcast entirely. Cooking furnaces
+                // keep changing every tick (CookTime), so they stay
+                // dynamic — idle repeats (re-marked chests, furnace flips
+                // that altered nothing) cost nothing now.
+                let key = (dim, x, y, z);
+                if let Some(prev) = self.last_tile_packets.get(&key) {
+                    if *prev == bytes {
+                        continue;
+                    }
+                }
+                self.last_tile_packets.insert(key, bytes.clone());
                 let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
-                let subchunk = if matches!(tile, crate::world::TileData::Furnace(_))
-                    && Self::has_conn_in_chunk(players_by_chunk, dim, cx, cz)
-                {
-                    crate::session_packets::pkt_subchunk_block(world, x, y, z)
-                } else {
-                    None
-                };
                 Self::for_each_conn_in_chunk(
                     &self.players_by_chunk,
                     &self.players,
@@ -521,9 +538,6 @@ impl Server {
                     |cid| {
                         if let Some(sess) = self.sessions.get(&cid) {
                             sess.conn.queue(&bytes);
-                            if let Some(ref sc) = subchunk {
-                                sess.conn.queue(sc);
-                            }
                         }
                     },
                 );
@@ -592,6 +606,7 @@ impl Server {
         self.drain_block_updates();
         self.drain_tile_updates();
         self.flush_all_sessions();
+        self.pump_closing_sessions();
         self.poll_network(std::time::Duration::ZERO);
         let lines = std::mem::take(&mut self.console);
         for line in lines {

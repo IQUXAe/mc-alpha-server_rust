@@ -161,6 +161,13 @@ pub struct Server {
     pub auto_save_active: bool,
     pub auto_save_queue: std::collections::VecDeque<(i32, i32, i32)>,
     pub auto_save_saved: usize,
+    /// Removed sessions kept alive until their kick bytes drain (or the
+    /// grace window expires); see [`Server::remove_session`].
+    pub closing_sessions: Vec<(Session, u32)>,
+    /// Last tile-entity packet bytes sent per `(dim, x, y, z)`: identical
+    /// re-broadcasts (idle chests re-marked, furnace flips that change
+    /// nothing) are skipped instead of re-serializing + re-gzipping.
+    pub last_tile_packets: HashMap<(i32, i32, i32, i32), Vec<u8>>,
 }
 
 #[derive(Default)]
