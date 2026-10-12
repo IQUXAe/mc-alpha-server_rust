@@ -215,7 +215,7 @@ impl Entry {
             last_burning: false,
             last_mounted: NO_ENTITY,
             last_motion: [0.0; 3],
-            last_health: -1,
+            last_health: e.health.unwrap_or(-1),
             is_player: e.is_player,
             status2_sent: false,
             tick: 0,
@@ -322,7 +322,18 @@ impl Tracker {
     }
 
     pub fn add(&mut self, e: &TrackedEntity) {
-        self.entries.entry(e.id).or_insert_with(|| Entry::new(e));
+        match self.entries.entry(e.id) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(Entry::new(e));
+            }
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                let entry = o.get_mut();
+                entry.range = e.range;
+                entry.rate = e.rate.max(1);
+                entry.send_velocity = e.send_velocity;
+                entry.is_player = e.is_player;
+            }
+        }
     }
 
     /// Remove an entry, emitting destroy packets to current watchers.
@@ -389,18 +400,6 @@ impl Tracker {
                 to: player,
                 bytes: encode(Packet::ArmAnimation { entity_id: id, animate: 102 }),
             });
-        }
-        if let Some(entry) = self.entries.get_mut(&id) {
-            entry.last_fixed = [
-                tracker_encode_pos(e.pos[0]),
-                tracker_encode_pos(e.pos[1]),
-                tracker_encode_pos(e.pos[2]),
-            ];
-            entry.last_yaw = tracker_encode_rot(e.yaw);
-            entry.last_pitch = tracker_encode_rot(e.pitch);
-            if let Some(h) = e.health {
-                entry.last_health = h;
-            }
         }
     }
 
@@ -836,6 +835,7 @@ mod tests {
             kind: MobKind::Creeper,
             target: None,
             attack_cooldown: 0,
+            hop_cooldown: 0,
             target_timer: 0,
             burn_ticks: 0,
             age: 0,

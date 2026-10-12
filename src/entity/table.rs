@@ -20,12 +20,6 @@ pub const NO_ENTITY: EntityId = -1;
 /// `players` map. Stable across restarts (re-applied on open).
 pub const HELL_ID_BASE: EntityId = 1_000_000_000;
 
-fn next_id(counter: &mut EntityId) -> EntityId {
-    let id = *counter;
-    *counter = counter.wrapping_add(1);
-    id
-}
-
 /// Every base-`Entity` field (positions, motion, box, flags, links).
 #[derive(Clone, Debug)]
 pub struct Body {
@@ -399,6 +393,11 @@ pub struct MobEnt {
     pub kind: MobKind,
     pub target: Option<EntityId>,
     pub attack_cooldown: i32,
+    /// Slime hop timer (`EntitySlime.field_769_d`): counts down each
+    /// tick on the ground, re-rolled on hop. Kept separate from
+    /// `attack_cooldown` (melee `attackTime`) so contact damage can
+    /// never stall the hop cadence.
+    pub hop_cooldown: i32,
     pub target_timer: i32,
     pub burn_ticks: i32,
     /// Despawn age (mirrors `field_9132_bn`): ++ per tick, dead past
@@ -450,6 +449,7 @@ impl MobEnt {
             kind,
             target: None,
             attack_cooldown: 0,
+            hop_cooldown: 0,
             target_timer: 0,
             burn_ticks: 0,
             age: 0,
@@ -681,7 +681,29 @@ impl EntityTable {
     }
 
     pub fn alloc_id(&mut self) -> EntityId {
-        next_id(&mut self.next_id)
+        // Never hand out the NO_ENTITY sentinel, negatives (every
+        // `>= 0` mount/rider/occupant guard would break), or an id a
+        // live row already owns (after a full 2^31 wrap the small ids
+        // collide with long-lived player rows and silently replace
+        // them). Walk forward from the counter, skipping occupied keys
+        // and the negative range, and wrap to 1 at the top.
+        let start = self.next_id.max(1);
+        let mut id = start;
+        for _ in 0..=(i32::MAX as u64) {
+            if !self.rows.contains_key(&id) {
+                self.next_id = if id >= i32::MAX { 1 } else { id + 1 };
+                return id;
+            }
+            id = if id >= i32::MAX { 1 } else { id + 1 };
+            if id == start {
+                break;
+            }
+        }
+        // Id space exhausted (needs billions of live rows — unreachable);
+        // fall back to the raw counter rather than looping forever.
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        id
     }
 
     /// Move the allocator past `id` so a row migrated from another

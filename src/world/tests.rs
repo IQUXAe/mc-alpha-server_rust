@@ -250,6 +250,7 @@
             kind: crate::entity::table::MobKind::Zombie,
             target: None,
             attack_cooldown: 0,
+            hop_cooldown: 0,
             target_timer: 0,
             burn_ticks: 0,
             age: 0,
