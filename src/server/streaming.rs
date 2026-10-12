@@ -46,14 +46,19 @@ impl Server {
             if self.store_missing_hell.contains(&(cx, cz)) {
                 return false;
             }
-            let ok = hell.load_chunk_from(store, cx, cz);
-            if !ok {
-                if self.store_missing_hell.len() >= 16384 {
-                    self.store_missing_hell.clear();
+            return match hell.load_chunk_from(store, cx, cz) {
+                crate::persist::LoadChunkStatus::Loaded => true,
+                crate::persist::LoadChunkStatus::Missing => {
+                    if self.store_missing_hell.len() >= 16384 {
+                        let mut n = 0;
+                        self.store_missing_hell.retain(|_| { n += 1; n % 2 == 0 });
+                    }
+                    self.store_missing_hell.insert((cx, cz));
+                    false
                 }
-                self.store_missing_hell.insert((cx, cz));
-            }
-            return ok;
+                // Disk error: retryable, never negative-cached.
+                crate::persist::LoadChunkStatus::Failed => false,
+            };
         }
         self.load_chunk(cx, cz)
     }
@@ -154,6 +159,23 @@ impl Server {
             stream.queue = merged;
         }
 
+        // Dead worker detection: a thread that failed to spawn or exited
+        // (panic) must not hold streaming hostage — requests would sit in
+        // the pending set forever with nobody answering, permanently
+        // stalling all chunk sends with no log. Detect it once per tick
+        // and fall back to synchronous generation.
+        if self
+            .chunk_worker
+            .as_ref()
+            .is_some_and(|w| !w.is_alive())
+        {
+            crate::server_log::severe(
+                "chunk-gen worker died; falling back to synchronous generation",
+            );
+            self.chunk_worker = None;
+            self.pending_chunk_gens.clear();
+        }
+
         // Drain any completed background chunk generations into the
         // matching dimension (shared 64-slot pending cap across dims so
         // one explorer can't starve the other world's queue).
@@ -190,8 +212,16 @@ impl Server {
         let mut deferred_count = 0;
         let mut i = 0;
         let mut sent_indices = Vec::with_capacity(CHUNKS_PER_TICK as usize);
+        // Wall-clock budget for the whole send phase: the per-item caps
+        // (loads/gens/sends) are additive, so one explorer's burst of
+        // 16 LevelDB loads + 2 populates + 15 zlib chunk sends could
+        // overshoot the 50 ms tick on slow disks; bail out instead.
+        let stream_started = std::time::Instant::now();
         while i < stream.queue.len() && sent_now < CHUNKS_PER_TICK as usize {
             if sess.conn.has_pending_outbound() {
+                break;
+            }
+            if stream_started.elapsed().as_millis() > 12 {
                 break;
             }
             let (qx, qz) = stream.queue[i];
@@ -265,12 +295,23 @@ impl Server {
                                 }
                             }
                             if !ready {
-                                if let Some(ref worker) = self.chunk_worker {
+                                if let Some(ref worker) =
+                                    self.chunk_worker.as_ref().filter(|w| w.is_alive())
+                                {
                                     if !self.pending_chunk_gens.contains(&(dim, nx, nz))
                                         && self.pending_chunk_gens.len() < 64
                                     {
-                                        self.pending_chunk_gens.insert((dim, nx, nz));
-                                        let _ = worker.req_tx.send((dim, nx, nz));
+                                        if worker.req_tx.send((dim, nx, nz)).is_ok() {
+                                            self.pending_chunk_gens.insert((dim, nx, nz));
+                                        } else {
+                                            // Channel closed mid-tick: worker died
+                                            // between the liveness gate and now.
+                                            // Don't enqueue; the per-tick gate above
+                                            // clears the worker next tick.
+                                            crate::server_log::severe(
+                                                "chunk-gen worker request channel closed",
+                                            );
+                                        }
                                     }
                                     deferred = true;
                                 } else if self.chunks_generated_this_tick >= CHUNK_GEN_PER_TICK {
@@ -330,28 +371,25 @@ impl Server {
                     i += 1;
                     continue;
                 }
-                play.outbox.push(pkt_pre_chunk(qx, qz, true));
-                if let Some(chunk) = hell.chunk_ref(qx, qz) {
+                let map_pkt = if let Some(chunk) = hell.chunk_ref(qx, qz) {
                     chunk.with_map_compressed(|data| {
-                        play.outbox.push(pkt_map_chunk(
-                            qx * 16,
-                            0,
-                            qz * 16,
-                            16,
-                            128,
-                            16,
-                            data,
-                        ));
-                    });
-                }
-                for &(x, y, z) in hell.tiles.chunk_cells(qx, qz) {
-                    if let Some(tile) = hell.tiles.get(&(x, y, z)) {
-                        play.outbox.push(tile_packet(x, y, z, tile));
-                        if matches!(tile, crate::world::TileData::Furnace(_)) {
-                            if let Some(sc) =
-                                crate::session_packets::pkt_subchunk_block(hell, x, y, z)
-                            {
-                                play.outbox.push(sc);
+                        pkt_map_chunk(qx * 16, 0, qz * 16, 16, 128, 16, data)
+                    })
+                } else {
+                    None
+                };
+                if let Some(map_pkt) = map_pkt {
+                    play.outbox.push(pkt_pre_chunk(qx, qz, true));
+                    play.outbox.push(map_pkt);
+                    for &(x, y, z) in hell.tiles.chunk_cells(qx, qz) {
+                        if let Some(tile) = hell.tiles.get(&(x, y, z)) {
+                            play.outbox.push(tile_packet(x, y, z, tile));
+                            if matches!(tile, crate::world::TileData::Furnace(_)) {
+                                if let Some(sc) =
+                                    crate::session_packets::pkt_subchunk_block(hell, x, y, z)
+                                {
+                                    play.outbox.push(sc);
+                                }
                             }
                         }
                     }
@@ -369,30 +407,27 @@ impl Server {
                     i += 1;
                     continue;
                 }
-                play.outbox.push(pkt_pre_chunk(qx, qz, true));
-                if let Some(chunk) = self.world.chunk_ref(qx, qz) {
+                let map_pkt = if let Some(chunk) = self.world.chunk_ref(qx, qz) {
                     chunk.with_map_compressed(|data| {
-                        play.outbox.push(pkt_map_chunk(
-                            qx * 16,
-                            0,
-                            qz * 16,
-                            16,
-                            128,
-                            16,
-                            data,
-                        ));
-                    });
-                }
-                // Tile entities ride the chunk like C++ (row order is map
-                // order on both sides).
-                for &(x, y, z) in self.world.tiles.chunk_cells(qx, qz) {
-                    if let Some(tile) = self.world.tiles.get(&(x, y, z)) {
-                        play.outbox.push(tile_packet(x, y, z, tile));
-                        if matches!(tile, crate::world::TileData::Furnace(_)) {
-                            if let Some(sc) =
-                                crate::session_packets::pkt_subchunk_block(&self.world, x, y, z)
-                            {
-                                play.outbox.push(sc);
+                        pkt_map_chunk(qx * 16, 0, qz * 16, 16, 128, 16, data)
+                    })
+                } else {
+                    None
+                };
+                if let Some(map_pkt) = map_pkt {
+                    play.outbox.push(pkt_pre_chunk(qx, qz, true));
+                    play.outbox.push(map_pkt);
+                    // Tile entities ride the chunk like C++ (row order is map
+                    // order on both sides).
+                    for &(x, y, z) in self.world.tiles.chunk_cells(qx, qz) {
+                        if let Some(tile) = self.world.tiles.get(&(x, y, z)) {
+                            play.outbox.push(tile_packet(x, y, z, tile));
+                            if matches!(tile, crate::world::TileData::Furnace(_)) {
+                                if let Some(sc) =
+                                    crate::session_packets::pkt_subchunk_block(&self.world, x, y, z)
+                                {
+                                    play.outbox.push(sc);
+                                }
                             }
                         }
                     }

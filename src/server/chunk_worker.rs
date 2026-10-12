@@ -29,6 +29,16 @@ pub struct ChunkGenWorker {
 }
 
 impl ChunkGenWorker {
+    /// True while the worker thread is actually running. A thread that
+    /// failed to spawn (`None` handle) or has exited (panic in dev
+    /// builds) is dead: streaming must fall back to synchronous
+    /// generation instead of enqueueing requests nobody will answer.
+    pub fn is_alive(&self) -> bool {
+        self._handle
+            .as_ref()
+            .is_some_and(|h| !h.is_finished())
+    }
+
     /// Start a worker thread with the given world seed.
     pub fn start(seed: i64) -> Self {
         let (req_tx, req_rx) = channel::<(i32, i32, i32)>();
@@ -67,13 +77,22 @@ impl ChunkGenWorker {
                     }
                     chunk.generate_height_map();
                     chunk.generate_skylight_map();
-                    let _ = chunk.map_compressed();
+                    // NOTE: no map pre-compression here — the insert path
+                    // always invalidates the cache (load_arrays + skylight
+                    // regen in ensure_chunk), so this work was 100% thrown
+                    // away.
                     if resp_tx.send(GeneratedRawChunk { dim, cx, cz, chunk }).is_err() {
                         break;
                     }
                 }
             })
             .ok();
+
+        if handle.is_none() {
+            crate::server_log::severe(
+                "Failed to spawn chunk generation worker; falling back to synchronous generation",
+            );
+        }
 
         Self {
             req_tx,

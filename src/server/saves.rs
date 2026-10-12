@@ -65,7 +65,7 @@ impl Server {
                 p.held_item_id = held;
                 p.living.body.dead = true;
             }
-            if !world.save_player_to(&self.player_dir, eid) {
+            if !world.save_player_to(&self.player_dir, eid, false) {
                 log::warning(&format!("Failed to save player data for {username}"));
             }
             // Drop the row explicitly: dead players are spared by the tick
@@ -89,21 +89,23 @@ impl Server {
     }
 
     /// Save one player row (held snapshot folded in like `syncHeldItems`).
-    /// Dim-aware (rows live in exactly one world).
-    pub(crate) fn save_player(&mut self, eid: EntityId, held: i32) {
+    /// Dim-aware (rows live in exactly one world). `sync` = fsync the
+    /// player file before rename (shutdown path); periodic saves rely on
+    /// the atomic rename alone.
+    pub(crate) fn save_player(&mut self, eid: EntityId, held: i32, sync: bool) {
         if self.world_dim_of(eid) == -1 && self.hell.is_some() {
             if let Some(hell) = self.hell.as_mut() {
                 if let Some(Entity::Player(p)) = hell.entities.get_mut(eid) {
                     p.held_item_id = held;
                 }
-                hell.save_player_to(&self.player_dir, eid);
+                hell.save_player_to(&self.player_dir, eid, sync);
             }
             return;
         }
         if let Some(Entity::Player(p)) = self.world.entities.get_mut(eid) {
             p.held_item_id = held;
         }
-        self.world.save_player_to(&self.player_dir, eid);
+        self.world.save_player_to(&self.player_dir, eid, sync);
     }
 
     /// Save all online players (mirrors `savePlayerStates`).
@@ -120,7 +122,7 @@ impl Server {
             })
             .collect();
         for (eid, held) in pairs {
-            self.save_player(eid, held);
+            self.save_player(eid, held, false);
         }
     }
 
@@ -133,12 +135,14 @@ impl Server {
 
     pub(crate) fn flush_unloaded_chunks_limit(&mut self, limit: usize) {
         // Split the budget across dimensions (hardening: one world's
-        // eviction wave can't starve the other's).
+        // eviction wave can't starve the other's, and the old
+        // full-limit-plus-half overshoot made autosave ticks encode
+        // 1.5x the intended chunk budget).
         let half = (limit / 2).max(1);
         let world = &mut self.world;
         let store = &mut self.store;
         let missing = &mut self.store_missing;
-        Self::flush_unloaded_into(world, store, missing, limit);
+        Self::flush_unloaded_into(world, store, missing, half);
         if let Some(hell) = self.hell.as_mut() {
             if let Some(hstore) = self.hell_store.as_mut() {
                 let hmissing = &mut self.store_missing_hell;
@@ -155,18 +159,25 @@ impl Server {
         missing: &mut std::collections::HashSet<(i32, i32)>,
         limit: usize,
     ) {
-        if world.unloaded.is_empty() {
+        if world.unloaded.is_empty() || limit == 0 {
             return;
         }
+        let clean_cap = limit.saturating_mul(8);
         let mut clean_drops = Vec::new();
         let mut dirty_to_save = Vec::new();
+        // Stop scanning once both budgets are full: with thousands of
+        // staged chunks after exploration waves this loop ran to the end
+        // of the map every tick for nothing.
         for (&(cx, cz), chunk) in &world.unloaded {
             if !chunk.is_modified {
-                if clean_drops.len() < limit * 8 {
+                if clean_drops.len() < clean_cap {
                     clean_drops.push((cx, cz));
                 }
             } else if dirty_to_save.len() < limit {
                 dirty_to_save.push((cx, cz));
+            }
+            if clean_drops.len() >= clean_cap && dirty_to_save.len() >= limit {
+                break;
             }
         }
         for (cx, cz) in clean_drops {
@@ -174,7 +185,11 @@ impl Server {
             world.tiles.remove_chunk(cx, cz);
         }
         for (cx, cz) in dirty_to_save {
-            match crate::persist::encode_chunk_blob(world, cx, cz, true) {
+            // Staged chunks must not bake live rows: entities that
+            // wandered into the coordinates after the unload spill live
+            // in the table, and baking them here would duplicate them on
+            // reload.
+            match crate::persist::encode_chunk_blob(world, cx, cz, true, false) {
                 None => {
                     log::warning(&format!("Failed to encode chunk {cx},{cz}; keeping staged"));
                 }
@@ -273,6 +288,7 @@ impl Server {
         store: &mut crate::persist::ChunkStore,
         missing: &mut std::collections::HashSet<(i32, i32)>,
     ) {
+        world.rebuild_entity_grid();
         let coords = world.loaded_chunk_coords();
         let mut saved = 0;
         let mut skipped = 0;
@@ -305,6 +321,7 @@ impl Server {
     pub(crate) fn begin_autosave(&mut self) {
         self.auto_save_queue.clear();
         self.auto_save_saved = 0;
+        self.world.rebuild_entity_grid();
         Self::pin_entity_chunks(&mut self.world);
         for (cx, cz) in self.world.loaded_chunk_coords() {
             if self.world.chunk_ref(cx, cz).map(|c| c.is_modified).unwrap_or(false) {
@@ -312,6 +329,7 @@ impl Server {
             }
         }
         if let Some(hell) = self.hell.as_mut() {
+            hell.rebuild_entity_grid();
             Self::pin_entity_chunks(hell);
             for (cx, cz) in hell.loaded_chunk_coords() {
                 if hell.chunk_ref(cx, cz).map(|c| c.is_modified).unwrap_or(false) {
@@ -324,11 +342,14 @@ impl Server {
 
     /// Step through the autosave queue up to `limit` dirty chunks.
     /// Returns true when all dirty chunks across dimensions have been saved and stores flushed.
+    /// Staged-unload flushing is NOT repeated here: the regular per-tick
+    /// `flush_unloaded_chunks` in `tick` already covers it (the double
+    /// flush used to double the chunk-encode budget on autosave ticks;
+    /// `save_world`/`shutdown` flush staged chunks themselves).
     pub(crate) fn step_autosave(&mut self, limit: usize) -> bool {
         if !self.auto_save_active {
             return true;
         }
-        self.flush_unloaded_chunks_limit(limit);
         let mut processed = 0;
         while processed < limit {
             let Some((dim, cx, cz)) = self.auto_save_queue.pop_front() else {
@@ -419,10 +440,17 @@ impl Server {
                 };
                 sess.flush();
                 if let SessionState::Play(play, _) = &sess.state {
-                    self.save_player(play.player, held);
+                    self.save_player(play.player, held, true);
                 }
                 self.remove_session(cid, sess);
             }
+        }
+        // Best-effort delivery of the shutdown kick reasons: the closing
+        // graveyard gets one more flush round before the fds drop (the
+        // kernel still delivers whatever reached the socket buffer).
+        for (sess, _) in self.closing_sessions.drain(..) {
+            sess.conn.flush_outbound();
+            sess.conn.close();
         }
         let mut attempts = 0;
         while !self.world.unloaded.is_empty() && attempts < 5 {

@@ -259,12 +259,14 @@ impl Chunk {
     /// coordinates (mirrors C++ arithmetic without the UB on use).
     #[inline]
     pub fn get_index(&self, x: i32, y: i32, z: i32) -> usize {
+        debug_assert!(Self::in_bounds(x, y, z));
         ((x as usize) << 11) | ((z as usize) << 7) | (y as usize)
     }
 
     /// Same formula as an associated function (no `self` needed).
     #[inline]
     pub fn index(x: i32, y: i32, z: i32) -> usize {
+        debug_assert!(Self::in_bounds(x, y, z));
         ((x as usize) << 11) | ((z as usize) << 7) | (y as usize)
     }
 
@@ -347,7 +349,18 @@ impl Chunk {
             return false;
         }
         self.data.set_nibble(x, y, z, metadata);
-        self.recalculate_height_column(x, z);
+        // Heightmap dispatch (Java `Chunk.setBlockID`): only an opaque
+        // placement at/above the current height or a removal of the top
+        // block can move the column height at all; the seed starts the
+        // short walk instead of rescanning 128 cells.
+        let cur = self.get_height_value(x, z);
+        if light_opacity(block_id) != 0 {
+            if y >= cur {
+                self.recalculate_height_column_from(x, z, y + 1);
+            }
+        } else if y == cur - 1 {
+            self.recalculate_height_column_from(x, z, y);
+        }
         self.invalidate_cache();
         self.is_modified = true;
         true
@@ -465,11 +478,14 @@ impl Chunk {
     }
 
     /// View the cached or freshly-compressed chunk map data via closure,
-    /// avoiding intermediate `Vec<u8>` cloning.
-    pub fn with_map_compressed<R, F: FnOnce(&[u8]) -> R>(&self, f: F) -> R {
+    /// avoiding intermediate `Vec<u8>` cloning. `None` = compression
+    /// failed: the caller must skip the send instead of shipping an
+    /// empty payload behind a full-chunk header (the client would render
+    /// a corrupt chunk).
+    pub fn with_map_compressed<R, F: FnOnce(&[u8]) -> R>(&self, f: F) -> Option<R> {
         if let Ok(guard) = self.cached_map_compressed.lock() {
             if let Some(ref cached) = *guard {
-                return f(cached);
+                return Some(f(cached));
             }
         }
         use std::io::Read;
@@ -477,24 +493,26 @@ impl Chunk {
         let mut encoder =
             flate2::read::ZlibEncoder::new(raw.as_slice(), flate2::Compression::new(1));
         let mut out = Vec::new();
-        if encoder.read_to_end(&mut out).is_ok() {
-            if let Ok(mut guard) = self.cached_map_compressed.lock() {
-                *guard = Some(out);
-                if let Some(ref cached) = *guard {
-                    return f(cached);
-                }
+        if encoder.read_to_end(&mut out).is_err() {
+            return None;
+        }
+        if let Ok(mut guard) = self.cached_map_compressed.lock() {
+            *guard = Some(out);
+        }
+        if let Ok(guard) = self.cached_map_compressed.lock() {
+            if let Some(ref cached) = *guard {
+                return Some(f(cached));
             }
         }
-        f(&[])
+        None
+    }
+
+    /// Owned copy of the compressed chunk map (compression failure = None).
+    pub fn map_compressed(&self) -> Option<Vec<u8>> {
+        self.with_map_compressed(|data| data.to_vec())
     }
 
     /// zlib-compressed map payload at level 1 (mirrors the
-    /// Compressed tail of chunk data;
-    /// empty on I/O failure like the other codecs here).
-    /// Result is cached until chunk blocks or lighting change.
-    pub fn map_compressed(&self) -> Vec<u8> {
-        self.with_map_compressed(|data| data.to_vec())
-    }
 
 
     /// Mirrors `getSavedLightValue`: `0` = sky, anything else = block.
@@ -573,11 +591,27 @@ impl Chunk {
         self.invalidate_cache();
     }
 
+    /// Full-column rescan (used by `generateHeightMap` where no previous
+    /// height is known).
     fn recalculate_height_column(&mut self, x: i32, z: i32) {
+        self.recalculate_height_column_from(x, z, CHUNK_SIZE_Y - 1);
+    }
+
+    /// Heightmap update on a single block write (port of Java
+    /// `Chunk.func_1003_g`): the scan starts from
+    /// `max(current_height, written_y)` instead of always walking all 128
+    /// cells, so placements near the old surface terminate after a couple
+    /// of lookups.
+    fn recalculate_height_column_from(&mut self, x: i32, z: i32, y_written: i32) {
         if !Self::column_in_bounds(x, z) {
             return;
         }
-        let mut y: i32 = CHUNK_SIZE_Y - 1;
+        let idx = match Self::height_index(x, z) {
+            Some(idx) => idx,
+            None => return,
+        };
+        let cur = self.height_map.get(idx).map(|v| i32::from(*v)).unwrap_or(0);
+        let mut y: i32 = cur.max(y_written).min(CHUNK_SIZE_Y - 1);
         while y > 0 {
             let below = self.get_block_id(x, y - 1, z);
             if light_opacity(below) != 0 {
@@ -585,17 +619,15 @@ impl Chunk {
             }
             y -= 1;
         }
-        if let Some(idx) = Self::height_index(x, z) {
-            if let Some(slot) = self.height_map.get_mut(idx) {
-                let clamped = if y < 0 {
-                    0u8
-                } else if y > 255 {
-                    255u8
-                } else {
-                    y as u8
-                };
-                *slot = clamped;
-            }
+        if let Some(slot) = self.height_map.get_mut(idx) {
+            let clamped = if y < 0 {
+                0u8
+            } else if y > 255 {
+                255u8
+            } else {
+                y as u8
+            };
+            *slot = clamped;
         }
     }
 
@@ -1158,7 +1190,7 @@ mod tests {
         chunk.set_light_value(BLOCK_LIGHT, 4, 60, 4, 9);
         chunk.set_light_value(SKY_LIGHT, 4, 61, 4, 15);
         let raw = chunk.map_raw();
-        let compressed = chunk.map_compressed();
+        let compressed = chunk.map_compressed().expect("compression must succeed");
         assert!(!compressed.is_empty());
         assert!(compressed.len() < raw.len());
         let mut decoder = flate2::read::ZlibDecoder::new(compressed.as_slice());
@@ -1171,7 +1203,7 @@ mod tests {
     fn map_compressed_empty_chunk_roundtrips() {
         use std::io::Read;
         let chunk = Chunk::new(0, 0);
-        let compressed = chunk.map_compressed();
+        let compressed = chunk.map_compressed().expect("compression must succeed");
         let mut decoder = flate2::read::ZlibDecoder::new(compressed.as_slice());
         let mut back = Vec::new();
         decoder.read_to_end(&mut back).unwrap();
@@ -1185,17 +1217,17 @@ mod tests {
         assert!(chunk.cached_map_compressed.lock().unwrap().is_none());
 
         // First call populates cache
-        let comp1 = chunk.map_compressed();
+        let comp1 = chunk.map_compressed().unwrap();
         assert!(chunk.cached_map_compressed.lock().unwrap().is_some());
 
         // Second call matches cached
-        let comp2 = chunk.map_compressed();
+        let comp2 = chunk.map_compressed().unwrap();
         assert_eq!(comp1, comp2);
 
         // Setting a block invalidates cache
         chunk.set_block_id(1, 10, 1, 1);
         assert!(chunk.cached_map_compressed.lock().unwrap().is_none());
-        let comp3 = chunk.map_compressed();
+        let comp3 = chunk.map_compressed().unwrap();
         assert_ne!(comp1, comp3);
 
         // Setting light invalidates cache
@@ -1209,7 +1241,7 @@ mod tests {
         assert!(chunk.cached_map_compressed.lock().unwrap().is_none());
 
         // with_map_compressed reads without cloning
-        let len = chunk.with_map_compressed(|data| data.len());
+        let len = chunk.with_map_compressed(|data| data.len()).expect("cached read");
         assert!(len > 0);
         assert!(chunk.cached_map_compressed.lock().unwrap().is_some());
 

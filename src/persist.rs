@@ -33,6 +33,20 @@ pub fn chunk_key_bytes(cx: i32, cz: i32) -> [u8; 8] {
     (((cx as u32 as u64) << 32) | (cz as u32 as u64)).to_le_bytes()
 }
 
+/// Outcome of a chunk load: only `Missing` may be negative-cached — a
+/// disk `Failed` must stay retryable, and corruption is quarantined
+/// before being reported as missing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoadChunkStatus {
+    /// Decoded and applied.
+    Loaded,
+    /// Key never existed (or corrupt blob quarantined): safe to treat as
+    /// unexplored terrain.
+    Missing,
+    /// Storage I/O error: retry later, never regenerate over it.
+    Failed,
+}
+
 // ---- LevelDB chunk store ----
 
 /// LevelDB-backed chunk blob store (chunk key -> gzip NBT value).
@@ -48,7 +62,7 @@ impl ChunkStore {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .map(|kb| kb * 1024)
-            .unwrap_or(512 * 1024);
+            .unwrap_or(4 * 1024 * 1024);
         let block_cache_capacity_bytes = std::env::var("ALPHA_LEVELDB_CACHE_KB")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -78,9 +92,30 @@ impl ChunkStore {
         self.db.put(&chunk_key_bytes(cx, cz), blob).map_err(|e| e.to_string())
     }
 
-    /// Raw blob bytes, or `None` when the chunk was never stored.
-    pub fn get_chunk(&mut self, cx: i32, cz: i32) -> Option<Vec<u8>> {
-        self.db.get(&chunk_key_bytes(cx, cz)).map(|b| b.to_vec())
+    /// Raw blob bytes. `Ok(None)` is a genuine key miss (never stored);
+    /// `Err` is an I/O failure, which callers must treat as retryable —
+    /// NOT as a miss (see `LoadChunkStatus`). Uses `get_at` because the
+    /// crate's convenience `get` swallows errors into `None`.
+    pub fn get_chunk(&mut self, cx: i32, cz: i32) -> Result<Option<Vec<u8>>, String> {
+        let snapshot = self.db.get_snapshot();
+        self.db
+            .get_at(&snapshot, &chunk_key_bytes(cx, cz))
+            .map_err(|e| e.to_string())
+            .map(|v| v.map(|b| b.to_vec()))
+    }
+
+    /// Preserve an undecodable blob under a quarantine key and remove the
+    /// original: corrupted chunk data stays recoverable by hand, while
+    /// the cell becomes a true miss so regeneration doesn't keep hitting
+    /// the same decode failure (or silently overwrite builds without a
+    /// trace). Quarantine keys sit in the `0xF000_0000_and_up` id space
+    /// above every possible chunk coordinate pair.
+    pub fn quarantine_chunk(&mut self, cx: i32, cz: i32, blob: &[u8]) -> Result<(), String> {
+        let bad_key: [u8; 8] = (((0xF000_0000u64) << 32) | ((cx as u32 as u64) << 16) | (cz as u32 as u64)).to_le_bytes();
+        self.db
+            .put(&bad_key, blob)
+            .and_then(|_| self.db.delete(&chunk_key_bytes(cx, cz)))
+            .map_err(|e| e.to_string())
     }
 
     pub fn flush(&mut self) -> Result<(), String> {
@@ -92,7 +127,7 @@ impl ChunkStore {
 
 fn gzip(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut encoder =
-        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(1));
     encoder.write_all(bytes).ok()?;
     encoder.finish().ok()
 }
@@ -253,7 +288,7 @@ fn write_stack(m: &mut BTreeMap<String, NbtTag>, s: &ItemStack) {
 pub(crate) fn read_stack(m: &BTreeMap<String, NbtTag>) -> ItemStack {
     ItemStack::new(
         get_short(m, "id") as i32,
-        get_byte(m, "Count") as i32,
+        (get_byte(m, "Count") as i32).max(0),
         get_short(m, "Damage") as i32,
     )
 }
@@ -263,9 +298,20 @@ pub(crate) fn read_stack(m: &BTreeMap<String, NbtTag>) -> ItemStack {
 /// Encode one loaded chunk (blocks, light, tiles, spill, and live rows in
 /// the chunk) to an NBT blob, gzip- or zstd-compressed like
 /// `chunk_nbt_serialize` (zstd for LevelDB values, gzip for legacy
-/// files). Live rows mirror the C++ save gather (pending spill plus
-/// entities standing in the chunk).
-pub fn encode_chunk_blob(world: &World, cx: i32, cz: i32, zstd: bool) -> Option<Vec<u8>> {
+/// files). Loaded-chunk saves pass `include_live = true` to snapshot
+/// live entity rows into the blob (the table keeps them until the
+/// unload spill). Staged (`unloaded`) chunks MUST pass `false`: entities
+/// that wandered into the chunk's coordinates after it was spilled live
+/// in the table, and baking them into the blob would duplicate every
+/// one of them on reload (`restore_chunk_entities` thaws blob rows as
+/// fresh entities while the live copies keep ticking).
+pub fn encode_chunk_blob(
+    world: &World,
+    cx: i32,
+    cz: i32,
+    zstd: bool,
+    include_live: bool,
+) -> Option<Vec<u8>> {
     let chunk = world.chunk_ref(cx, cz)?;
     let mut blocks = [0u8; CHUNK_VOLUME];
     let mut meta = [0u8; CHUNK_VOLUME];
@@ -326,12 +372,26 @@ pub fn encode_chunk_blob(world: &World, cx: i32, cz: i32, zstd: bool) -> Option<
     let mut boat_rows: Vec<PendingBoat> = chunk.pending_boats.clone();
     let mut minecart_rows: Vec<PendingMinecart> = chunk.pending_minecarts.clone();
     let mut live: Vec<&Entity> = Vec::new();
-    for (_, e) in world.entities.iter() {
-        if !e.body().dead && in_chunk((e.body().pos[0], e.body().pos[2])) {
-            live.push(e);
+    if include_live {
+        if !world.entity_grid.is_empty() {
+            if let Some(ids) = world.entity_grid.get(&(cx, cz)) {
+                for &id in ids {
+                    if let Some(e) = world.entities.get(id) {
+                        if !e.body().dead && in_chunk((e.body().pos[0], e.body().pos[2])) {
+                            live.push(e);
+                        }
+                    }
+                }
+            }
+        } else {
+            for (_, e) in world.entities.iter() {
+                if !e.body().dead && in_chunk((e.body().pos[0], e.body().pos[2])) {
+                    live.push(e);
+                }
+            }
         }
+        live.sort_by_key(|e| e.id());
     }
-    live.sort_by_key(|e| e.id());
     for e in &live {
         match e {
             Entity::Item(it) => item_rows.push((
@@ -515,8 +575,22 @@ pub(crate) fn tile_nbt(x: i32, y: i32, z: i32, tile: &TileData) -> NbtCompound {
             m.insert("id".to_string(), NbtTag::String("Sign".to_string()));
             for (i, line) in s.lines.iter().enumerate() {
                 let len = line.iter().position(|&c| c == 0).unwrap_or(SIGN_LINES);
-                // Vanilla caps sign lines at 15 chars.
+                // Vanilla caps sign lines at 15 chars. The lossy decode can
+                // still pass astral chars through from a save poisoned
+                // before the readUTF filter existed — strip them here too
+                // so old worlds can't crash vanilla clients.
                 let text = String::from_utf8_lossy(&line[..len.min(15)]).to_string();
+                let text: String = text
+                    .chars()
+                    .map(|c| {
+                        let cp = c as u32;
+                        if cp == 0 || cp > 0xFFFF {
+                            '?'
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
                 m.insert(format!("Text{}", i + 1), NbtTag::String(text));
             }
         }
@@ -584,6 +658,9 @@ pub fn decode_chunk_blob(bytes: &[u8], cx: i32, cz: i32) -> Option<DecodedChunk>
         for elem in &l.elements {
             let NbtTag::Compound(c) = elem else { continue };
             let (x, y, z) = (get_int(&c.map, "x"), get_int(&c.map, "y"), get_int(&c.map, "z"));
+            if x.div_euclid(16) != cx || z.div_euclid(16) != cz {
+                continue;
+            }
             match get_string(&c.map, "id").as_str() {
                 "Furnace" => {
                     let mut s = crate::tile_entity::furnace::furnace_create();
@@ -919,7 +996,7 @@ pub fn decode_player(bytes: &[u8], username: &str) -> Option<DecodedPlayer> {
 impl World {
     /// Save one loaded chunk into the store (zstd value like C++).
     pub fn save_chunk_to(&mut self, store: &mut ChunkStore, cx: i32, cz: i32) -> bool {
-        let blob = match encode_chunk_blob(self, cx, cz, true) {
+        let blob = match encode_chunk_blob(self, cx, cz, true, true) {
             Some(b) => b,
             None => return false,
         };
@@ -927,17 +1004,43 @@ impl World {
     }
 
     /// Load one chunk from the store (entities thaw live through the
-    /// spill path, tiles replace the chunk's cells).
-    pub fn load_chunk_from(&mut self, store: &mut ChunkStore, cx: i32, cz: i32) -> bool {
+    /// spill path, tiles replace the chunk's cells). Distinguishes
+    /// outcomes so callers never mistake a disk error or corruption for
+    /// "chunk never existed" — that confusion made the negative cache
+    /// regenerate fresh terrain over unreachable chunks and silently
+    /// destroy builds.
+    pub fn load_chunk_from(&mut self, store: &mut ChunkStore, cx: i32, cz: i32) -> LoadChunkStatus {
         let blob = match store.get_chunk(cx, cz) {
-            Some(b) => b,
-            None => return false,
+            Ok(Some(b)) => b,
+            Ok(None) => return LoadChunkStatus::Missing,
+            Err(_) => return LoadChunkStatus::Failed,
         };
-        let d = match decode_chunk_blob(&blob, cx, cz) {
-            Some(d) => d,
-            None => return false,
-        };
-        self.apply_decoded_chunk(d)
+        match decode_chunk_blob(&blob, cx, cz) {
+            Some(d) => {
+                if self.apply_decoded_chunk(d) {
+                    LoadChunkStatus::Loaded
+                } else {
+                    self.quarantine_blob(store, cx, cz, &blob);
+                    LoadChunkStatus::Missing
+                }
+            }
+            None => {
+                self.quarantine_blob(store, cx, cz, &blob);
+                LoadChunkStatus::Missing
+            }
+        }
+    }
+
+    /// Quarantine one undecodable blob (see [`ChunkStore::quarantine_chunk`]).
+    fn quarantine_blob(&self, store: &mut ChunkStore, cx: i32, cz: i32, blob: &[u8]) {
+        crate::server_log::severe(&format!(
+            "Chunk ({cx},{cz}) blob failed to decode; quarantined under a recovery key (regenerating fresh)"
+        ));
+        if let Err(e) = store.quarantine_chunk(cx, cz, blob) {
+            crate::server_log::severe(&format!(
+                "Failed to quarantine chunk ({cx},{cz}): {e} — keeping the original key; load will retry"
+            ));
+        }
     }
 
     /// Apply a decoded blob: blocks, light, tiles (replacing the chunk's
@@ -989,7 +1092,7 @@ impl World {
             Some(b) => b,
             None => return false,
         };
-        write_atomic(&std::path::Path::new(dir).join("level.dat"), &blob)
+        write_atomic(&std::path::Path::new(dir).join("level.dat"), &blob, true)
     }
 
     /// Read `level.dat` from `dir` into seed/spawn/time.
@@ -1011,7 +1114,9 @@ impl World {
     }
 
     /// Write one player's `.dat` file into `dir` (lowercase name, atomic).
-    pub fn save_player_to(&self, dir: &str, id: crate::entity::table::EntityId) -> bool {
+    /// `sync` = fsync before rename (use for shutdown; periodic saves rely
+    /// on the atomic rename alone).
+    pub fn save_player_to(&self, dir: &str, id: crate::entity::table::EntityId, sync: bool) -> bool {
         let username = match self.entities.get(id) {
             Some(Entity::Player(p)) => p.username.clone(),
             _ => return false,
@@ -1023,6 +1128,7 @@ impl World {
         write_atomic(
             &std::path::Path::new(dir).join(format!("{}.dat", username.to_lowercase())),
             &blob,
+            sync,
         )
     }
 
@@ -1060,7 +1166,12 @@ impl World {
     }
 }
 
-fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> bool {
+/// Atomic file write via temp+rename. `sync` controls the fsync: the
+/// rename alone is crash-atomic (an interrupted write never corrupts
+/// the old file), so the periodic autosave skips the fsync — one
+/// `sync_data` per player per 5 minutes was a 10-100 ms disk stall on
+/// the tick thread for no practical durability win.
+fn write_atomic(path: &std::path::Path, bytes: &[u8], sync: bool) -> bool {
     let parent = path.parent();
     if let Some(p) = parent {
         if std::fs::create_dir_all(p).is_err() {
@@ -1072,7 +1183,9 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> bool {
         use std::io::Write;
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(bytes)?;
-        file.sync_data()?;
+        if sync {
+            file.sync_data()?;
+        }
         Ok(())
     })()
     .is_ok();
@@ -1175,7 +1288,7 @@ mod tests {
     #[test]
     fn test_chunk_blob_round_trip() {
         let (w, _) = furnished_world();
-        let blob = encode_chunk_blob(&w, 0, 0, false).unwrap();
+        let blob = encode_chunk_blob(&w, 0, 0, false, true).unwrap();
         let d = decode_chunk_blob(&blob, 0, 0).unwrap();
         assert_eq!((d.cx, d.cz), (0, 0));
         assert_eq!(d.blocks.len(), CHUNK_VOLUME);
@@ -1211,7 +1324,7 @@ mod tests {
         }
         assert!(sheep_ok && zombie_ok && sticks_ok && cart_ok);
         // Re-encode is byte-stable (idempotent codec).
-        let blob2 = encode_chunk_blob(&w2, 0, 0, false).unwrap();
+        let blob2 = encode_chunk_blob(&w2, 0, 0, false, true).unwrap();
         assert_eq!(blob, blob2);
     }
 
@@ -1219,15 +1332,15 @@ mod tests {
     fn test_chunk_store_round_trip() {
         let dir = tmp_dir("store");
         let mut store = ChunkStore::open(dir.join("db").to_str().unwrap()).unwrap();
-        assert_eq!(store.get_chunk(1, 2), None);
+        assert_eq!(store.get_chunk(1, 2), Ok(None));
         store.put_chunk(1, 2, &[9, 8, 7]).unwrap();
-        assert_eq!(store.get_chunk(1, 2), Some(vec![9, 8, 7]));
+        assert_eq!(store.get_chunk(1, 2), Ok(Some(vec![9, 8, 7])));
         let (mut w, _) = furnished_world();
         assert!(w.save_chunk_to(&mut store, 0, 0));
         let mut w2 = World::new(99);
-        assert!(w2.load_chunk_from(&mut store, 0, 0));
+        assert_eq!(w2.load_chunk_from(&mut store, 0, 0), crate::persist::LoadChunkStatus::Loaded);
         assert_eq!(w2.get_block_id(3, 64, 4), 50);
-        assert!(!w2.load_chunk_from(&mut store, 9, 9));
+        assert_eq!(w2.load_chunk_from(&mut store, 9, 9), crate::persist::LoadChunkStatus::Missing);
     }
 
     #[test]
@@ -1247,7 +1360,7 @@ mod tests {
     fn test_player_file_round_trip() {
         let dir = tmp_dir("player");
         let (w, pid) = furnished_world();
-        assert!(w.save_player_to(dir.to_str().unwrap(), pid));
+        assert!(w.save_player_to(dir.to_str().unwrap(), pid, false));
         let mut w2 = World::new(99);
         let nid = w2.load_player_from(dir.to_str().unwrap(), "Steve").unwrap();
         let (health, score, dirt, helm, sticks) = match w2.entities.get(nid).unwrap() {
@@ -1311,20 +1424,20 @@ mod tests {
     fn test_write_atomic_and_chunk_store_flush() {
         let dir = tmp_dir("atomic_and_flush");
         let target_file = dir.join("atomic_test.dat");
-        assert!(write_atomic(&target_file, b"durability_test"));
+        assert!(write_atomic(&target_file, b"durability_test", true));
         assert_eq!(std::fs::read(&target_file).unwrap(), b"durability_test");
 
         let db_dir = dir.join("db");
         let mut store = ChunkStore::open(db_dir.to_str().unwrap()).unwrap();
         store.put_chunk(0, 0, b"chunk_payload").unwrap();
         assert!(store.flush().is_ok());
-        assert_eq!(store.get_chunk(0, 0).unwrap(), b"chunk_payload");
+        assert_eq!(store.get_chunk(0, 0).unwrap().unwrap(), b"chunk_payload");
     }
 
     #[test]
     fn test_chunk_store_default_and_env_options() {
         let opts = ChunkStore::default_options();
-        assert_eq!(opts.write_buffer_size, 512 * 1024);
+        assert_eq!(opts.write_buffer_size, 4 * 1024 * 1024);
         assert_eq!(opts.block_cache_capacity_bytes, 512 * 1024);
     }
 }

@@ -481,6 +481,15 @@ pub fn read_string<R: Read>(reader: &mut R) -> std::io::Result<String> {
 
 pub fn write_string<W: Write>(writer: &mut W, s: &str) -> std::io::Result<()> {
     let bytes = s.as_bytes();
+    // Java `writeUTF` throws past 65535 bytes; anything over i16 range
+    // used to silently wrap the length prefix and corrupt every
+    // following field in the blob. Reject instead (Java parity).
+    if bytes.len() > i16::MAX as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("NBT string too long: {} bytes", bytes.len()),
+        ));
+    }
     let len = bytes.len() as u16;
     writer.write_all(&len.to_be_bytes())?;
     writer.write_all(bytes)
@@ -657,20 +666,26 @@ pub fn write_payload<W: Write>(writer: &mut W, tag: &NbtTag) -> std::io::Result<
             let len = list.elements.len() as i32;
             writer.write_all(&len.to_be_bytes())?;
             for elem in &list.elements {
+                debug_assert_eq!(elem.tag_type(), list.tag_type);
                 write_payload(writer, elem)?;
             }
             Ok(())
         }
-        NbtTag::Compound(comp) => {
-            for (name, tag) in &comp.map {
-                let tag_type = tag.tag_type();
-                writer.write_all(&[tag_type])?;
-                write_string(writer, name)?;
-                write_payload(writer, tag)?;
-            }
-            writer.write_all(&[0]) // TAG_End
-        }
+        NbtTag::Compound(comp) => write_compound(writer, comp),
     }
+}
+
+/// Write one compound's payload without materializing a temporary
+/// `NbtTag::Compound` (the root path used to deep-clone the entire
+/// compound — ~100 KB per chunk save — just to satisfy the enum).
+fn write_compound<W: Write>(writer: &mut W, comp: &NbtCompound) -> std::io::Result<()> {
+    for (name, tag) in &comp.map {
+        let tag_type = tag.tag_type();
+        writer.write_all(&[tag_type])?;
+        write_string(writer, name)?;
+        write_payload(writer, tag)?;
+    }
+    writer.write_all(&[0]) // TAG_End
 }
 
 pub fn read_root<R: Read>(reader: &mut R) -> std::io::Result<(String, NbtCompound)> {
@@ -691,7 +706,7 @@ pub fn read_root<R: Read>(reader: &mut R) -> std::io::Result<(String, NbtCompoun
 pub fn write_root<W: Write>(writer: &mut W, name: &str, comp: &NbtCompound) -> std::io::Result<()> {
     writer.write_all(&[10])?;
     write_string(writer, name)?;
-    write_payload(writer, &NbtTag::Compound(comp.clone()))
+    write_compound(writer, comp)
 }
 
 fn read_nbt_string_from_buffer(buf: &mut ByteBuffer) -> Result<String, NbtError> {
@@ -901,6 +916,7 @@ pub fn write_payload_to_buffer(buf: &mut ByteBuffer, tag: &NbtTag) -> Result<(),
                 Ok(n) => {
                     buf.write_int(n);
                     for elem in &list.elements {
+                        debug_assert_eq!(elem.tag_type(), list.tag_type);
                         write_payload_to_buffer(buf, elem)?;
                     }
                     Ok(())
