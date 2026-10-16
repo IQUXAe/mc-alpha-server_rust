@@ -279,6 +279,21 @@ impl Server {
         self.register_conn(conn)
     }
 
+    /// Is the given IP in the trusted proxies list for PROXY protocol?
+    pub(crate) fn is_trusted_proxy(&self, ip: &str) -> bool {
+        if !self.settings.proxy_protocol {
+            return false;
+        }
+        let clean_ip = ip.trim_matches(['[', ']']);
+        for trusted in &self.settings.trusted_proxies {
+            let clean_trusted = trusted.trim_matches(['[', ']']);
+            if clean_trusted == "*" || clean_trusted == clean_ip {
+                return true;
+            }
+        }
+        false
+    }
+
     fn register_conn(&mut self, conn: Conn) -> Option<ConnId> {
         // Global TCP cap (fd/memory bound). Deliberate addition — vanilla
         // gates only at join (`max-players`), leaving the 30s login window
@@ -292,18 +307,23 @@ impl Server {
             // Peer address unavailable: cannot enforce any IP policy.
             return None;
         }
-        if self.login_rate_limited(&ip) {
-            log::info(&format!("Login rate limit reached for IP {ip}"));
-            return None;
-        }
-        let count = self.ip_count.get(&ip).copied().unwrap_or(0);
-        if count >= MAX_CONNECTIONS_PER_IP {
-            log::info(&format!("Connection limit reached for IP {ip}"));
-            return None;
+        let is_proxy = self.is_trusted_proxy(&ip);
+        if is_proxy {
+            conn.set_proxy_protocol_expected(true);
+        } else {
+            if self.login_rate_limited(&ip) {
+                log::info(&format!("Login rate limit reached for IP {ip}"));
+                return None;
+            }
+            let count = self.ip_count.get(&ip).copied().unwrap_or(0);
+            if count >= MAX_CONNECTIONS_PER_IP {
+                log::info(&format!("Connection limit reached for IP {ip}"));
+                return None;
+            }
+            *self.ip_count.entry(ip.clone()).or_insert(0) += 1;
         }
         let id = self.next_conn;
         self.next_conn += 1;
-        *self.ip_count.entry(ip.clone()).or_insert(0) += 1;
         // A failed poll registration used to be swallowed (`let _`),
         // leaving a ghost session that held its fd but was never polled.
         // Drop the connection and roll the IP slot back instead.
@@ -316,10 +336,12 @@ impl Server {
         });
         if registered.is_err() {
             log::warning(&format!("Failed to register connection {id} with mio; dropping"));
-            if let Some(n) = self.ip_count.get_mut(ip_of(&conn.remote)) {
-                *n -= 1;
-                if *n <= 0 {
-                    self.ip_count.remove(ip_of(&conn.remote));
+            if !is_proxy {
+                if let Some(n) = self.ip_count.get_mut(ip_of(&conn.remote)) {
+                    *n -= 1;
+                    if *n <= 0 {
+                        self.ip_count.remove(ip_of(&conn.remote));
+                    }
                 }
             }
             return None;
@@ -655,6 +677,33 @@ impl Server {
         let mut over_rate = false;
         for ev in events {
             match ev {
+                ConnEvent::ProxyResolved(new_remote) => {
+                    let real_ip = ip_of(&new_remote).to_string();
+                    sess.conn.remote = new_remote;
+                    if let SessionState::Login(login) = &mut sess.state {
+                        login.set_remote(real_ip.clone());
+                    }
+                    if self.banned_ips.contains(&real_ip) {
+                        log::info(&format!("Dropping connection from banned IP {real_ip}"));
+                        sess.conn.close();
+                        dropped = true;
+                        break;
+                    }
+                    if self.login_rate_limited(&real_ip) {
+                        log::info(&format!("Login rate limit reached for IP {real_ip}"));
+                        sess.conn.close();
+                        dropped = true;
+                        break;
+                    }
+                    let count = self.ip_count.get(&real_ip).copied().unwrap_or(0);
+                    if count >= MAX_CONNECTIONS_PER_IP {
+                        log::info(&format!("Connection limit reached for IP {real_ip}"));
+                        sess.conn.close();
+                        dropped = true;
+                        break;
+                    }
+                    *self.ip_count.entry(real_ip).or_insert(0) += 1;
+                }
                 ConnEvent::Packet(p) => {
                     packets.push(p);
                     if packets.len() > MAX_PACKETS_PER_TICK {

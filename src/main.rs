@@ -78,6 +78,12 @@ fn main() {
         log::warning("While this makes the game possible to play without internet access, it also opens up the ability for hackers to connect with any username they choose.");
         log::warning("To change this, set \"online-mode\" to \"true\" in the server.properties file.");
     }
+    if server.settings.proxy_protocol {
+        log::info(&format!(
+            "HAProxy PROXY protocol enabled (trusted proxies: {})",
+            server.settings.trusted_proxies.join(", ")
+        ));
+    }
 
     let bind_ip = server.settings.server_ip.clone();
     let port = server.settings.port;

@@ -1562,4 +1562,92 @@
         );
     }
 
+    #[test]
+    fn test_haproxy_v1_and_v2_support() {
+        use std::io::Write;
+        let mut srv = mk_server("proxy-protocol=true\ntrusted-proxies=127.0.0.1,::1");
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+
+        // 1. PROXY protocol v1 text format
+        let mut client1 = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        let (stream1, _) = l.accept().unwrap();
+        let cid1 = srv.accept(stream1).expect("accept connection 1");
+
+        // Send PROXY v1 header followed by Handshake
+        client1.write_all(b"PROXY TCP4 203.0.113.10 127.0.0.1 54321 25565\r\n").unwrap();
+        client1.write_all(&cli_handshake("ProxyUser1")).unwrap();
+        for _ in 0..5 {
+            srv.tick();
+        }
+        let sess1 = srv.sessions.get(&cid1).expect("session 1 must be present");
+        assert_eq!(sess1.conn.remote, "203.0.113.10:54321");
+
+        // 2. PROXY protocol v2 binary format
+        let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        let (stream2, _) = l.accept().unwrap();
+        let cid2 = srv.accept(stream2).expect("accept connection 2");
+
+        let mut v2_bytes = Vec::new();
+        v2_bytes.extend_from_slice(&crate::server::proxy_protocol::V2_SIG);
+        v2_bytes.push(0x21); // version 2, PROXY
+        v2_bytes.push(0x11); // AF_INET, STREAM
+        v2_bytes.extend_from_slice(&12u16.to_be_bytes()); // length
+        v2_bytes.extend_from_slice(&[198, 51, 100, 42]); // src_ip: 198.51.100.42
+        v2_bytes.extend_from_slice(&[127, 0, 0, 1]); // dst_ip: 127.0.0.1
+        v2_bytes.extend_from_slice(&4321u16.to_be_bytes()); // src_port: 4321
+        v2_bytes.extend_from_slice(&25565u16.to_be_bytes()); // dst_port: 25565
+
+        client2.write_all(&v2_bytes).unwrap();
+        client2.write_all(&cli_handshake("ProxyUser2")).unwrap();
+        for _ in 0..5 {
+            srv.tick();
+        }
+        let sess2 = srv.sessions.get(&cid2).expect("session 2 must be present");
+        assert_eq!(sess2.conn.remote, "198.51.100.42:4321");
+
+        // 3. Exceeding 5 connections through proxy with distinct real IPs (bypasses 127.0.0.1 limit)
+        let mut clients = Vec::new();
+        for i in 1..=6 {
+            let mut c = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+            let (s, _) = l.accept().unwrap();
+            let cid = srv.accept(s).expect("proxy connection must not be rejected at accept stage");
+            let header = format!("PROXY TCP4 192.168.1.{i} 127.0.0.1 5000{i} 25565\r\n");
+            c.write_all(header.as_bytes()).unwrap();
+            c.write_all(&cli_handshake(&format!("User{i}"))).unwrap();
+            clients.push((c, cid, format!("192.168.1.{i}:5000{i}")));
+        }
+        for _ in 0..5 {
+            srv.tick();
+        }
+        for (_, cid, expected_remote) in &clients {
+            let sess = srv.sessions.get(cid).expect("all 6 proxy connections must remain active");
+            assert_eq!(&sess.conn.remote, expected_remote);
+        }
+
+        // 4. Banned real IP is blocked even when connecting through proxy
+        srv.banned_ips.insert("10.99.99.99".to_string());
+        let mut bad_client = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        let (bad_stream, _) = l.accept().unwrap();
+        let bad_cid = srv.accept(bad_stream).expect("accept stage accepts proxy socket");
+        bad_client.write_all(b"PROXY TCP4 10.99.99.99 127.0.0.1 55555 25565\r\n").unwrap();
+        bad_client.write_all(&cli_handshake("BadUser")).unwrap();
+        for _ in 0..5 {
+            srv.tick();
+        }
+        assert!(srv.sessions.get(&bad_cid).is_none(), "banned real IP must be dropped");
+
+        // 5. Direct connection fallback without proxy header works seamlessly
+        let mut direct_client = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        let (direct_stream, _) = l.accept().unwrap();
+        let direct_cid = srv.accept(direct_stream).expect("direct accept");
+        direct_client.write_all(&cli_handshake("DirectUser")).unwrap();
+        for _ in 0..5 {
+            srv.tick();
+        }
+        let direct_sess = srv.sessions.get(&direct_cid).expect("direct connection must remain active");
+        assert!(direct_sess.conn.remote.starts_with("127.0.0.1:"));
+    }
+
+
 

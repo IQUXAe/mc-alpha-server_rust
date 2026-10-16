@@ -146,6 +146,11 @@ impl LoginSession {
         self
     }
 
+    /// Mutably update the remote IP (e.g. after resolving PROXY protocol header).
+    pub fn set_remote(&mut self, ip: String) {
+        self.remote_ip = ip;
+    }
+
     /// Queue a kick for a server-side rejection (ban lists etc.) and end
     /// the handshake without touching the verifier pool.
     pub fn kick_now(&mut self, reason: &str) {

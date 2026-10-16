@@ -30,6 +30,7 @@ pub const CLOSING_SESSION_MAX_TICKS: u32 = 100;
 /// Connection event: a decoded packet or a dead socket.
 pub enum ConnEvent {
     Packet(PacketData),
+    ProxyResolved(String),
     Dropped,
 }
 
@@ -39,6 +40,7 @@ struct ConnInner {
     outbound: Vec<u8>,
     inbound: Vec<ConnEvent>,
     recv_limit: usize,
+    proxy_protocol_expected: bool,
     closed: bool,
     closing: bool,
     dropped_reported: bool,
@@ -78,6 +80,33 @@ impl ConnInner {
                     continue;
                 }
                 Err(_) => {
+                    self.closed = true;
+                    if !self.dropped_reported {
+                        self.dropped_reported = true;
+                        self.inbound.push(ConnEvent::Dropped);
+                    }
+                    return;
+                }
+            }
+        }
+
+        if self.proxy_protocol_expected {
+            use crate::server::proxy_protocol::{ProxyHeaderResult, parse_proxy_header};
+            match parse_proxy_header(&self.recv_buf) {
+                ProxyHeaderResult::Complete { consumed, client_addr } => {
+                    self.recv_buf.drain(..consumed);
+                    self.proxy_protocol_expected = false;
+                    if let Some(addr) = client_addr {
+                        self.inbound.push(ConnEvent::ProxyResolved(addr.to_string()));
+                    }
+                }
+                ProxyHeaderResult::Incomplete => {
+                    return;
+                }
+                ProxyHeaderResult::NotProxyHeader => {
+                    self.proxy_protocol_expected = false;
+                }
+                ProxyHeaderResult::InvalidHeader => {
                     self.closed = true;
                     if !self.dropped_reported {
                         self.dropped_reported = true;
@@ -203,12 +232,18 @@ impl Conn {
                 outbound: Vec::with_capacity(1024),
                 inbound: Vec::new(),
                 recv_limit: RECV_QUEUE_LOGIN_MAX_BYTES,
+                proxy_protocol_expected: false,
                 closed: false,
                 closing: false,
                 dropped_reported: false,
             }),
             remote,
         }
+    }
+
+    /// Enable expectation of a HAProxy PROXY protocol v1/v2 header from this connection.
+    pub fn set_proxy_protocol_expected(&self, expected: bool) {
+        self.inner.borrow_mut().proxy_protocol_expected = expected;
     }
 
     /// Raise the receive cap (login leg -> authenticated play).

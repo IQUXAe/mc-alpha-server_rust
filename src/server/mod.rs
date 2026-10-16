@@ -57,6 +57,7 @@ use crate::world::World;
 
 pub mod chunk_worker;
 pub mod console;
+pub mod proxy_protocol;
 pub mod saves;
 pub mod sessions;
 pub mod settings;

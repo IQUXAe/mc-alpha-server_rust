@@ -36,6 +36,8 @@ pub struct Settings {
     pub auth_server_url: String,
     pub gpu_acceleration: bool,
     pub gpu_backend: String,
+    pub proxy_protocol: bool,
+    pub trusted_proxies: Vec<String>,
 }
 
 /// Leading-integer seed parse (mirrors `std::stoll`: optional `-`,
@@ -145,6 +147,18 @@ pub fn load_settings(cfg: &mut ServerConfig) -> Settings {
         ),
         gpu_acceleration,
         gpu_backend,
+        proxy_protocol: cfg.get_bool("proxy-protocol", false)
+            || cfg.get_bool("haproxy", false)
+            || cfg.get_bool("use-proxy-protocol", false)
+            || std::env::var("ALPHA_PROXY_PROTOCOL")
+                .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+        trusted_proxies: cfg
+            .get_string("trusted-proxies", "127.0.0.1,::1")
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
     }
 }
 
