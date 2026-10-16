@@ -594,7 +594,7 @@ impl Chunk {
     /// Full-column rescan (used by `generateHeightMap` where no previous
     /// height is known).
     fn recalculate_height_column(&mut self, x: i32, z: i32) {
-        self.recalculate_height_column_from(x, z, CHUNK_SIZE_Y - 1);
+        self.recalculate_height_column_from(x, z, CHUNK_SIZE_Y);
     }
 
     /// Heightmap update on a single block write (port of Java
@@ -611,7 +611,7 @@ impl Chunk {
             None => return,
         };
         let cur = self.height_map.get(idx).map(|v| i32::from(*v)).unwrap_or(0);
-        let mut y: i32 = cur.max(y_written).min(CHUNK_SIZE_Y - 1);
+        let mut y: i32 = cur.max(y_written).min(CHUNK_SIZE_Y);
         while y > 0 {
             let below = self.get_block_id(x, y - 1, z);
             if light_opacity(below) != 0 {
@@ -657,6 +657,7 @@ impl Chunk {
     /// this port stops at the chunk border (equivalent to C++ with all
     /// neighbours missing).
     pub fn generate_skylight_map(&mut self) {
+        self.generate_height_map();
         self.invalidate_cache();
         self.blocklight = NibbleArray::new();
         let mut sky_queue: VecDeque<LightNode> = VecDeque::with_capacity(2048);

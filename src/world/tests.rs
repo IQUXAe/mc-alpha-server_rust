@@ -3540,4 +3540,52 @@
         assert_eq!(w.get_block_id(2, 64, 2), 18, "Player placed leaf must still persist");
     }
 
+    #[test]
+    fn test_tree_log_break_recalculates_skylight() {
+        let mut w = world_with_floor(); // stone at y=63
+        // Build a tree with trunk at (8, 64..=67, 8)
+        for y in 64..=67 {
+            w.set_block_id(8, y, 8, 17);
+        }
+        // Canopy at y=66..=67 of radius 2 (x in 6..=10, z in 6..=10)
+        for x in 6..=10 {
+            for z in 6..=10 {
+                if x == 8 && z == 8 {
+                    continue;
+                }
+                w.set_block_id(x, 66, z, 18);
+                w.set_block_id(x, 67, z, 18);
+            }
+        }
+        // Top canopy at y=68 of radius 1 (x in 7..=9, z in 7..=9)
+        for x in 7..=9 {
+            for z in 7..=9 {
+                w.set_block_id(x, 68, z, 18);
+            }
+        }
+        w.refresh_light();
+
+        // While trunk is present, trunk at (8, 64, 8) has light 0 (opaque solid wood)
+        assert_eq!(w.saved_light_value(0, 8, 64, 8), 0);
+
+        // Break bottom trunk block at (8, 64, 8)
+        w.apply_set_notify(8, 64, 8, 0);
+        assert_eq!(w.leaf_decay_updates, vec![[8, 64, 8]]);
+        w.refresh_light();
+
+        // After breaking the trunk block and refreshing light, the newly created air space
+        // at (8, 64, 8) under the tree canopy MUST have recalculated skylight > 0
+        let light = w.saved_light_value(0, 8, 64, 8);
+        assert!(
+            light > 0,
+            "Light at broken tree trunk space must recalculate to > 0 (avoid pitch black spot), got {light}"
+        );
+
+        // Subchunk packet generation for leaf_decays must produce a valid subchunk covering (8, 64, 8)
+        let decays = std::mem::take(&mut w.leaf_decay_updates);
+        let subchunks = crate::session_packets::pkt_subchunk_leaf_decays(&w, &decays, |_, _| true);
+        assert!(!subchunks.is_empty(), "Subchunk packet must be generated for trunk break");
+        assert_eq!(subchunks[0].0, (0, 0));
+    }
+
 

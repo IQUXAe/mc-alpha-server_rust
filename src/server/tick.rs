@@ -416,8 +416,36 @@ impl Server {
         };
         world.refresh_light();
         let players_by_chunk = &self.players_by_chunk;
+        let leaf_decays = std::mem::take(&mut world.leaf_decay_updates);
+        let subchunk_covered_cells: HashSet<[i32; 3]> = if !leaf_decays.is_empty() {
+            let covered: HashSet<[i32; 3]> = leaf_decays.iter().copied().collect();
+            for ((lcx, lcz), sc) in
+                crate::session_packets::pkt_subchunk_leaf_decays(
+                    world,
+                    &leaf_decays,
+                    |cx, cz| Self::has_conn_in_chunk(players_by_chunk, dim, cx, cz),
+                )
+            {
+                Self::for_each_conn_in_chunk(
+                    &self.players_by_chunk,
+                    &self.players,
+                    chunk_map_key(dim, lcx, lcz),
+                    |cid| {
+                        if let Some(sess) = self.sessions.get(&cid) {
+                            sess.conn.queue(&sc);
+                        }
+                    },
+                );
+            }
+            covered
+        } else {
+            HashSet::new()
+        };
         const MAX_BLOCK_UPDATES_PER_TICK: usize = 1024;
         for [x, y, z] in world.take_block_updates_budgeted(MAX_BLOCK_UPDATES_PER_TICK) {
+            if subchunk_covered_cells.contains(&[x, y, z]) {
+                continue;
+            }
             let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
             if !Self::has_conn_in_chunk(players_by_chunk, dim, cx, cz) {
                 continue;

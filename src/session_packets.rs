@@ -371,6 +371,114 @@ pub fn pkt_subchunk_furnace_light_filtered<F: Fn(i32, i32) -> bool>(
     out
 }
 
+/// Build per-chunk `Packet51MapChunk` subchunks covering the columns
+/// around a set of decaying/removed leaf or log blocks.
+///
+/// In Minecraft Alpha 1.2.6, `Packet53BlockChange` alone does not cause
+/// the client to recalculate skylight across the canopy or down to the ground,
+/// leaving dark shadows where leaves were. Sending fresh subchunk packets
+/// propagates the server's calculated skylight down to the ground and
+/// triggers re-rendering on the client.
+pub fn pkt_subchunk_leaf_decays<F: Fn(i32, i32) -> bool>(
+    world: &crate::world::World,
+    decays: &[[i32; 3]],
+    is_chunk_watched: F,
+) -> Vec<((i32, i32), Vec<u8>)> {
+    if decays.is_empty() {
+        return Vec::new();
+    }
+    const R: i32 = 3;
+    let mut chunk_bounds: std::collections::HashMap<(i32, i32), (i32, i32, i32, i32, i32)> =
+        std::collections::HashMap::new();
+
+    for &[x, y, z] in decays {
+        if !(0..crate::world::WORLD_HEIGHT).contains(&y) {
+            continue;
+        }
+        let wx0 = x - R;
+        let wx_end = x + R + 1;
+        let wz0 = z - R;
+        let wz_end = z + R + 1;
+
+        let cx0 = wx0.div_euclid(16);
+        let cx1 = (wx_end - 1).div_euclid(16);
+        let cz0 = wz0.div_euclid(16);
+        let cz1 = (wz_end - 1).div_euclid(16);
+
+        for cx in cx0..=cx1 {
+            let x_start = wx0.max(cx * 16);
+            let x_end = wx_end.min((cx + 1) * 16);
+            for cz in cz0..=cz1 {
+                if !is_chunk_watched(cx, cz) {
+                    continue;
+                }
+                let z_start = wz0.max(cz * 16);
+                let z_end = wz_end.min((cz + 1) * 16);
+
+                let entry = chunk_bounds
+                    .entry((cx, cz))
+                    .or_insert((x_start, x_end, z_start, z_end, y));
+                entry.0 = entry.0.min(x_start);
+                entry.1 = entry.1.max(x_end);
+                entry.2 = entry.2.min(z_start);
+                entry.3 = entry.3.max(z_end);
+                entry.4 = entry.4.min(y);
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(chunk_bounds.len());
+    for ((cx, cz), (x_start, x_end, z_start, z_end, min_decay_y)) in chunk_bounds {
+        let sx = x_end - x_start;
+        let sz = z_end - z_start;
+        if sx <= 0 || sz <= 0 {
+            continue;
+        }
+
+        let mut min_ground = min_decay_y;
+        for bx in x_start..x_end {
+            for bz in z_start..z_end {
+                let mut gy = world.get_height_value(bx, bz);
+                while gy > 0 {
+                    let id = world.get_block_id(bx, gy - 1, bz);
+                    if id != 0 && id != 18 && id != 17 {
+                        break;
+                    }
+                    gy -= 1;
+                }
+                min_ground = min_ground.min(gy);
+            }
+        }
+
+        let y0 = (min_ground - 2).max(0) & !1;
+        let y1 = crate::world::WORLD_HEIGHT;
+        let sy = y1 - y0;
+
+        if let Some(pkt) = pkt_subchunk_in_chunk(
+            world,
+            x_start,
+            y0,
+            z_start,
+            sx,
+            sy,
+            sz,
+        ) {
+            out.push(((cx, cz), pkt));
+        }
+    }
+    out
+}
+
+pub fn pkt_subchunk_leaf_light<F: Fn(i32, i32) -> bool>(
+    world: &crate::world::World,
+    x: i32,
+    y: i32,
+    z: i32,
+    is_chunk_watched: F,
+) -> Vec<((i32, i32), Vec<u8>)> {
+    pkt_subchunk_leaf_decays(world, &[[x, y, z]], is_chunk_watched)
+}
+
 pub fn tile_packet(x: i32, y: i32, z: i32, tile: &TileData) -> Vec<u8> {
     use crate::nbt::write_root;
     use std::io::Write as _;

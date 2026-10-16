@@ -1439,6 +1439,93 @@
     }
 
     #[test]
+    fn test_pkt_subchunk_leaf_light_includes_propagated_skylight() {
+        use std::io::Read as _;
+        let mut w = floor_world();
+        // Place leaves above floor
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                w.set_block_id(8 + dx, 68, 8 + dz, 18);
+            }
+        }
+        w.refresh_light();
+        // Remove center leaf
+        w.set_block_id(8, 68, 8, 0);
+        w.refresh_light();
+
+        let subchunks = crate::session_packets::pkt_subchunk_leaf_light(&w, 8, 68, 8, |cx, cz| cx == 0 && cz == 0);
+        assert_eq!(subchunks.len(), 1);
+        let ((cx, cz), pkt) = &subchunks[0];
+        assert_eq!((*cx, *cz), (0, 0));
+        assert_eq!(pkt[0], 51);
+        let sx = pkt[11] as usize + 1;
+        let sy = pkt[12] as usize + 1;
+        let sz = pkt[13] as usize + 1;
+        let mut dec = flate2::read::ZlibDecoder::new(&pkt[18..]);
+        let mut raw = Vec::new();
+        dec.read_to_end(&mut raw).unwrap();
+        let vol = sx * sy * sz;
+        assert_eq!(raw.len(), vol * 5 / 2);
+        // Skylight section starts at offset `vol * 2`.
+        let sky_slice = &raw[vol * 2..];
+        // After leaf removal, sunlight (15) penetrates the open column.
+        assert!(
+            sky_slice.iter().any(|&b| (b & 0xF) == 15 || (b >> 4) == 15),
+            "subchunk skylight must include full skylight=15 where leaf decayed"
+        );
+        // Verify sy reaches top of world (y0 + sy == 128)
+        let y0 = i16::from_be_bytes([pkt[5], pkt[6]]) as i32;
+        assert_eq!(y0 + sy as i32, 128, "subchunk must span all the way to Y=128");
+    }
+
+    #[test]
+    fn test_pkt_subchunk_leaf_decays_batches_and_reaches_sloped_ground_and_cross_chunk() {
+        let mut w = floor_world();
+        // Insert neighbor chunks: (1, 0)
+        w.insert_chunk(crate::chunk::Chunk::new(1, 0));
+
+        // Dig a slope in chunk 0: ground at (6, 58, 6) is dirt
+        for y in 59..=64 {
+            w.set_block_id(6, y, 6, 0);
+        }
+        w.set_block_id(6, 58, 6, 3); // dirt ground at Y=58
+
+        // Decaying leaves at (8, 68, 8) and (9, 68, 8) in chunk (0, 0)
+        // and at chunk border: (15, 68, 8) in chunk (0, 0) and (16, 68, 8) in chunk (1, 0)
+        let decays = [[8, 68, 8], [9, 68, 8], [15, 68, 8], [16, 68, 8]];
+        let subchunks = crate::session_packets::pkt_subchunk_leaf_decays(
+            &w,
+            &decays,
+            |cx, cz| (cx == 0 || cx == 1) && cz == 0,
+        );
+
+        // Must produce exactly 2 packets (1 for chunk (0, 0), 1 for chunk (1, 0))
+        assert_eq!(subchunks.len(), 2, "Must produce batched packets for exactly 2 chunks");
+
+        for ((cx, cz), pkt) in subchunks {
+            assert_eq!(pkt[0], 51);
+            let y0 = i16::from_be_bytes([pkt[5], pkt[6]]) as i32;
+            let sy = pkt[12] as usize + 1;
+            assert_eq!(y0 + sy as i32, 128, "Chunk ({}, {}) subchunk must extend to Y=128", cx, cz);
+            if cx == 0 {
+                // Must have batched [8, 68, 8], [9, 68, 8], and [15, 68, 8] within chunk 0
+                let x0 = i32::from_be_bytes([pkt[1], pkt[2], pkt[3], pkt[4]]);
+                let sx = pkt[11] as usize + 1;
+                // Footprint in chunk 0 spans from (8 - 3) = 5 up to 16 (chunk border)
+                assert_eq!(x0, 5);
+                assert_eq!(sx, 11); // 5..16 is 11 blocks
+                // Sloped ground at Y=58 must pull y0 down to <= 56
+                assert!(y0 <= 56, "y0 ({}) must cover sloped ground at Y=58", y0);
+            } else if cx == 1 {
+                // Chunk 1 starts at x=16
+                let x0 = i32::from_be_bytes([pkt[1], pkt[2], pkt[3], pkt[4]]);
+                assert_eq!(x0, 16);
+            }
+        }
+    }
+
+
+    #[test]
     fn test_ghost_fallback_cannot_place_blocks_or_use_items_and_unobtainables_blocked() {
         let mut w = floor_world();
         let ops = no_ops();

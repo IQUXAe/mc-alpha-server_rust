@@ -228,6 +228,9 @@ pub struct World {
     pub(crate) leaves_queue: Vec<(u8, u8, crate::block::pos::BlockPos)>,
     /// Membership mirror of `leaves_queue` for O(1) deduplication.
     pub(crate) leaves_queued_set: std::collections::HashSet<crate::block::pos::BlockPos>,
+    /// Positions of leaves/logs removed since the last server tick that need
+    /// a subchunk light update sent to clients so client skylight updates down to the ground.
+    pub(crate) leaf_decay_updates: Vec<[i32; 3]>,
     /// Chunk unload radius in chunks (mirrors view distance + 2).
     pub unload_radius: i32,
     /// Unloaded chunks with their entity spill (mirrors the leveldb
@@ -357,6 +360,7 @@ impl World {
             scheduled_set: std::collections::HashSet::new(),
             leaves_queue: Vec::new(),
             leaves_queued_set: std::collections::HashSet::new(),
+            leaf_decay_updates: Vec::new(),
             unload_radius: 12,
             unloaded: HashMap::new(),
             tiles: WorldTiles::new(),
@@ -628,6 +632,9 @@ impl World {
             if !self.populating && Self::block_light_profile_changed(old, id) {
                 let (cx, cz, _, _) = Self::chunk_of(x, z);
                 self.light_dirty.insert((cx, cz));
+            }
+            if !self.populating && matches!(old, 17 | 18) && id == 0 {
+                self.leaf_decay_updates.push([x, y, z]);
             }
             true
         } else {
