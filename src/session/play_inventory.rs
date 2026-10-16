@@ -80,16 +80,45 @@ impl PlaySession {
                 }
             }
             if !has_item {
-                for slot in &mut p.inventory.main {
-                    if let Some(s) = slot {
-                        if s.item_id == item_id as i32 && s.count >= count as i32 {
-                            damage = s.damage;
-                            has_item = true;
-                            s.count -= count as i32;
-                            if s.count == 0 {
-                                *slot = None;
+                let is_tool = crate::item_data::item_max_damage(item_id as i32) > 0;
+                let mut best_idx = None;
+                // Scan hotbar slots (0..9) first, preferring damaged tools
+                for i in 0..9.min(p.inventory.main.len()) {
+                    if let Some(s) = p.inventory.main[i] {
+                        if s.item_id == item_id as i32
+                            && s.count >= count as i32
+                            && (best_idx.is_none() || (is_tool && s.damage > 0))
+                        {
+                            best_idx = Some(i);
+                            if is_tool && s.damage > 0 {
+                                break;
                             }
-                            break;
+                        }
+                    }
+                }
+                // If not in hotbar, scan upper inventory (9..36)
+                if best_idx.is_none() {
+                    for i in 9..p.inventory.main.len() {
+                        if let Some(s) = p.inventory.main[i] {
+                            if s.item_id == item_id as i32
+                                && s.count >= count as i32
+                                && (best_idx.is_none() || (is_tool && s.damage > 0))
+                            {
+                                best_idx = Some(i);
+                                if is_tool && s.damage > 0 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(idx) = best_idx {
+                    if let Some(s) = &mut p.inventory.main[idx] {
+                        damage = s.damage;
+                        has_item = true;
+                        s.count -= count as i32;
+                        if s.count == 0 {
+                            p.inventory.main[idx] = None;
                         }
                     }
                 }
@@ -133,6 +162,24 @@ impl PlaySession {
             }
         }
 
+        // Check recent_removed_stacks (stack was dragged with mouse cursor in GUI and slot was already cleared)
+        if !has_item {
+            if let Some(pos) = self.recent_removed_stacks.iter().rposition(|s| s.item_id == item_id as i32) {
+                let s = self.recent_removed_stacks.remove(pos);
+                damage = s.damage;
+                has_item = true;
+            }
+        }
+
+        // Fallback: check last_tool_damage if item is a tool
+        if damage == 0 && crate::item_data::item_max_damage(item_id as i32) > 0 {
+            if let Some(&last_dmg) = self.last_tool_damage.get(&(item_id as i32)) {
+                if last_dmg > 0 {
+                    damage = last_dmg;
+                }
+            }
+        }
+
         if !has_item {
             // Vanilla fallback (`NetServerHandler.handlePickupSpawn`
             // spawns the entity with no inventory check): the stack can
@@ -159,6 +206,10 @@ impl PlaySession {
             }
         }
 
+        if damage > 0 {
+            self.last_tool_damage.insert(item_id as i32, damage);
+        }
+
         let eid = ctx.world.spawn_item_entity(item_id as i32, count as i32, damage, rx, ry, rz);
         if let Some(Entity::Item(it)) = ctx.world.entities.get_mut(eid) {
             it.body.motion[0] = rotation as f64 / 128.0;
@@ -183,7 +234,14 @@ impl PlaySession {
         // valid id), counts to the per-item max stack, damage to the
         // per-item max durability.
         let is_op = self.is_op(ctx);
-        fn apply(bank: &mut [Option<ItemStack>], slots: &[crate::network::SlotData], is_op: bool) {
+        let mut removed = Vec::new();
+        fn apply(
+            bank: &mut [Option<ItemStack>],
+            slots: &[crate::network::SlotData],
+            is_op: bool,
+            removed: &mut Vec<ItemStack>,
+            last_tool_damage: &mut std::collections::HashMap<i32, i32>,
+        ) {
             let n = slots.len().min(bank.len());
             for i in 0..n {
                 let id = slots[i].item_id as i32;
@@ -192,19 +250,27 @@ impl PlaySession {
                 } else {
                     crate::item_data::item_is_obtainable(id)
                 };
-                if !allowed {
-                    bank[i] = None;
-                    continue;
-                }
                 let max_stack = crate::player::inventory::inventory_max_stack_size(id).max(1);
-                let count = (slots[i].count as i32).clamp(0, max_stack);
+                let count = if allowed { (slots[i].count as i32).clamp(0, max_stack) } else { 0 };
                 let max_dmg = crate::item_data::item_max_damage(id);
-                let dmg = if max_dmg > 0 {
+                let dmg = if allowed && max_dmg > 0 {
                     (slots[i].damage as i32).clamp(0, max_dmg)
                 } else {
                     0
                 };
-                bank[i] = if count > 0 {
+                if allowed && dmg > 0 {
+                    last_tool_damage.insert(id, dmg);
+                }
+
+                if let Some(old_s) = bank[i] {
+                    if !allowed || count == 0 || old_s.item_id != id {
+                        removed.push(old_s);
+                    } else if count < old_s.count {
+                        removed.push(ItemStack::new(old_s.item_id, old_s.count - count, old_s.damage));
+                    }
+                }
+
+                bank[i] = if allowed && count > 0 {
                     Some(ItemStack::new(id, count, dmg))
                 } else {
                     None
@@ -214,17 +280,24 @@ impl PlaySession {
         let me = self.player;
         if inv_type == -1 {
             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
-                apply(&mut p.inventory.main, slots, is_op);
+                apply(&mut p.inventory.main, slots, is_op, &mut removed, &mut self.last_tool_damage);
             }
             self.sync_held(ctx.world);
         } else if inv_type == -2 {
             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
-                apply(&mut p.inventory.crafting, slots, is_op);
+                apply(&mut p.inventory.crafting, slots, is_op, &mut removed, &mut self.last_tool_damage);
             }
         } else if inv_type == -3 {
             if let Some(Entity::Player(p)) = ctx.world.entities.get_mut(me) {
-                apply(&mut p.inventory.armor, slots, is_op);
+                apply(&mut p.inventory.armor, slots, is_op, &mut removed, &mut self.last_tool_damage);
             }
+        }
+        for r in removed {
+            self.recent_removed_stacks.push(r);
+        }
+        if self.recent_removed_stacks.len() > 16 {
+            let excess = self.recent_removed_stacks.len() - 16;
+            self.recent_removed_stacks.drain(0..excess);
         }
     }
 

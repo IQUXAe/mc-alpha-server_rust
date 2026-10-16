@@ -2896,6 +2896,20 @@
         assert!(out.is_none());
         assert_eq!(w.get_block_id(4, 64, 5), 52, "OP must be able to place mob spawner");
         assert!(matches!(w.tiles.get(&(4, 64, 5)), Some(crate::world::tiles::TileData::MobSpawner(_))));
+
+        // 4. Leaves (18)
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(18, 64, 0));
+            p.inventory.current = 0;
+        }
+        sess.held_id = 18;
+        let out = sess.place(
+            &mut ctx(&mut w, &ops_set, &mut bc),
+            18, 6, 63, 5, 1,
+        );
+        assert!(out.is_none());
+        assert_eq!(w.get_block_id(6, 64, 5), 18, "OP must be able to place leaves");
+        assert_eq!(w.get_block_meta(6, 64, 5), 4, "OP-placed leaves must have meta 4");
     }
 
     #[test]
@@ -2923,6 +2937,16 @@
         );
         assert!(out.is_none());
         assert_eq!(w.get_block_id(3, 64, 3), 0, "Non-OP must not be able to place fire");
+        assert!(!sess.outbox.is_empty(), "Rollback block changes must be sent");
+
+        // Non-OP attempts to place leaves (18)
+        sess.outbox.clear();
+        let out = sess.place(
+            &mut ctx(&mut w, &ops, &mut bc),
+            18, 4, 63, 4, 1,
+        );
+        assert!(out.is_none());
+        assert_eq!(w.get_block_id(4, 64, 4), 0, "Non-OP must not be able to place leaves");
         assert!(!sess.outbox.is_empty(), "Rollback block changes must be sent");
     }
 
@@ -2983,6 +3007,166 @@
         // Player must have received Packet53 block change
         let has_block_change = sess.outbox.iter().any(|p| p.first() == Some(&53));
         assert!(has_block_change, "Must send Packet53 BlockChange to player");
+    }
+
+    #[test]
+    fn test_drop_tool_preserves_durability_via_q_drop() {
+        use crate::entity::table::Entity;
+        use crate::inventory::ItemStack;
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 257; // Iron pickaxe
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            // Damaged pickaxe in hotbar slot 0, undamaged pickaxe in slot 1
+            p.inventory.main[0] = Some(ItemStack::new(257, 1, 50));
+            p.inventory.main[1] = Some(ItemStack::new(257, 1, 0));
+            p.inventory.current = 0;
+        }
+        let mut bc = Vec::new();
+        let pkt = PacketData::PickupSpawn {
+            entity_id: -1,
+            item_id: 257,
+            count: 1,
+            x: (3.5 * 32.0) as i32,
+            y: (64.0 * 32.0) as i32,
+            z: (4.5 * 32.0) as i32,
+            rotation: 0,
+            pitch: 0,
+            roll: 0,
+        };
+        sess.pump(&mut ctx(&mut w, &ops, &mut bc), pkt);
+
+        // Slot 0 should be consumed
+        if let Some(Entity::Player(p)) = w.entities.get(player) {
+            assert!(p.inventory.main[0].is_none(), "Held slot 0 should be consumed");
+            assert_eq!(p.inventory.main[1].map(|s| s.damage), Some(0), "Slot 1 undamaged pickaxe untouched");
+        }
+
+        // Dropped entity must have damage 50, NOT 0!
+        let dropped_damage = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .find_map(|id| match w.entities.get(id) {
+                Some(Entity::Item(it)) if it.item_id == 257 => Some(it.damage),
+                _ => None,
+            });
+        assert_eq!(dropped_damage, Some(50), "Dropped iron pickaxe must preserve damage 50");
+    }
+
+    #[test]
+    fn test_drop_tool_preserves_durability_via_gui_drag_drop() {
+        use crate::entity::table::Entity;
+        use crate::inventory::ItemStack;
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+
+        // Player has damaged diamond sword in slot 15
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[15] = Some(ItemStack::new(276, 1, 120));
+        }
+
+        let mut bc = Vec::new();
+        // 1. Client drags sword with mouse cursor outside GUI:
+        // Client sends Packet5PlayerInventory clearing slot 15
+        let slots = vec![crate::network::SlotData { item_id: -1, count: 0, damage: 0 }; 36];
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::PlayerInventory { inventory_type: -1, slots },
+        );
+
+        // 2. Client sends Packet21 PickupSpawn for item 276 count 1
+        let pkt = PacketData::PickupSpawn {
+            entity_id: -1,
+            item_id: 276,
+            count: 1,
+            x: (3.5 * 32.0) as i32,
+            y: (64.0 * 32.0) as i32,
+            z: (4.5 * 32.0) as i32,
+            rotation: 0,
+            pitch: 0,
+            roll: 0,
+        };
+        sess.pump(&mut ctx(&mut w, &ops, &mut bc), pkt);
+
+        // Dropped entity must have damage 120 from recent_removed_stacks / last_tool_damage
+        let dropped_damage = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .find_map(|id| match w.entities.get(id) {
+                Some(Entity::Item(it)) if it.item_id == 276 => Some(it.damage),
+                _ => None,
+            });
+        assert_eq!(dropped_damage, Some(120), "Dropped diamond sword must preserve damage 120 even if slot was cleared first");
+    }
+
+    #[test]
+    fn test_durability_preserved_across_drop_reconnect_and_pickup() {
+        use crate::entity::table::Entity;
+        use crate::inventory::ItemStack;
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        let mut sess = PlaySession::new(player);
+        sess.held_id = 256; // Iron shovel
+        if let Some(Entity::Player(p)) = w.entities.get_mut(player) {
+            p.inventory.main[0] = Some(ItemStack::new(256, 1, 45));
+            p.inventory.current = 0;
+        }
+
+        let mut bc = Vec::new();
+        // Drop the tool
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::PickupSpawn {
+                entity_id: -1,
+                item_id: 256,
+                count: 1,
+                x: (3.5 * 32.0) as i32,
+                y: (64.0 * 32.0) as i32,
+                z: (4.5 * 32.0) as i32,
+                rotation: 0,
+                pitch: 0,
+                roll: 0,
+            },
+        );
+
+        // Find the dropped item entity
+        let item_eid = w
+            .entities
+            .alive_ids()
+            .into_iter()
+            .find(|&id| matches!(w.entities.get(id), Some(Entity::Item(it)) if it.item_id == 256))
+            .expect("Item entity must be spawned");
+
+        if let Some(Entity::Item(it)) = w.entities.get_mut(item_eid) {
+            assert_eq!(it.damage, 45);
+            it.pickup_delay = 0; // ready for pickup
+        }
+
+        // Simulate player logout / reconnect (new session)
+        drop(sess);
+        let _new_sess = PlaySession::new(player);
+
+        // Perform pickup
+        w.pickup_items();
+
+        // Verify pickup event was generated with damage 45
+        assert_eq!(w.item_pickups.len(), 1);
+        assert_eq!(w.item_pickups[0].damage, 45);
+        assert_eq!(w.item_pickups[0].item_id, 256);
+
+        // Verify player inventory has the shovel with damage 45, NOT 0 (not repaired!)
+        if let Some(Entity::Player(p)) = w.entities.get(player) {
+            let picked_stack = p.inventory.main[0].expect("Player must have picked up the shovel");
+            assert_eq!(picked_stack.item_id, 256);
+            assert_eq!(picked_stack.damage, 45, "Picked up shovel must retain original wear 45, NOT be repaired to 0!");
+        }
     }
 
 

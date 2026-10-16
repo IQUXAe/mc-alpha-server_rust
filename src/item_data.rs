@@ -142,14 +142,14 @@ pub fn item_is_valid(item_id: i32) -> bool {
 
 /// True for items that a player can legitimately hold in survival inventory or
 /// place into containers (excludes technical/unobtainable block IDs such as
-/// bedrock, raw water/lava, fire, mob spawners, portals, lit furnace/ore, etc.).
+/// bedrock, raw water/lava, leaves (no shears in Alpha 1.2.6), fire, mob spawners, portals, lit furnace/ore, etc.).
 pub fn item_is_obtainable(item_id: i32) -> bool {
     if !item_is_valid(item_id) {
         return false;
     }
     !matches!(
         item_id,
-        7 | 8..=11 | 43 | 51 | 52 | 55 | 59 | 60 | 62 | 63 | 64 | 68 | 71 | 74 | 75 | 78 | 83 | 90
+        7 | 8..=11 | 18 | 43 | 51 | 52 | 55 | 59 | 60 | 62 | 63 | 64 | 68 | 71 | 74 | 75 | 78 | 83 | 90
     )
 }
 

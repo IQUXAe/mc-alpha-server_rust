@@ -45,6 +45,11 @@ pub struct PlaySession {
     /// Post-travel grace ticks (no portal pickup, mirrors the vanilla
     /// singleplayer portal cooldown so one stand doesn't ping-pong).
     pub travel_cooldown: u16,
+    /// Recently removed or decremented stacks from player inventory (e.g. cursor drag in GUI).
+    /// Used by `pickup_spawn` to preserve exact durability and stack metadata on drops.
+    pub recent_removed_stacks: Vec<ItemStack>,
+    /// Last known durability wear for tools (indexed by item_id).
+    pub last_tool_damage: std::collections::HashMap<i32, i32>,
 }
 
 impl PlaySession {
@@ -63,6 +68,8 @@ impl PlaySession {
             teleport_wait: None,
             portal_ticks: 0,
             travel_cooldown: 0,
+            recent_removed_stacks: Vec::new(),
+            last_tool_damage: std::collections::HashMap::new(),
         }
     }
 
@@ -164,12 +171,28 @@ impl PlaySession {
         }
         if let Some(Entity::Player(p)) = world.entities.get_mut(self.player) {
             let mut found = false;
-            for i in 0..9 {
-                if let Some(s) = p.inventory.main[i] {
+            let cur = p.inventory.current;
+            if (0..9).contains(&cur) {
+                if let Some(s) = p.inventory.main[cur as usize] {
                     if s.item_id == self.held_id {
-                        p.inventory.current = i as i32;
                         found = true;
-                        break;
+                        if s.damage > 0 {
+                            self.last_tool_damage.insert(s.item_id, s.damage);
+                        }
+                    }
+                }
+            }
+            if !found {
+                for i in 0..9 {
+                    if let Some(s) = p.inventory.main[i] {
+                        if s.item_id == self.held_id {
+                            p.inventory.current = i as i32;
+                            found = true;
+                            if s.damage > 0 {
+                                self.last_tool_damage.insert(s.item_id, s.damage);
+                            }
+                            break;
+                        }
                     }
                 }
             }
