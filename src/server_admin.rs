@@ -195,7 +195,7 @@ pub fn chat_command(
         });
         return;
     }
-    if !op && (cmd.eq_ignore_ascii_case("give") || cmd.eq_ignore_ascii_case("tp") || cmd.eq_ignore_ascii_case("seed")) {
+    if !op && (cmd.eq_ignore_ascii_case("give") || cmd.eq_ignore_ascii_case("tp") || cmd.eq_ignore_ascii_case("seed") || cmd.eq_ignore_ascii_case("boost")) {
         say(sess, "You do not have permission to use this command");
         return;
     }
@@ -391,6 +391,15 @@ mod tests {
         assert_eq!(chats(&sess), vec!["You do not have permission to use this command"]);
         run(&mut w, &mut sess, &ops, "/seed");
         assert_eq!(chats(&sess), vec!["You do not have permission to use this command"]);
+        run(&mut w, &mut sess, &ops, "/boost");
+        assert_eq!(chats(&sess), vec!["You do not have permission to use this command"]);
+        run(&mut w, &mut sess, &ops, "/boost on");
+        assert_eq!(chats(&sess), vec!["You do not have permission to use this command"]);
+
+        // Boost command for ops.
+        let (mut w, mut sess, ops) = setup(true);
+        run(&mut w, &mut sess, &ops, "/boost");
+        assert!(chats(&sess)[0].starts_with("GPU boost:"));
 
         // Seed command for ops.
         let (mut w, mut sess, ops) = setup(true);

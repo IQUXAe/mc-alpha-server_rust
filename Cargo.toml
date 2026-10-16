@@ -37,3 +37,4 @@ all = "warn"
 [lints.rust]
 # One `unsafe` remains for the OS signal handler; keep it visible in review.
 unsafe_code = "warn"
+
