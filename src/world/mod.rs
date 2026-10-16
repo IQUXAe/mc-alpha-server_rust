@@ -226,6 +226,8 @@ pub struct World {
     /// neighbor changes enqueue, `leaves_pump` recomputes a bounded
     /// number of cells per tick — no recursion, no stale counter).
     pub(crate) leaves_queue: Vec<(u8, u8, crate::block::pos::BlockPos)>,
+    /// Membership mirror of `leaves_queue` for O(1) deduplication.
+    pub(crate) leaves_queued_set: std::collections::HashSet<crate::block::pos::BlockPos>,
     /// Chunk unload radius in chunks (mirrors view distance + 2).
     pub unload_radius: i32,
     /// Unloaded chunks with their entity spill (mirrors the leveldb
@@ -354,6 +356,7 @@ impl World {
             scheduled: BTreeMap::new(),
             scheduled_set: std::collections::HashSet::new(),
             leaves_queue: Vec::new(),
+            leaves_queued_set: std::collections::HashSet::new(),
             unload_radius: 12,
             unloaded: HashMap::new(),
             tiles: WorldTiles::new(),

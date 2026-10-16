@@ -35,8 +35,10 @@ pub fn item_push_side(free: [bool; 6], frac: [f64; 3]) -> i8 {
         best_side = 4;
     }
     if free_s && 1.0 - lz < best {
+        best = 1.0 - lz;
         best_side = 5;
     }
+    let _ = best;
     best_side
 }
 

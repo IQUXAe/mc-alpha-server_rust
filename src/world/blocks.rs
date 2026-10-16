@@ -67,6 +67,9 @@ impl World {
         if !self.set_block_id(x, y, z, id) {
             return false;
         }
+        if id == 0 {
+            self.set_block_meta(x, y, z, 0);
+        }
         self.block_added(x, y, z, id);
         self.notify_neighbors_of(x, y, z);
         true
@@ -100,6 +103,9 @@ impl World {
             self.tiles.remove(&(x, y, z));
         } else {
             self.tiles.remove(&(x, y, z));
+        }
+        if old == 17 {
+            crate::block::ticks::block_log_removed(self, BlockPos::new(x, y, z));
         }
     }
 

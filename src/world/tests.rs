@@ -3219,18 +3219,26 @@
         // Wood trunk at (5, 64, 5) and (5, 65, 5)
         w.set_block_id(5, 64, 5, 17);
         w.set_block_id(5, 65, 5, 17);
-        // Canopy leaves connected to wood
+        // Canopy leaves connected to wood with legacy distance metadata (12..=15)
         w.set_block_id(5, 66, 5, 18);
+        w.set_block_meta(5, 66, 5, 12);
         w.set_block_id(6, 65, 5, 18);
+        w.set_block_meta(6, 65, 5, 13);
         w.set_block_id(7, 65, 5, 18);
+        w.set_block_meta(7, 65, 5, 14);
         w.set_block_id(8, 65, 5, 18);
+        w.set_block_meta(8, 65, 5, 15);
 
         // Player placed leaf with meta 4 at (10, 64, 10) (no wood nearby)
         w.set_block_id(10, 64, 10, 18);
         w.set_block_meta(10, 64, 10, 4);
 
-        // While trunk is present, no leaves should decay
-        crate::block::ticks::leaves_pump(&mut w);
+        let _p = add_player(&mut w, "steve", 5.5, 64.0, 5.5);
+
+        // While trunk is present, no leaves should decay under random ticks
+        for _ in 0..50 {
+            w.random_block_ticks();
+        }
         assert_eq!(w.get_block_id(5, 66, 5), 18);
         assert_eq!(w.get_block_id(6, 65, 5), 18);
         assert_eq!(w.get_block_id(7, 65, 5), 18);
@@ -3241,9 +3249,29 @@
         w.apply_set_notify(5, 64, 5, 0);
         w.apply_set_notify(5, 65, 5, 0);
 
-        // Pump leaf decay
-        for _ in 0..10 {
-            crate::block::ticks::leaves_pump(&mut w);
+        // Leaves pump drains the queue and marks orphaned leaves with meta 1
+        crate::block::ticks::leaves_pump(&mut w);
+
+        // Under authentic vanilla client singleplayer rate (80 random block ticks per chunk per tick,
+        // p = 80/32768 per leaf), leaves do NOT all vanish in 1 tick or at an artificial 1-per-tick metronome.
+        w.random_block_ticks();
+        let decayed_after_one_tick = [
+            w.get_block_id(5, 66, 5) == 0,
+            w.get_block_id(6, 65, 5) == 0,
+            w.get_block_id(7, 65, 5) == 0,
+            w.get_block_id(8, 65, 5) == 0,
+        ]
+        .into_iter()
+        .filter(|&b| b)
+        .count();
+        assert!(
+            decayed_after_one_tick < 4,
+            "Leaves must not all decay in 1 tick (vanilla chunk random tick rate)"
+        );
+
+        // Under sustained random block ticks, all orphaned natural canopy leaves decay to air
+        for _ in 0..3000 {
+            w.random_block_ticks();
         }
 
         // All orphaned canopy leaves must decay
@@ -3279,6 +3307,237 @@
         assert!(w.toggle_door(5, 65, 5));
         assert_eq!(w.get_block_meta(5, 64, 5) & 4, 0, "Lower half must be closed");
         assert_eq!(w.get_block_meta(5, 65, 5) & 4, 0, "Upper half must be closed");
+    }
+
+    #[test]
+    fn test_leaf_decay_generated_tree_and_bounded_pump() {
+        let mut w = world_with_floor();
+        w.set_block_id(5, 63, 5, 3); // dirt under sapling
+        {
+            let mut access = crate::decorators::WorldAccess {
+                chunks: &mut w.chunks,
+                populating: w.populating,
+                queue: Some(&mut w.block_updates),
+            };
+            assert!(crate::generate_tree(&mut access, 42, 5, 64, 5), "Tree generation must succeed");
+        }
+
+        // Verify tree has trunk and leaves
+        assert_eq!(w.get_block_id(5, 64, 5), 17);
+        let mut leaf_count = 0;
+        for dx in -3..=3 {
+            for dy in 0..=8 {
+                for dz in -3..=3 {
+                    if w.get_block_id(5 + dx, 64 + dy, 5 + dz) == 18 {
+                        leaf_count += 1;
+                    }
+                }
+            }
+        }
+        assert!(leaf_count > 10, "Tree must have canopy leaves, found {leaf_count}");
+
+        // Player chops down trunk logs from bottom to top
+        for y in 64..=70 {
+            if w.get_block_id(5, y, 5) == 17 {
+                w.apply_set_notify(5, y, 5, 0);
+            }
+        }
+
+        // Queue must have enqueued canopy leaves without blocking
+        assert!(!w.leaves_queue.is_empty(), "Removing log must enqueue leaves");
+        assert!(!w.leaves_queued_set.is_empty(), "Deduplication set must be populated");
+
+        // Leaves pump drains the worklist and marks orphaned leaves with meta 1
+        crate::block::ticks::leaves_pump(&mut w);
+        assert!(w.leaves_queue.is_empty(), "Queue must be empty after pump drains");
+        assert!(w.leaves_queued_set.is_empty(), "Deduplication set must be cleared");
+
+        let _p = add_player(&mut w, "steve", 5.5, 64.0, 5.5);
+
+        // Leaves decay naturally over time under chunk random block ticks
+        for _ in 0..3000 {
+            w.random_block_ticks();
+        }
+
+        // All natural canopy leaves must have decayed to air
+        let mut remaining_leaves = 0;
+        for dx in -3..=3 {
+            for dy in 0..=8 {
+                for dz in -3..=3 {
+                    if w.get_block_id(5 + dx, 64 + dy, 5 + dz) == 18 {
+                        remaining_leaves += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(remaining_leaves, 0, "All natural leaves of chopped tree must decay");
+
+        w.refresh_light();
+        // Skylight must reach ground level (Y=64) cleanly without dark shadows
+        for dx in -3..=3 {
+            for dz in -3..=3 {
+                assert_eq!(
+                    w.saved_light_value(0, 5 + dx, 64, 5 + dz),
+                    15,
+                    "Skylight on ground at ({}, 64, {}) must be 15 after leaf decay",
+                    5 + dx,
+                    5 + dz
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_item_physics_flowing_water_lava_and_pushout() {
+        let mut w = world_with_floor();
+
+        // 1. Water currents
+        // (4, 64, 5) source water (id 9, meta 0)
+        // (5, 64, 5) flowing water (id 8, meta 1)
+        // (6, 64, 5) flowing water (id 8, meta 2)
+        w.set_block_id(4, 64, 5, 9);
+        w.set_block_meta(4, 64, 5, 0);
+        w.set_block_id(5, 64, 5, 8);
+        w.set_block_meta(5, 64, 5, 1);
+        w.set_block_id(6, 64, 5, 8);
+        w.set_block_meta(6, 64, 5, 2);
+
+        let flow = w.water_flow_at(5, 64, 5);
+        assert!(flow.x_coord > 0.0, "Water flow vector must point downstream (+X), got {}", flow.x_coord);
+
+        let eid = w.spawn_item_entity(3, 1, 0, 5.5, 64.5, 5.5);
+        w.tick_item(eid);
+        if let Some(Entity::Item(it)) = w.entities.get(eid) {
+            assert!(it.body.motion[0] > 0.0, "Item in flowing water must receive downstream motion, got {}", it.body.motion[0]);
+        }
+
+        // 2. Lava buoyancy
+        w.set_block_id(10, 64, 10, 10);
+        let lava_eid = w.spawn_item_entity(3, 1, 0, 10.5, 64.1, 10.5);
+        w.tick_item(lava_eid);
+        if let Some(Entity::Item(it)) = w.entities.get(lava_eid) {
+            assert!((it.body.motion[1] - 0.2 * 0.98).abs() < 1e-4, "Item in lava must have upward motion 0.2 damped to 0.196, got {}", it.body.motion[1]);
+        }
+
+        // 3. Block push-out
+        w.set_block_id(15, 64, 15, 1); // stone
+        w.set_block_id(16, 64, 15, 0); // air (+X)
+        w.set_block_id(14, 64, 15, 1); // solid (-X)
+        w.set_block_id(15, 63, 15, 1); // solid (-Y)
+        w.set_block_id(15, 65, 15, 1); // solid (+Y)
+        w.set_block_id(15, 64, 14, 1); // solid (-Z)
+        w.set_block_id(15, 64, 16, 1); // solid (+Z)
+
+        let push_eid = w.spawn_item_entity(3, 1, 0, 15.8, 64.2, 15.5);
+        w.item_push_out(push_eid);
+        if let Some(Entity::Item(it)) = w.entities.get(push_eid) {
+            assert!(it.body.motion[0] > 0.0, "Item stuck in block must push out toward open face (+X), got {}", it.body.motion[0]);
+        }
+    }
+
+    #[test]
+    fn test_leaf_decay_chopping_top_to_bottom_tall_tree() {
+        let mut w = world_with_floor();
+        // Construct a tall tree:
+        // Trunk: (5, 64, 5) to (5, 69, 5) (height 6)
+        for y in 64..=69 {
+            w.set_block_id(5, y, 5, 17);
+        }
+        // Top canopy leaves at Y = 70 and 71 (above dy = 4 from ground log 64)
+        w.set_block_id(5, 70, 5, 18);
+        w.set_block_id(6, 70, 5, 18);
+        w.set_block_id(5, 70, 6, 18);
+        w.set_block_id(5, 71, 5, 18);
+
+        // Mid canopy leaves at Y = 68 and 69
+        w.set_block_id(6, 68, 5, 18);
+        w.set_block_id(5, 68, 6, 18);
+        w.set_block_id(6, 69, 5, 18);
+
+        let _p = add_player(&mut w, "steve", 5.5, 64.0, 5.5);
+
+        // Player chops trunk logs from TOP to BOTTOM (69 down to 64)
+        for y in (64..=69).rev() {
+            w.apply_set_notify(5, y, 5, 0);
+            crate::block::ticks::leaves_pump(&mut w);
+        }
+
+        // Run random block ticks at client singleplayer rate
+        for _ in 0..3000 {
+            w.random_block_ticks();
+        }
+
+        // All leaves including top canopy at 70 and 71 must have decayed to air
+        assert_eq!(w.get_block_id(5, 70, 5), 0, "Top leaf at (5, 70, 5) must decay");
+        assert_eq!(w.get_block_meta(5, 70, 5), 0, "Air block metadata must be 0");
+        assert_eq!(w.get_block_id(6, 70, 5), 0, "Top leaf at (6, 70, 5) must decay");
+        assert_eq!(w.get_block_id(5, 70, 6), 0, "Top leaf at (5, 70, 6) must decay");
+        assert_eq!(w.get_block_id(5, 71, 5), 0, "Tiptop leaf at (5, 71, 5) must decay");
+        assert_eq!(w.get_block_id(6, 68, 5), 0, "Mid leaf must decay");
+        assert_eq!(w.get_block_id(6, 69, 5), 0, "Upper mid leaf must decay");
+    }
+
+    #[test]
+    fn test_leaf_decay_rate_matches_vanilla_client_singleplayer() {
+        let mut w = world_with_floor();
+        let _p = add_player(&mut w, "steve", 8.5, 64.0, 8.5);
+
+        // Place 64 orphaned natural leaves (8x8 grid at Y=64)
+        for x in 4..12 {
+            for z in 4..12 {
+                w.set_block_id(x, 64, z, 18);
+                w.set_block_meta(x, 64, z, 0);
+            }
+        }
+
+        // Place 1 player-placed leaf (meta 4)
+        w.set_block_id(2, 64, 2, 18);
+        w.set_block_meta(2, 64, 2, 4);
+
+        // Run 100 ticks (5 seconds of gameplay).
+        // Under vanilla client singleplayer chunk random ticking (80 blocks / chunk / tick,
+        // p = 80/32768 = 5/2048 per leaf per tick), expected decays for 64 leaves over 100 ticks is ~14.
+        for _ in 0..100 {
+            w.random_block_ticks();
+        }
+
+        let mut decayed_after_100_ticks = 0;
+        for x in 4..12 {
+            for z in 4..12 {
+                if w.get_block_id(x, 64, z) == 0 {
+                    decayed_after_100_ticks += 1;
+                }
+            }
+        }
+
+        // Must decay gradually: not 0 (broken server), not all 64 (instant/over-budget pump)
+        assert!(
+            decayed_after_100_ticks > 0,
+            "Leaves must begin decaying over 100 ticks, got {decayed_after_100_ticks}"
+        );
+        assert!(
+            decayed_after_100_ticks < 50,
+            "Leaves must not all vanish in 100 ticks (vanilla client rate is ~14 decays), got {decayed_after_100_ticks}"
+        );
+
+        // Player placed leaf must NOT decay
+        assert_eq!(w.get_block_id(2, 64, 2), 18, "Player placed leaf must persist");
+
+        // Over 3500 ticks (~3 minutes), all orphaned leaves must decay to air
+        for _ in 0..3500 {
+            w.random_block_ticks();
+        }
+
+        let mut remaining = 0;
+        for x in 4..12 {
+            for z in 4..12 {
+                if w.get_block_id(x, 64, z) == 18 {
+                    remaining += 1;
+                }
+            }
+        }
+        assert_eq!(remaining, 0, "All natural orphaned leaves must eventually decay to air");
+        assert_eq!(w.get_block_id(2, 64, 2), 18, "Player placed leaf must still persist");
     }
 
 

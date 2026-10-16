@@ -3,6 +3,7 @@
 
 use crate::entity::table::{Body, Entity, EntityId};
 use crate::math_helper::floor_double;
+use crate::vec3d::Vec3D;
 use crate::world::{Material, World, is_replaceable};
 
 impl World {
@@ -378,40 +379,42 @@ impl World {
         }
     }
 
-    /// Item push-out from solid rock (mirrors `pushOutOfBlocks`).
+    /// Item push-out from solid blocks (mirrors `EntityItem.pushOutOfBlocks`).
     pub fn item_push_out(&mut self, id: EntityId) {
         let (ix, iy, iz, lx, ly, lz) = match self.entities.get(id) {
             Some(Entity::Item(e)) => {
-                let (x, y, z) = (e.body.pos[0], e.body.pos[1], e.body.pos[2]);
+                let x = e.body.pos[0];
+                let y = (e.body.bounding_box.min_y + e.body.bounding_box.max_y) / 2.0;
+                let z = e.body.pos[2];
                 (
                     x.floor() as i32,
                     y.floor() as i32,
                     z.floor() as i32,
-                    x - (x.floor()),
-                    y - (y.floor()),
-                    z - (z.floor()),
+                    x - x.floor(),
+                    y - y.floor(),
+                    z - z.floor(),
                 )
             }
             _ => return,
         };
-        if !self.is_solid(ix, iy, iz) {
+        if !self.block_allows_attachment(ix, iy, iz) {
             return;
         }
         let side = crate::entity::misc::item_push_side(
             [
-                !self.is_solid(ix - 1, iy, iz),
-                !self.is_solid(ix + 1, iy, iz),
-                !self.is_solid(ix, iy - 1, iz),
-                !self.is_solid(ix, iy + 1, iz),
-                !self.is_solid(ix, iy, iz - 1),
-                !self.is_solid(ix, iy, iz + 1),
+                !self.block_allows_attachment(ix - 1, iy, iz),
+                !self.block_allows_attachment(ix + 1, iy, iz),
+                !self.block_allows_attachment(ix, iy - 1, iz),
+                !self.block_allows_attachment(ix, iy + 1, iz),
+                !self.block_allows_attachment(ix, iy, iz - 1),
+                !self.block_allows_attachment(ix, iy, iz + 1),
             ],
             [lx, ly, lz],
         );
         if side < 0 {
             return;
         }
-        let impulse = self.rng.next_double() * 0.2 + 0.1;
+        let impulse = (self.rng.next_float() * 0.2 + 0.1) as f64;
         if let Some(Entity::Item(e)) = self.entities.get_mut(id) {
             match side {
                 0 => e.body.motion[0] = -impulse,
@@ -424,31 +427,130 @@ impl World {
         }
     }
 
-    /// Loose-item tick (mirrors `EntityItem::tick`).
-    pub fn tick_item(&mut self, id: EntityId) {
-        self.entities.tick_base(id);
-        let in_lava = match self.entities.get(id) {
-            Some(Entity::Item(e)) => {
-                let bb = e.body.bounding_box.expand(-0.1, -0.4, -0.1);
-                let (x0, x1) = (bb.min_x.floor() as i32, (bb.max_x + 1.0).floor() as i32);
-                let (y0, y1) = (bb.min_y.floor() as i32, (bb.max_y + 1.0).floor() as i32);
-                let (z0, z1) = (bb.min_z.floor() as i32, (bb.max_z + 1.0).floor() as i32);
-                let mut found = false;
-                'lava: for x in x0..x1 {
-                    for y in y0..y1 {
-                        for z in z0..z1 {
-                            if self.material_at(x, y, z) == Material::LAVA {
-                                found = true;
-                                break 'lava;
-                            }
+    fn fluid_depth(&self, x: i32, y: i32, z: i32) -> i32 {
+        if self.material_at(x, y, z) != Material::WATER {
+            -1
+        } else {
+            let meta = (self.get_block_meta(x, y, z) & 15) as i32;
+            if meta >= 8 {
+                0
+            } else {
+                meta
+            }
+        }
+    }
+
+    fn is_block_solid_for_fluid(&self, x: i32, y: i32, z: i32) -> bool {
+        let mat = self.material_at(x, y, z);
+        if mat == Material::WATER || mat == Material::ICE {
+            false
+        } else {
+            mat.is_solid()
+        }
+    }
+
+    /// Flow velocity vector for fluid at (x, y, z) (mirrors `BlockFluids.func_291_e`).
+    pub fn water_flow_at(&self, x: i32, y: i32, z: i32) -> Vec3D {
+        let mut vec = Vec3D::new(0.0, 0.0, 0.0);
+        let l = self.fluid_depth(x, y, z);
+        for i1 in 0..4 {
+            let mut j1 = x;
+            let mut k1 = z;
+            if i1 == 0 {
+                j1 -= 1;
+            } else if i1 == 1 {
+                k1 -= 1;
+            } else if i1 == 2 {
+                j1 += 1;
+            } else if i1 == 3 {
+                k1 += 1;
+            }
+            let l1 = self.fluid_depth(j1, y, k1);
+            if l1 < 0 {
+                if !self.material_at(j1, y, k1).is_solid() {
+                    let l1_below = self.fluid_depth(j1, y - 1, k1);
+                    if l1_below >= 0 {
+                        let i2 = l1_below - (l - 8);
+                        vec = vec.add_vector(((j1 - x) * i2) as f64, 0.0, ((k1 - z) * i2) as f64);
+                    }
+                }
+            } else {
+                let j2 = l1 - l;
+                vec = vec.add_vector(((j1 - x) * j2) as f64, 0.0, ((k1 - z) * j2) as f64);
+            }
+        }
+
+        if (self.get_block_meta(x, y, z) & 15) >= 8 {
+            let flag = self.is_block_solid_for_fluid(x, y, z - 1)
+                || self.is_block_solid_for_fluid(x, y, z + 1)
+                || self.is_block_solid_for_fluid(x - 1, y, z)
+                || self.is_block_solid_for_fluid(x + 1, y, z)
+                || self.is_block_solid_for_fluid(x, y + 1, z - 1)
+                || self.is_block_solid_for_fluid(x, y + 1, z + 1)
+                || self.is_block_solid_for_fluid(x - 1, y + 1, z)
+                || self.is_block_solid_for_fluid(x + 1, y + 1, z);
+            if flag {
+                vec = vec.normalize().add_vector(0.0, -6.0, 0.0);
+            }
+        }
+        vec.normalize()
+    }
+
+    /// Item water acceleration (mirrors `World.handleMaterialAcceleration`
+    /// with `Material.water` and `boundingBox.expand(0.0, -0.4, 0.0)`).
+    pub fn handle_water_movement_item(&mut self, id: EntityId) -> bool {
+        let bb = match self.entities.get(id) {
+            Some(Entity::Item(e)) => e.body.bounding_box.expand(0.0, -0.4, 0.0),
+            _ => return false,
+        };
+        let x0 = bb.min_x.floor() as i32;
+        let x1 = (bb.max_x + 1.0).floor() as i32;
+        let y0 = bb.min_y.floor() as i32;
+        let y1 = (bb.max_y + 1.0).floor() as i32;
+        let z0 = bb.min_z.floor() as i32;
+        let z1 = (bb.max_z + 1.0).floor() as i32;
+
+        let mut flag = false;
+        let mut total_vec = Vec3D::new(0.0, 0.0, 0.0);
+
+        for x in x0..x1 {
+            for y in y0..y1 {
+                for z in z0..z1 {
+                    if self.material_at(x, y, z) == Material::WATER {
+                        let meta = (self.get_block_meta(x, y, z) & 15) as i32;
+                        let effective_meta = if meta >= 8 { 0 } else { meta };
+                        let fluid_height = (effective_meta + 1) as f64 / 9.0;
+                        let d1 = (y + 1) as f64 - fluid_height;
+                        if (y1 as f64) >= d1 {
+                            flag = true;
+                            let flow = self.water_flow_at(x, y, z);
+                            total_vec = total_vec.add_vector(flow.x_coord, flow.y_coord, flow.z_coord);
                         }
                     }
                 }
-                found
             }
-            _ => false,
-        };
-        match self.entities.get_mut(id) {
+        }
+
+        let len = (total_vec.x_coord * total_vec.x_coord
+            + total_vec.y_coord * total_vec.y_coord
+            + total_vec.z_coord * total_vec.z_coord)
+            .sqrt();
+        if len > 0.0 {
+            let norm = total_vec.normalize();
+            let d = 0.004;
+            if let Some(Entity::Item(e)) = self.entities.get_mut(id) {
+                e.body.motion[0] += norm.x_coord * d;
+                e.body.motion[1] += norm.y_coord * d;
+                e.body.motion[2] += norm.z_coord * d;
+            }
+        }
+        flag
+    }
+
+    /// Loose-item tick (mirrors `EntityItem::tick`).
+    pub fn tick_item(&mut self, id: EntityId) {
+        self.entities.tick_base(id);
+        let pos = match self.entities.get_mut(id) {
             Some(Entity::Item(e)) => {
                 if e.pickup_delay > 0 {
                     e.pickup_delay -= 1;
@@ -463,22 +565,35 @@ impl World {
                     self.mark_chunk_modified(cx, cz);
                     return;
                 }
-                if in_lava {
-                    e.body.motion[1] = 0.2;
-                    e.body.motion[0] = (self.rng.next_float() - self.rng.next_float()) as f64 * 0.2;
-                    e.body.motion[2] = (self.rng.next_float() - self.rng.next_float()) as f64 * 0.2;
-                } else {
-                    e.body.motion[1] -= 0.04;
-                }
+                e.body.pos
             }
             _ => return,
         };
+
+        let in_lava = self.material_at(
+            pos[0].floor() as i32,
+            pos[1].floor() as i32,
+            pos[2].floor() as i32,
+        ) == Material::LAVA;
+
+        if let Some(Entity::Item(e)) = self.entities.get_mut(id) {
+            e.body.motion[1] -= 0.04;
+            if in_lava {
+                e.body.motion[1] = 0.2;
+                e.body.motion[0] = (self.rng.next_float() - self.rng.next_float()) as f64 * 0.2;
+                e.body.motion[2] = (self.rng.next_float() - self.rng.next_float()) as f64 * 0.2;
+            }
+        }
+
         self.item_push_out(id);
+        self.handle_water_movement_item(id);
+
         let motion = match self.entities.get(id) {
             Some(Entity::Item(e)) => (e.body.motion[0], e.body.motion[1], e.body.motion[2]),
             _ => return,
         };
         self.move_body(id, motion.0, motion.1, motion.2);
+
         let (on_ground, under_block) = match self.entities.get(id) {
             Some(Entity::Item(e)) if e.body.on_ground => {
                 let bx = e.body.pos[0].floor() as i32;
@@ -487,11 +602,15 @@ impl World {
                 (true, self.get_block_id(bx, by, bz))
             }
             Some(Entity::Item(e)) => (e.body.on_ground, 0),
-            _ => (false, 0),
+            _ => return,
         };
         if let Some(Entity::Item(e)) = self.entities.get_mut(id) {
             let slip = if on_ground && under_block == 79 { 0.98 } else { 0.6 };
-            let mut m = crate::entity::misc::ItemMotion { mx: e.body.motion[0], my: e.body.motion[1], mz: e.body.motion[2] };
+            let mut m = crate::entity::misc::ItemMotion {
+                mx: e.body.motion[0],
+                my: e.body.motion[1],
+                mz: e.body.motion[2],
+            };
             crate::entity::misc::item_damp_slip(e.body.on_ground, slip, &mut m);
             e.body.motion = [m.mx, m.my, m.mz];
         }

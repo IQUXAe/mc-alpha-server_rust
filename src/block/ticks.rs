@@ -713,17 +713,44 @@ pub fn block_reed_tick(w: &mut World, block_id: u8, drop: DropSpec, pos: BlockPo
 /// Queue hard cap: pushes beyond this are dropped (decay resumes via
 /// random ticks).
 pub const LEAVES_QUEUE_MAX: usize = 16384;
-/// Queue pump budget per tick.
+/// Queue pump check budget per tick.
 pub const LEAVES_QUEUE_PER_TICK: usize = 512;
 
 pub fn leaves_enqueue(w: &mut World, block_id: u8, leaves_id: u8, pos: BlockPos) {
-    if w.leaves_queue.len() < LEAVES_QUEUE_MAX {
+    if w.leaves_queue.len() < LEAVES_QUEUE_MAX && w.leaves_queued_set.insert(pos) {
         w.leaves_queue.push((block_id, leaves_id, pos));
     }
 }
 
+/// In Minecraft Alpha 1.2.6, natural leaves have metadata 0 (generated), 1 (decaying),
+/// or 10..=15 (legacy Notch distance-to-wood propagation).
+/// Only player-placed leaves (placed by OPs via /give) carry bit 4 without distance values (meta 4).
+#[inline]
+pub fn is_player_placed_leaf(meta: u8) -> bool {
+    (meta & 4) != 0 && meta < 10
+}
+
+/// When a log (id 17) is removed, enqueue all non-player leaves in the tree column
+/// (-4..=4 X/Z, -4..=30 Y) around the broken log to recompute their attachment to wood.
+pub fn block_log_removed(w: &mut World, pos: BlockPos) {
+    for dx in -4..=4 {
+        for dz in -4..=4 {
+            for dy in -4..=30 {
+                let y = pos.y + dy;
+                if !(0..crate::world::WORLD_HEIGHT).contains(&y) {
+                    continue;
+                }
+                let n_pos = BlockPos::new(pos.x + dx, y, pos.z + dz);
+                if q_id_nc(w, n_pos) == 18 && !is_player_placed_leaf(q_meta(w, n_pos)) {
+                    leaves_enqueue(w, 18, 18, n_pos);
+                }
+            }
+        }
+    }
+}
+
 fn leaf_has_wood(w: &World, pos: BlockPos) -> bool {
-    if q_meta(w, pos) & 4 != 0 {
+    if is_player_placed_leaf(q_meta(w, pos)) {
         return true;
     }
 
@@ -739,7 +766,7 @@ fn leaf_has_wood(w: &World, pos: BlockPos) -> bool {
         v[idx / 64] |= 1u64 << (idx % 64);
     }
 
-    let mut queue = [(0i8, 0i8, 0i8, 0u8); 256];
+    let mut queue = [(0i8, 0i8, 0i8, 0u8); 768];
     let mut head = 0usize;
     let mut tail = 0usize;
 
@@ -776,11 +803,9 @@ fn leaf_has_wood(w: &World, pos: BlockPos) -> bool {
             if n_id == 17 {
                 return true;
             }
-            if n_id == 18 && dist + 1 < 4 {
-                if tail < queue.len() {
-                    queue[tail] = (nx, ny, nz, dist + 1);
-                    tail += 1;
-                }
+            if n_id == 18 && dist < 8 && tail < queue.len() {
+                queue[tail] = (nx, ny, nz, dist + 1);
+                tail += 1;
             }
         }
     }
@@ -800,7 +825,7 @@ pub fn block_leaves_recompute(w: &mut World, _block_id: u8, leaves_id: u8, pos: 
     if q_id_nc(w, pos) != leaves_id {
         return;
     }
-    if q_meta(w, pos) & 4 != 0 {
+    if is_player_placed_leaf(q_meta(w, pos)) {
         return;
     }
     if !leaf_has_wood(w, pos) {
@@ -808,25 +833,28 @@ pub fn block_leaves_recompute(w: &mut World, _block_id: u8, leaves_id: u8, pos: 
     }
 }
 
-/// Drain up to [`LEAVES_QUEUE_PER_TICK`] queued leaf recomputes; the
-/// rest spill into the next tick.
+/// Drain queued leaf recomputes: check up to [`LEAVES_QUEUE_PER_TICK`] entries.
+/// Leaves disconnected from wood are marked with metadata 1 (decaying).
+/// Actual leaf decay (turning into air and dropping saplings) is driven purely
+/// by random block ticks at the authentic vanilla client singleplayer rate
+/// (80 random ticks per chunk per tick), matching `BlockLeaves.updateTick`.
 pub fn leaves_pump(w: &mut World) {
-    let mut budget = LEAVES_QUEUE_PER_TICK;
-    while budget > 0 {
-        let Some((_block_id, leaves_id, pos)) = w.leaves_queue.pop() else {
-            break;
-        };
+    let mut check_budget = LEAVES_QUEUE_PER_TICK;
+    while check_budget > 0 && !w.leaves_queue.is_empty() {
+        check_budget -= 1;
+        let idx = w.rng.next_int_bound(w.leaves_queue.len() as i32) as usize;
+        let (_block_id, leaves_id, pos) = w.leaves_queue.swap_remove(idx);
+        w.leaves_queued_set.remove(&pos);
         if q_id_nc(w, pos) != leaves_id {
             // Stale entry (block replaced/decayed since enqueue).
             continue;
         }
-        if q_meta(w, pos) & 4 != 0 {
+        if is_player_placed_leaf(q_meta(w, pos)) {
             continue;
         }
         if !leaf_has_wood(w, pos) {
-            block_leaves_decay(w, pos);
+            u_set_meta(w, pos, 1);
         }
-        budget -= 1;
     }
 }
 
@@ -836,7 +864,7 @@ pub fn block_leaves_added(w: &mut World, block_id: u8, pos: BlockPos) {
 
 /// Neighbor change: queue this leaf for decay check on the pump.
 pub fn block_leaves_neighbor(w: &mut World, block_id: u8, leaves_id: u8, pos: BlockPos) {
-    if q_meta(w, pos) & 4 != 0 {
+    if is_player_placed_leaf(q_meta(w, pos)) {
         return;
     }
     leaves_enqueue(w, block_id, leaves_id, pos);
@@ -852,10 +880,10 @@ pub fn block_leaves_tick(
     if q_id_nc(w, pos) != leaves_id {
         return;
     }
-    if q_meta(w, pos) & 4 != 0 {
+    if is_player_placed_leaf(q_meta(w, pos)) {
         return;
     }
-    if !leaf_has_wood(w, pos) {
+    if q_meta(w, pos) == 1 || !leaf_has_wood(w, pos) {
         base_drop(w, drop, pos, 1.0);
         u_set_notify(w, pos, 0);
     }
