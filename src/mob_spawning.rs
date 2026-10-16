@@ -149,6 +149,11 @@ fn spawn_pass(
 
     let mut spawned = 0;
     for key in &eligible {
+        // Vanilla SpawnerAnimals.java:60 stochastic filter: only 1 in 50 chunks
+        // is evaluated for mob spawns each pass, matching vanilla Alpha 1.2.6.
+        if world.spawn_next_int(50) != 0 {
+            continue;
+        }
         let chunk_x = (key >> 32) as i32;
         let chunk_z = (key & 0xFFFF_FFFF) as i32;
 

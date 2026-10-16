@@ -1248,13 +1248,22 @@ const CHUNK_OFFSETS_19X19: [(i32, i32); 361] = {
     pub(crate) fn random_block_ticks(&mut self) {
         let mut keys = std::mem::take(&mut self.random_tick_keys);
         keys.clear();
+        let tick_radius = (self.unload_radius - 2).clamp(1, 9);
         for (_, e) in self.entities.iter() {
             if let Entity::Player(p) = e {
                 let b = &p.living.body;
                 let cx = (b.pos[0] / 16.0).floor() as i32;
                 let cz = (b.pos[2] / 16.0).floor() as i32;
-                for &(dx, dz) in &Self::CHUNK_OFFSETS_19X19 {
-                    keys.push((cx + dx, cz + dz));
+                if tick_radius >= 9 {
+                    for &(dx, dz) in &Self::CHUNK_OFFSETS_19X19 {
+                        keys.push((cx + dx, cz + dz));
+                    }
+                } else {
+                    for dx in -tick_radius..=tick_radius {
+                        for dz in -tick_radius..=tick_radius {
+                            keys.push((cx + dx, cz + dz));
+                        }
+                    }
                 }
             }
         }
