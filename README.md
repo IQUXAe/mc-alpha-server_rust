@@ -23,6 +23,7 @@ A custom Minecraft Alpha (v1.2.3_04 through v1.2.6 / Protocol Version 6) server 
 - **Mob Roster & SMP Projectiles**: Tracks standard Alpha mobs (Zombies, Skeletons, Spiders, Creepers, Slimes, Ghasts, PigZombies, Giants) and adds server tracking for arrows, snowballs, fishing hooks, minecarts, and primed TNT that vanilla SMP skipped.
 - **Tick Budgets**: 64-slot background gen queue, 15 chunks/tick/player stream limit, and an 8192-cell explosion cap to keep the 50 ms tick stable.
 - **Optional GPU Pre-generation**: Experimental WGSL compute pipeline (`--features gpu`) offloading 3D density field interpolation to Vulkan, OpenGL ES 3.1+, DX12, or Metal.
+- **Reverse Proxy & PROXY Protocol**: Native support for HAProxy PROXY protocol (v1 text & v2 binary) for reverse proxies and NAT traversal (rathole, frp, HAProxy, NGINX), preserving real client IPs, per-IP rate limiting, and `/ban-ip` without connection limits on the proxy.
 
 ---
 
@@ -81,6 +82,12 @@ view-distance=6
 
 # Set true for Nether (dimension -1), false for Overworld (dimension 0)
 hellworld=false
+
+# HAProxy PROXY protocol (v1 text and v2 binary) support.
+# Extracts real client IPs from proxy headers, allowing proper logging, IP bans, and rate-limiting.
+proxy-protocol=false
+# Comma-separated list of trusted proxy IPs (* for all, default: 127.0.0.1,::1)
+trusted-proxies=127.0.0.1,::1
 
 # GPU terrain acceleration (requires build with --features gpu)
 gpu-acceleration=false
@@ -211,6 +218,36 @@ gpu-acceleration=true
 gpu-backend=auto # auto, vulkan, gles, dx12, metal
 ```
 Use `boost on` / `boost off` in the server console to toggle at runtime.
+
+---
+
+## Reverse Proxy & NAT Traversal (HAProxy PROXY Protocol)
+
+When running the server behind NAT traversal tools (rathole, frp) or reverse proxies (HAProxy, NGINX), all incoming connections arrive with source IP `127.0.0.1`. In standard mode, this limits the server to 5 simultaneous players (`MAX_CONNECTIONS_PER_IP`), shares the login rate limit across all players, and makes IP banning impossible.
+
+With `proxy-protocol=true`, the server parses the PROXY protocol header (v1 text and v2 binary) sent by the proxy, extracts the real client IP, and applies connection caps, rate-limiting, and IP bans individually per player.
+
+### Setup
+
+1. **Configure `server.properties`** (or set environment variable `ALPHA_PROXY_PROTOCOL=1`):
+   ```properties
+   proxy-protocol=true
+   trusted-proxies=127.0.0.1,::1
+   ```
+
+2. **Configure HAProxy** with `send-proxy` (v1) or `send-proxy-v2` (v2):
+   ```haproxy
+   frontend minecraft_in
+       bind *:25565
+       mode tcp
+       default_backend minecraft_server
+
+   backend minecraft_server
+       mode tcp
+       server alpha 127.0.0.1:25565 send-proxy
+   ```
+
+3. **Direct Connections Fallback**: Direct local connections without proxy headers continue to work seamlessly via automatic protocol detection.
 
 ---
 
