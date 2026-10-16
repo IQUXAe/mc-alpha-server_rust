@@ -114,7 +114,7 @@ impl World {
             if bid == 0 {
                 continue;
             }
-            if block_properties_get(bid as u32).block_type == BlockType::Fluid as u8 {
+            if matches!(bid, 8..=11) {
                 continue;
             }
             return false;

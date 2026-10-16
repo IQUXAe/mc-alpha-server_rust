@@ -71,7 +71,7 @@ impl World {
                 mx = 0.0;
             }
             let mut nx = mx;
-            while nx != 0.0 && nx.is_finite() && self.colliding_boxes(&orig.get_offset_bounding_box(nx, -1.0, 0.0)).is_empty() {
+            while nx != 0.0 && nx.is_finite() && !self.has_colliding_boxes(&orig.get_offset_bounding_box(nx, -1.0, 0.0)) {
                 if (-0.05..0.05).contains(&nx) {
                     nx = 0.0;
                 } else if nx > 0.0 {
@@ -85,7 +85,7 @@ impl World {
                 mz = 0.0;
             }
             let mut nz = mz;
-            while nz != 0.0 && nz.is_finite() && self.colliding_boxes(&orig.get_offset_bounding_box(0.0, -1.0, nz)).is_empty() {
+            while nz != 0.0 && nz.is_finite() && !self.has_colliding_boxes(&orig.get_offset_bounding_box(0.0, -1.0, nz)) {
                 if (-0.05..0.05).contains(&nz) {
                     nz = 0.0;
                 } else if nz > 0.0 {
@@ -104,7 +104,8 @@ impl World {
                 b.set_position(px, py, pz);
             }
         } else {
-            let boxes = self.colliding_boxes(&work.add_coord(mx, my, mz));
+            let mut boxes = std::mem::take(&mut self.colliding_boxes_scratch);
+            self.colliding_boxes_into(&work.add_coord(mx, my, mz), &mut boxes);
             for cb in &boxes {
                 my = cb.calculate_y_offset(&work, my);
             }
@@ -119,7 +120,7 @@ impl World {
             work.offset(0.0, 0.0, mz);
 
             if step > 0.0 && (was_ground || (old_y != my && old_y < 0.0)) && (old_x != mx || old_z != mz) {
-                let boxes = self.colliding_boxes(&orig.add_coord(old_x, step as f64, old_z));
+                self.colliding_boxes_into(&orig.add_coord(old_x, step as f64, old_z), &mut boxes);
                 let (mut sx, mut sy, mut sz) = (old_x, step as f64, old_z);
                 let mut sbox = orig;
                 for cb in &boxes {
@@ -141,6 +142,7 @@ impl World {
                     mz = sz;
                 }
             }
+            self.colliding_boxes_scratch = boxes;
 
             let (falling, new_chunk) = {
                 let e = self.entities.get_mut(id)?;

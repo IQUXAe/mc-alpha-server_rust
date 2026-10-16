@@ -165,7 +165,7 @@ pub(crate) fn has_collision_id(bid: u8) -> bool {
 /// materials like circuits would alias `Material::AIR` — compare the
 /// material id byte instead).
 pub(crate) fn is_air_material(bid: u8) -> bool {
-    block_properties_get(bid as u32).material == BlockMaterial::Air as u8
+    crate::block::table::BLOCK_MATERIAL_ID[bid as usize] == 0
 }
 
 /// Material for a block-table material id (mirrors `materialFromId`).
@@ -322,6 +322,8 @@ pub struct World {
     pub(crate) random_tick_to_tick: Vec<(i32, i32, i32)>,
     /// Spatial grid mapping chunk (cx, cz) -> alive entity IDs, rebuilt for spatial queries.
     pub(crate) entity_grid: HashMap<(i32, i32), Vec<EntityId>>,
+    /// Scratch buffer for colliding bounding boxes across ticks.
+    pub(crate) colliding_boxes_scratch: Vec<crate::aabb::AxisAlignedBB>,
 }
 
 impl std::fmt::Debug for World {
@@ -393,6 +395,7 @@ impl World {
             furnace_cells_scratch: Vec::new(),
             random_tick_to_tick: Vec::new(),
             entity_grid: HashMap::new(),
+            colliding_boxes_scratch: Vec::with_capacity(16),
         }
     }
 
@@ -949,10 +952,7 @@ impl World {
     /// Chunk-map half of [`World::material_at`] (see `block_id_in`).
     pub(crate) fn material_in(chunks: &HashMap<(i32, i32), Box<Chunk>>, x: i32, y: i32, z: i32) -> Material {
         let id = Self::block_id_in(chunks, x, y, z);
-        if id == 0 {
-            return Material::AIR;
-        }
-        material_of(block_properties_get(id as u32).material)
+        material_of(crate::block::table::BLOCK_MATERIAL_ID[id as usize])
     }
 
     pub fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
@@ -1112,8 +1112,16 @@ impl World {
     }
 
     /// Compute one or two collision bounding boxes for block `id` at `(x, y, z)`,
-    /// matching `BlockStairs.getCollidingBoundingBoxes` for stairs (53, 67).
-    pub(crate) fn block_collision_boxes(&self, x: i32, y: i32, z: i32, id: u8, out: &mut Vec<AxisAlignedBB>) {
+    /// Single-block collision bounding boxes (stack-allocated, zero heap allocations).
+    /// Up to 2 boxes for stairs (53, 67), 1 for normal blocks, 0 for non-colliding.
+    pub(crate) fn block_collision_boxes_fixed(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        id: u8,
+        out: &mut [AxisAlignedBB; 2],
+    ) -> usize {
         if id == 53 || id == 67 {
             let meta = self.get_block_meta(x, y, z) as i32;
             let fx = x as f64;
@@ -1121,38 +1129,48 @@ impl World {
             let fz = z as f64;
             match meta {
                 0 => {
-                    // Ascending East
-                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 0.5, fy + 0.5, fz + 1.0));
-                    out.push(AxisAlignedBB::get_bounding_box(fx + 0.5, fy, fz, fx + 1.0, fy + 1.0, fz + 1.0));
+                    out[0] = AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 0.5, fy + 0.5, fz + 1.0);
+                    out[1] = AxisAlignedBB::get_bounding_box(fx + 0.5, fy, fz, fx + 1.0, fy + 1.0, fz + 1.0);
+                    2
                 }
                 1 => {
-                    // Ascending West
-                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 0.5, fy + 1.0, fz + 1.0));
-                    out.push(AxisAlignedBB::get_bounding_box(fx + 0.5, fy, fz, fx + 1.0, fy + 0.5, fz + 1.0));
+                    out[0] = AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 0.5, fy + 1.0, fz + 1.0);
+                    out[1] = AxisAlignedBB::get_bounding_box(fx + 0.5, fy, fz, fx + 1.0, fy + 0.5, fz + 1.0);
+                    2
                 }
                 2 => {
-                    // Ascending South
-                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 1.0, fy + 0.5, fz + 0.5));
-                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz + 0.5, fx + 1.0, fy + 1.0, fz + 1.0));
+                    out[0] = AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 1.0, fy + 0.5, fz + 0.5);
+                    out[1] = AxisAlignedBB::get_bounding_box(fx, fy, fz + 0.5, fx + 1.0, fy + 1.0, fz + 1.0);
+                    2
                 }
                 3 => {
-                    // Ascending North
-                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 1.0, fy + 1.0, fz + 0.5));
-                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz + 0.5, fx + 1.0, fy + 0.5, fz + 1.0));
+                    out[0] = AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 1.0, fy + 1.0, fz + 0.5);
+                    out[1] = AxisAlignedBB::get_bounding_box(fx, fy, fz + 0.5, fx + 1.0, fy + 0.5, fz + 1.0);
+                    2
                 }
                 _ => {
-                    out.push(AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 1.0, fy + 1.0, fz + 1.0));
+                    out[0] = AxisAlignedBB::get_bounding_box(fx, fy, fz, fx + 1.0, fy + 1.0, fz + 1.0);
+                    1
                 }
             }
-            return;
+        } else {
+            out[0] = self.block_collision_box(x, y, z, id);
+            1
         }
-        out.push(self.block_collision_box(x, y, z, id));
     }
 
-    /// Collision boxes of blocks overlapping `mask` (mirrors
-    /// `World::getCollidingBoundingBoxes` over loaded chunks only).
-    pub fn colliding_boxes(&self, mask: &AxisAlignedBB) -> Vec<AxisAlignedBB> {
-        let mut out = Vec::with_capacity(8);
+    /// Single-block collision bounding box fallback into a caller-provided Vec.
+    pub(crate) fn block_collision_boxes(&self, x: i32, y: i32, z: i32, id: u8, out: &mut Vec<AxisAlignedBB>) {
+        let mut fixed = [AxisAlignedBB::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0); 2];
+        let n = self.block_collision_boxes_fixed(x, y, z, id, &mut fixed);
+        for bb in &fixed[..n] {
+            out.push(*bb);
+        }
+    }
+
+    /// Fast boolean collision test with early exit: returns `true` on the very first
+    /// intersecting block. Zero heap allocations.
+    pub fn has_colliding_boxes(&self, mask: &AxisAlignedBB) -> bool {
         if !mask.min_x.is_finite()
             || !mask.max_x.is_finite()
             || !mask.min_y.is_finite()
@@ -1160,14 +1178,12 @@ impl World {
             || !mask.min_z.is_finite()
             || !mask.max_z.is_finite()
         {
-            return out;
+            return false;
         }
-        // min_by starts at floor(min_y) - 1 so blocks with max_y > 1.0 (such as fences with 1.5)
-        // below the player are checked, as in World.java:799.
         let min_by = (mask.min_y.floor() as i32 - 1).max(0);
         let max_by = (mask.max_y.floor() as i32).min(WORLD_HEIGHT - 1);
         if min_by > max_by {
-            return out;
+            return false;
         }
         let cx = ((mask.min_x + mask.max_x) * 0.5).floor() as i32;
         let cz = ((mask.min_z + mask.max_z) * 0.5).floor() as i32;
@@ -1175,6 +1191,7 @@ impl World {
         let max_bx = (mask.max_x.floor() as i32).min(cx.saturating_add(16));
         let min_bz = (mask.min_z.floor() as i32).max(cz.saturating_sub(16));
         let max_bz = (mask.max_z.floor() as i32).min(cz.saturating_add(16));
+        let mut stairs_boxes = [AxisAlignedBB::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0); 2];
         for x in min_bx..=max_bx {
             for z in min_bz..=max_bz {
                 let (cx, cz, lx, lz) = Self::chunk_of(x, z);
@@ -1185,19 +1202,71 @@ impl World {
                 let blocks = c.blocks();
                 for y in min_by..=max_by {
                     let id = blocks[col_base | (y as usize)];
-                    if id == 0 {
-                        continue;
-                    }
-                    let props = block_properties_get(id as u32);
-                    if !has_collision_box(props.block_type) || !has_collision_id(id) {
+                    if !crate::block::table::HAS_COLLISION[id as usize] {
                         continue;
                     }
                     if id == 53 || id == 67 {
-                        let mut stairs_boxes = Vec::with_capacity(2);
-                        self.block_collision_boxes(x, y, z, id, &mut stairs_boxes);
-                        for bb in stairs_boxes {
-                            if mask.intersects_with(&bb) {
-                                out.push(bb);
+                        let n = self.block_collision_boxes_fixed(x, y, z, id, &mut stairs_boxes);
+                        for bb in &stairs_boxes[..n] {
+                            if mask.intersects_with(bb) {
+                                return true;
+                            }
+                        }
+                    } else {
+                        let bb = self.block_collision_box(x, y, z, id);
+                        if mask.intersects_with(&bb) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Fills `out` with all collision boxes of blocks overlapping `mask`.
+    /// Zero new heap allocations if `out` already has capacity.
+    pub fn colliding_boxes_into(&self, mask: &AxisAlignedBB, out: &mut Vec<AxisAlignedBB>) {
+        out.clear();
+        if !mask.min_x.is_finite()
+            || !mask.max_x.is_finite()
+            || !mask.min_y.is_finite()
+            || !mask.max_y.is_finite()
+            || !mask.min_z.is_finite()
+            || !mask.max_z.is_finite()
+        {
+            return;
+        }
+        let min_by = (mask.min_y.floor() as i32 - 1).max(0);
+        let max_by = (mask.max_y.floor() as i32).min(WORLD_HEIGHT - 1);
+        if min_by > max_by {
+            return;
+        }
+        let cx = ((mask.min_x + mask.max_x) * 0.5).floor() as i32;
+        let cz = ((mask.min_z + mask.max_z) * 0.5).floor() as i32;
+        let min_bx = (mask.min_x.floor() as i32).max(cx.saturating_sub(16));
+        let max_bx = (mask.max_x.floor() as i32).min(cx.saturating_add(16));
+        let min_bz = (mask.min_z.floor() as i32).max(cz.saturating_sub(16));
+        let max_bz = (mask.max_z.floor() as i32).min(cz.saturating_add(16));
+        let mut stairs_boxes = [AxisAlignedBB::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0); 2];
+        for x in min_bx..=max_bx {
+            for z in min_bz..=max_bz {
+                let (cx, cz, lx, lz) = Self::chunk_of(x, z);
+                let Some(c) = self.chunks.get(&(cx, cz)) else {
+                    continue;
+                };
+                let col_base = ((lx as usize) << 11) | ((lz as usize) << 7);
+                let blocks = c.blocks();
+                for y in min_by..=max_by {
+                    let id = blocks[col_base | (y as usize)];
+                    if !crate::block::table::HAS_COLLISION[id as usize] {
+                        continue;
+                    }
+                    if id == 53 || id == 67 {
+                        let n = self.block_collision_boxes_fixed(x, y, z, id, &mut stairs_boxes);
+                        for bb in &stairs_boxes[..n] {
+                            if mask.intersects_with(bb) {
+                                out.push(*bb);
                             }
                         }
                     } else {
@@ -1209,16 +1278,25 @@ impl World {
                 }
             }
         }
+    }
+
+    /// Collision boxes of blocks overlapping `mask` (mirrors
+    /// `World::getCollidingBoundingBoxes` over loaded chunks only).
+    pub fn colliding_boxes(&self, mask: &AxisAlignedBB) -> Vec<AxisAlignedBB> {
+        let mut out = Vec::with_capacity(8);
+        self.colliding_boxes_into(mask, &mut out);
         out
     }
 
     /// Closest living-or-not player within range, like `getClosestPlayer`
     /// (strict `<`, first minimum wins; ids resolved by the caller).
+    /// Scans only connected players via `self.entities.player_ids()`.
     pub fn closest_player(&self, x: f64, y: f64, z: f64, max_dist: f64) -> Option<EntityId> {
         let mut best: Option<(EntityId, f64)> = None;
         let max_dist_sq = max_dist * max_dist;
-        for (&id, e) in self.entities.iter() {
-            if e.body().dead || !matches!(e, crate::entity::table::Entity::Player(_)) {
+        for &id in self.entities.player_ids() {
+            let Some(e) = self.entities.get(id) else { continue };
+            if e.body().dead {
                 continue;
             }
             let d = e.body().distance_sq(x, y, z);

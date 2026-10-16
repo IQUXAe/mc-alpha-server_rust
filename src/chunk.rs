@@ -20,7 +20,6 @@
 //! - Auto `generateSkylightMap()` call inside block set (the caller decides)
 //! - `isTerrainPopulated` is stored but never acted on (needs generator).
 
-use crate::block::table::block_properties_get;
 use crate::nibble::NibbleArray;
 use std::collections::VecDeque;
 
@@ -41,12 +40,14 @@ pub const SKY_LIGHT: i32 = 0;
 /// Blocklight type id for [`Chunk::get_saved_light_value`].
 pub const BLOCK_LIGHT: i32 = 1;
 
+#[inline(always)]
 fn light_opacity(id: u8) -> i32 {
-    block_properties_get(u32::from(id)).light_opacity
+    crate::block::table::LIGHT_OPACITY[id as usize] as i32
 }
 
+#[inline(always)]
 fn light_value(id: u8) -> i32 {
-    block_properties_get(u32::from(id)).light_value
+    crate::block::table::LIGHT_VALUE[id as usize] as i32
 }
 
 fn is_transparent(id: u8) -> bool {

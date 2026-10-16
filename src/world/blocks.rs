@@ -1295,7 +1295,7 @@ const CHUNK_OFFSETS_19X19: [(i32, i32); 361] = {
                     if id == 0 {
                         continue;
                     }
-                    if block_properties_get(id as u32).tick_on_load {
+                    if crate::block::table::TICK_ON_LOAD[id as usize] {
                         let bx = (cx << 4) + lx;
                         let bz = (cz << 4) + lz;
                         to_tick.push((bx, by, bz));

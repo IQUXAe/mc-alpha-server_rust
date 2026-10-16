@@ -317,7 +317,7 @@ const CHAT_ALLOWED: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQR
             e.body_mut().pitch = 0.0;
         }
         while let Some(bb) = ctx.world.entities.get(me).map(|e| e.body().bounding_box) {
-            if ctx.world.colliding_boxes(&bb).is_empty() || sy >= crate::world::WORLD_HEIGHT as f64 {
+            if !ctx.world.has_colliding_boxes(&bb) || sy >= crate::world::WORLD_HEIGHT as f64 {
                 break;
             }
             sy += 1.0;

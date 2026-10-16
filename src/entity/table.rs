@@ -672,12 +672,17 @@ impl Entity {
 #[derive(Clone, Debug, Default)]
 pub struct EntityTable {
     rows: std::collections::HashMap<EntityId, Entity>,
+    players: Vec<EntityId>,
     next_id: EntityId,
 }
 
 impl EntityTable {
     pub fn new() -> Self {
-        Self { rows: std::collections::HashMap::new(), next_id: 1 }
+        Self {
+            rows: std::collections::HashMap::new(),
+            players: Vec::new(),
+            next_id: 1,
+        }
     }
 
     pub fn alloc_id(&mut self) -> EntityId {
@@ -718,6 +723,9 @@ impl EntityTable {
 
     pub fn insert(&mut self, entity: Entity) -> EntityId {
         let id = entity.id();
+        if matches!(entity, Entity::Player(_)) && !self.players.contains(&id) {
+            self.players.push(id);
+        }
         self.rows.insert(id, entity);
         id
     }
@@ -731,7 +739,28 @@ impl EntityTable {
     }
 
     pub fn remove(&mut self, id: EntityId) -> Option<Entity> {
+        self.players.retain(|&p| p != id);
         self.rows.remove(&id)
+    }
+
+    #[inline(always)]
+    pub fn player_ids(&self) -> &[EntityId] {
+        &self.players
+    }
+
+    pub fn count_mobs_and_animals(&self) -> (usize, usize) {
+        let mut mobs = 0;
+        let mut animals = 0;
+        for e in self.rows.values() {
+            if !e.body().dead {
+                match e {
+                    Entity::Mob(_) => mobs += 1,
+                    Entity::Animal(_) => animals += 1,
+                    _ => {}
+                }
+            }
+        }
+        (mobs, animals)
     }
 
     /// Drop dead rows (mirrors the end-of-tick erase); returns the purged

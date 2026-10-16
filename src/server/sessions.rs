@@ -1207,7 +1207,7 @@ impl Server {
         row.body_mut().pitch = 0.0;
         row.body_mut().dimension = 0;
 
-        while !self.world.colliding_boxes(&row.body().bounding_box).is_empty()
+        while self.world.has_colliding_boxes(&row.body().bounding_box)
             && sy < crate::world::WORLD_HEIGHT as f64
         {
             sy += 1.0;
@@ -1474,7 +1474,7 @@ impl Server {
                 let mut p = PlayerEnt::new(id, &username);
                 let sp = self.world.spawn;
                 p.living.body.set_position(sp[0] as f64 + 0.5, sp[1] as f64, sp[2] as f64 + 0.5);
-                while !self.world.colliding_boxes(&p.living.body.bounding_box).is_empty()
+                while self.world.has_colliding_boxes(&p.living.body.bounding_box)
                     && p.living.body.pos[1] < crate::world::WORLD_HEIGHT as f64
                 {
                     let cur_y = p.living.body.pos[1];

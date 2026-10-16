@@ -114,7 +114,7 @@ macro_rules! b {
     };
 }
 
-const AIR: AlphaBlockProperties = AlphaBlockProperties {
+pub static AIR: AlphaBlockProperties = AlphaBlockProperties {
     hardness: 0.0, resistance: 0.0,
     material: BlockMaterial::Air as u8,
     light_opacity: 0, light_value: 0,
@@ -218,9 +218,76 @@ static BLOCK_PROPS: [AlphaBlockProperties; 256] = {
     props
 };
 
-pub fn block_properties_get(id: u32) -> AlphaBlockProperties {
-    if id >= 256 {
-        return AIR;
+pub static HAS_COLLISION: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let p = &BLOCK_PROPS[i];
+        let has_box = match p.block_type {
+            x if x == BlockType::Fluid as u8
+                || x == BlockType::Flower as u8
+                || x == BlockType::TallGrass as u8
+                || x == BlockType::Mushroom as u8
+                || x == BlockType::Torch as u8
+                || x == BlockType::Sapling as u8
+                || x == BlockType::Crops as u8
+                || x == BlockType::Fire as u8 => false,
+            _ => true,
+        };
+        let has_id = match i {
+            55 | 63 | 66 | 68 | 69 | 70 | 72 | 75 | 76 | 77 | 78 | 83 | 90 => false,
+            _ => true,
+        };
+        table[i] = i != 0 && has_box && has_id;
+        i += 1;
     }
-    BLOCK_PROPS[id as usize]
+    table
+};
+
+pub static TICK_ON_LOAD: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        table[i] = BLOCK_PROPS[i].tick_on_load;
+        i += 1;
+    }
+    table
+};
+
+pub static LIGHT_OPACITY: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        table[i] = BLOCK_PROPS[i].light_opacity as u8;
+        i += 1;
+    }
+    table
+};
+
+pub static LIGHT_VALUE: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        table[i] = BLOCK_PROPS[i].light_value as u8;
+        i += 1;
+    }
+    table
+};
+
+pub static BLOCK_MATERIAL_ID: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        table[i] = BLOCK_PROPS[i].material;
+        i += 1;
+    }
+    table
+};
+
+#[inline(always)]
+pub fn block_properties_get(id: u32) -> &'static AlphaBlockProperties {
+    if id >= 256 {
+        return &AIR;
+    }
+    &BLOCK_PROPS[id as usize]
 }

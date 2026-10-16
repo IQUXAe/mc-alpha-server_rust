@@ -181,7 +181,7 @@ impl PlaySession {
                 b.bounding_box.max_y - 0.0625,
                 b.bounding_box.max_z - 0.0625,
             );
-            ctx.world.colliding_boxes(&probe).is_empty()
+            !ctx.world.has_colliding_boxes(&probe)
         };
         ctx.world.move_body(me, x - bx, y - by, z - bz);
         if let Some(e) = ctx.world.entities.get_mut(me) {
@@ -220,7 +220,7 @@ impl PlaySession {
                 cur.max_y - 0.0625,
                 cur.max_z - 0.0625,
             );
-            ctx.world.colliding_boxes(&shrunk).is_empty()
+            !ctx.world.has_colliding_boxes(&shrunk)
         };
         if was_free && (moved_wrongly || !dest_free) {
             self.teleport_to(ctx.world, me, [bx, by, bz], final_yaw, final_pitch);

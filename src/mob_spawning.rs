@@ -96,6 +96,27 @@ const JOCKEY_ROLL: i32 = 100;
 const HOSTILE_BUDGET: i32 = 100;
 const PASSIVE_BUDGET: i32 = 20;
 
+use std::cell::RefCell;
+
+thread_local! {
+    static ELIGIBLE_SCRATCH: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+struct EligibleScratchGuard(Vec<u64>);
+
+impl Drop for EligibleScratchGuard {
+    fn drop(&mut self) {
+        let mut buf = std::mem::take(&mut self.0);
+        buf.clear();
+        ELIGIBLE_SCRATCH.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.capacity() < buf.capacity() {
+                *slot = buf;
+            }
+        });
+    }
+}
+
 fn chunk_key(chunk_x: i32, chunk_z: i32) -> u64 {
     ((chunk_x as u32 as u64) << 32) | (chunk_z as u32 as u64)
 }
@@ -118,7 +139,13 @@ fn spawn_pass(
 ) -> i32 {
     // Eligible chunks: 8-chunk square around every player (Java HashSet,
     // C++ vector+sort+unique — same set either way).
-    let mut eligible: Vec<u64> = Vec::with_capacity(players_x.len() * 289);
+    let mut guard = EligibleScratchGuard(ELIGIBLE_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut())));
+    let eligible = &mut guard.0;
+    eligible.clear();
+    let needed = players_x.len() * 289;
+    if eligible.capacity() < needed {
+        eligible.reserve(needed - eligible.capacity());
+    }
     for i in 0..players_x.len() {
         let cx = (players_x[i] / 16.0).floor() as i32;
         let cz = (players_z[i] / 16.0).floor() as i32;
@@ -148,7 +175,7 @@ fn spawn_pass(
     }
 
     let mut spawned = 0;
-    for key in &eligible {
+    for key in eligible.iter() {
         // Vanilla SpawnerAnimals.java:60 stochastic filter: only 1 in 50 chunks
         // is evaluated for mob spawns each pass, matching vanilla Alpha 1.2.6.
         if world.spawn_next_int(50) != 0 {

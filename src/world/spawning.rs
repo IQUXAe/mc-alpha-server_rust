@@ -132,6 +132,32 @@ impl World {
         bbox: &crate::aabb::AxisAlignedBB,
         exclude: Option<EntityId>,
     ) -> bool {
+        let cx = (((bbox.min_x + bbox.max_x) * 0.5).floor() as i32).div_euclid(16);
+        let cz = (((bbox.min_z + bbox.max_z) * 0.5).floor() as i32).div_euclid(16);
+        if !self.entity_grid.is_empty() {
+            for ncx in (cx - 1)..=(cx + 1) {
+                for ncz in (cz - 1)..=(cz + 1) {
+                    if let Some(cands) = self.entity_grid.get(&(ncx, ncz)) {
+                        for &oid in cands {
+                            if Some(oid) == exclude {
+                                continue;
+                            }
+                            if let Some(e) = self.entities.get(oid) {
+                                if e.body().dead {
+                                    continue;
+                                }
+                                if matches!(e, Entity::Mob(_) | Entity::Animal(_) | Entity::Player(_))
+                                    && e.body().bounding_box.intersects_with(bbox)
+                                {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return true;
+        }
         for (&oid, e) in self.entities.iter() {
             if Some(oid) == exclude || e.body().dead {
                 continue;
@@ -161,12 +187,12 @@ impl World {
         if self.dimension == -1 {
             if matches!(self.entities.get(id), Some(Entity::Mob(m)) if m.kind == MobKind::Ghast) {
                 let b = bbox.expand(1.0, 1.0, 1.0);
-                if !self.colliding_boxes(&b).is_empty() {
+                if self.has_colliding_boxes(&b) {
                     return false;
                 }
             }
             return self.check_no_living_collision(&bbox, Some(id))
-                && self.colliding_boxes(&bbox).is_empty()
+                && !self.has_colliding_boxes(&bbox)
                 && !self.touching_liquid(id);
         }
         let (x, y, z) = (floor_double(px), floor_double(min_y), floor_double(pz));
@@ -180,7 +206,7 @@ impl World {
             return false;
         }
         self.check_no_living_collision(&bbox, Some(id))
-            && self.colliding_boxes(&bbox).is_empty()
+            && !self.has_colliding_boxes(&bbox)
             && !self.touching_liquid(id)
     }
 
@@ -200,7 +226,7 @@ impl World {
             return false;
         }
         self.check_no_living_collision(&bbox, Some(id))
-            && self.colliding_boxes(&bbox).is_empty()
+            && !self.has_colliding_boxes(&bbox)
             && !self.touching_liquid(id)
     }
 
@@ -208,8 +234,8 @@ impl World {
     /// (mirrors `gatherPlayerPositions`: every joined player, dead or not).
     fn update_spawn_anchors(&mut self, anchors: &mut (Vec<f64>, Vec<f64>, Vec<f64>)) {
         self.spawn_anchor_rows.clear();
-        for (&oid, e) in self.entities.iter() {
-            if let Entity::Player(p) = e {
+        for &oid in self.entities.player_ids() {
+            if let Some(Entity::Player(p)) = self.entities.get(oid) {
                 self.spawn_anchor_rows.push((oid, p.living.body.pos));
             }
         }
