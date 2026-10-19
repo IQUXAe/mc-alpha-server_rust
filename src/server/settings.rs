@@ -38,6 +38,24 @@ pub struct Settings {
     pub gpu_backend: String,
     pub proxy_protocol: bool,
     pub trusted_proxies: Vec<String>,
+    /// Fresh chunk generations per tick per player (mirrors
+    /// `CHUNK_GEN_PER_TICK`; a cold generate costs ~12 ms on x86,
+    /// 30-50 ms on Cortex-A53, so exploring new terrain blows the
+    /// 50 ms tick without a budget). Default 2, S912 preset 1.
+    pub chunk_gen_per_tick: i32,
+    /// Full-chunk skylight regenerations per world tick (mirrors
+    /// `MAX_LIGHT_REGENS_PER_TICK`). Default 16, S912 preset 4.
+    /// Timing-only: over-budget chunks refresh next tick.
+    pub light_regens_per_tick: usize,
+    /// Chunks encoded+stored per tick during autosave/unload flush.
+    /// Default 8, S912 preset 4 (eMMC-friendly).
+    pub autosave_batch: usize,
+    /// Low-power preset (Amlogic S912 and similar weak boxes). Only
+    /// changes the *defaults* of the three budgets above when their
+    /// keys are absent; explicit keys always win, so other machines
+    /// are unaffected unless they opt in via `low-power=true` or
+    /// `ALPHA_S912=1` / `ALPHA_LOW_POWER=1`.
+    pub low_power: bool,
 }
 
 /// Leading-integer seed parse (mirrors `std::stoll`: optional `-`,
@@ -95,6 +113,30 @@ pub fn load_settings(cfg: &mut ServerConfig) -> Settings {
     let is_hell = cfg.get_bool("hellworld", false)
         || cfg.get("dimension").map(|s| s.trim() == "-1").unwrap_or(false)
         || cfg.get_bool("hell-enabled", false);
+    let low_power = cfg.get_bool("low-power", false)
+        || std::env::var("ALPHA_S912")
+            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        || std::env::var("ALPHA_LOW_POWER")
+            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    // Preset only supplies defaults for missing keys; stored values win.
+    let chunk_gen_default = if low_power {
+        1
+    } else {
+        crate::server_constants::CHUNK_GEN_PER_TICK
+    };
+    let light_regens_default = if low_power {
+        4
+    } else {
+        crate::world::MAX_LIGHT_REGENS_PER_TICK as i32
+    };
+    let autosave_batch_default = if low_power { 4 } else { 8 };
+    if low_power {
+        crate::server_log::info(
+            "Low-power mode enabled (S912 preset): conservative tick budgets as defaults",
+        );
+    }
     let gpu_backend = cfg.get_string("gpu-backend", "auto");
     crate::gpu::set_configured_backend(&gpu_backend);
 
@@ -159,6 +201,16 @@ pub fn load_settings(cfg: &mut ServerConfig) -> Settings {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect(),
+        chunk_gen_per_tick: cfg
+            .get_int("chunk-gen-per-tick", chunk_gen_default)
+            .clamp(1, 8),
+        light_regens_per_tick: cfg
+            .get_int("light-regens-per-tick", light_regens_default)
+            .clamp(1, 64) as usize,
+        autosave_batch: cfg
+            .get_int("autosave-batch", autosave_batch_default)
+            .clamp(1, 64) as usize,
+        low_power,
     }
 }
 

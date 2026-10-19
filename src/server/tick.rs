@@ -108,10 +108,13 @@ impl Server {
         }
 
         // Snapshot rows into owned tracked structs (params mirror C++).
+        // Single table lookup per entity (was two): the match reuses the
+        // same row for the held-item probe and the tracker snapshot.
         scratch.tracked.clear();
         scratch.chunks.clear();
         for &id in &scratch.live_ids {
-            let held = match world.entities.get(id) {
+            let row = world.entities.get(id);
+            let held = match row {
                 Some(Entity::Player(_)) => {
                     match players.get(&id).and_then(|cid| sessions.get(cid)) {
                         Some(Session { state: SessionState::Play(play, _), .. }) => {
@@ -122,7 +125,7 @@ impl Server {
                 }
                 _ => 0,
             };
-            let te = match world.entities.get(id) {
+            let te = match row {
                 // Java EntityTracker: player 512/2, item 64/20, arrow 64/5,
                 // boat 160/5, mobs+animals 160/3 — each clamped to the view
                 // distance in blocks (EntityTracker.java:42-44).
@@ -606,6 +609,12 @@ impl Server {
                 }
             }
         }
+        // Tick budgets follow settings (S912 preset lowers them at load;
+        // sync here too so runtime-created worlds pick them up).
+        self.world.light_regens_per_tick = self.settings.light_regens_per_tick;
+        if let Some(hell) = self.hell.as_mut() {
+            hell.light_regens_per_tick = self.settings.light_regens_per_tick;
+        }
         self.world.tick_world();
         // Hell ticks on the same clock (single time source like vanilla's
         // one World; skylight inside is fixed, see calculate fn).
@@ -627,7 +636,7 @@ impl Server {
             self.begin_autosave();
         }
         if self.auto_save_active {
-            self.step_autosave(8);
+            self.step_autosave(self.settings.autosave_batch);
         }
         self.tracker_tick();
         self.sent_tiles_scratch.clear();

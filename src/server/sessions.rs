@@ -86,6 +86,7 @@ impl Server {
         world.spawn_animals = if is_hell { false } else { settings.spawn_animals };
         world.level_name = settings.level_name.clone();
         world.unload_radius = settings.view_distance + 2;
+        world.light_regens_per_tick = settings.light_regens_per_tick;
         let store =
             ChunkStore::open(&format!("{level_dir}/db")).map_err(|e| format!("cannot open chunk store: {e}"))?;
         if !world.load_level_from(level_dir) {

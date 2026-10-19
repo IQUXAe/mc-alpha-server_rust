@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use crate::server::sessions::{Session, SessionState};
 use crate::server::{ChunkMapKey, ConnId, Server, chunk_map_key};
-use crate::server_constants::{CHUNKS_PER_TICK, CHUNK_GEN_PER_TICK, CHUNK_LOADS_PER_TICK};
+use crate::server_constants::{CHUNKS_PER_TICK, CHUNK_LOADS_PER_TICK};
 use crate::session::{pkt_map_chunk, pkt_pre_chunk, tile_packet};
 
 pub struct PlayStream {
@@ -211,6 +211,10 @@ impl Server {
         let mut sent_now = 0;
         let mut deferred_count = 0;
         let mut i = 0;
+        // Per-tick fresh-generation budget from settings (default 2,
+        // S912 preset 1). Copied locally: the loop below borrows the
+        // worlds mutably, so re-reading the field each check is noise.
+        let gen_budget = self.settings.chunk_gen_per_tick;
         let mut sent_indices = Vec::with_capacity(CHUNKS_PER_TICK as usize);
         // Wall-clock budget for the whole send phase: the per-item caps
         // (loads/gens/sends) are additive, so one explorer's burst of
@@ -314,7 +318,7 @@ impl Server {
                                         }
                                     }
                                     deferred = true;
-                                } else if self.chunks_generated_this_tick >= CHUNK_GEN_PER_TICK {
+                                } else if self.chunks_generated_this_tick >= gen_budget {
                                     deferred = true;
                                     break 'nb;
                                 } else {
@@ -326,7 +330,7 @@ impl Server {
                     if deferred {
                         break 'nb;
                     }
-                    if self.chunks_generated_this_tick >= CHUNK_GEN_PER_TICK {
+                    if self.chunks_generated_this_tick >= gen_budget {
                         deferred = true;
                         break 'nb;
                     }
@@ -341,7 +345,7 @@ impl Server {
                 }
             }
             if deferred {
-                if self.chunks_generated_this_tick >= CHUNK_GEN_PER_TICK
+                if self.chunks_generated_this_tick >= gen_budget
                     || self.chunks_loaded_this_tick >= CHUNK_LOADS_PER_TICK
                     || (self.chunk_worker.is_some() && self.pending_chunk_gens.len() >= 64)
                 {

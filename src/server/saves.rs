@@ -129,8 +129,10 @@ impl Server {
     /// Flush staged unloaded chunks to LevelDB and free their memory.
     /// A failed encode/put keeps the chunk staged (vanilla retries via
     /// `isModified`) instead of silently dropping player builds.
+    /// Budget comes from settings (`autosave-batch`, default 8, S912
+    /// preset 4): eMMC on weak boxes stalls on wide encode bursts.
     pub(crate) fn flush_unloaded_chunks(&mut self) {
-        self.flush_unloaded_chunks_limit(8);
+        self.flush_unloaded_chunks_limit(self.settings.autosave_batch);
     }
 
     pub(crate) fn flush_unloaded_chunks_limit(&mut self, limit: usize) {
