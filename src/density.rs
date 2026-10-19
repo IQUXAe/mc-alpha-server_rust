@@ -171,18 +171,19 @@ fn density_fill(
             if var27 < 0.0 { var27 = 0.0; }
 
             var27 += 0.5;
+            let inv_var27 = 12.0 / var27;
             var29 = var29 * var6 as f64 / 16.0;
             let var31 = var6 as f64 / 2.0 + var29 * 4.0;
             var15 += 1;
 
             for var33 in 0..var6 {
                 let mut var34;
-                let mut var36 = (var33 as f64 - var31) * 12.0 / var27;
+                let mut var36 = (var33 as f64 - var31) * inv_var27;
                 if var36 < 0.0 { var36 *= 4.0; }
 
-                let var38 = noise_min[var14] / 512.0;
-                let var40 = noise_max[var14] / 512.0;
-                let var42 = (noise_main[var14] / 10.0 + 1.0) / 2.0;
+                let var38 = noise_min[var14] * (1.0 / 512.0);
+                let var40 = noise_max[var14] * (1.0 / 512.0);
+                let var42 = (noise_main[var14] / 10.0 + 1.0) * 0.5;
 
                 if var42 < 0.0 {
                     var34 = var38;

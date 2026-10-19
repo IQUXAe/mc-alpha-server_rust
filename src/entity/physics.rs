@@ -91,12 +91,12 @@ pub fn entity_push(
         return None;
     }
     let norm = sqrt_double(max_abs) as f64;
-    let (nx, nz) = (dx / norm, dz / norm);
     let mut scale = 1.0 / max_abs;
     if scale > 1.0 {
         scale = 1.0;
     }
-    let (ix, iz) = (nx * scale * 0.05, nz * scale * 0.05);
+    let factor = (scale * 0.05) / norm;
+    let (ix, iz) = (dx * factor, dz * factor);
     Some(PushOut { dvx1: -ix, dvz1: -iz, dvx2: ix, dvz2: iz })
 }
 

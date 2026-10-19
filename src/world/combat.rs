@@ -21,14 +21,37 @@ pub const MAX_BLAST_CELLS: usize = 8192;
 /// in `ItemBoat`/`EntityArrow`: x=-sin(yaw)cos(pitch), y=-sin(pitch),
 /// z=cos(yaw)cos(pitch)).
 fn look_dir(yaw: f32, pitch: f32) -> [f64; 3] {
-    let yr = yaw as f64 * std::f64::consts::PI / 180.0;
-    let pr = pitch as f64 * std::f64::consts::PI / 180.0;
+    let yr = (yaw as f64).to_radians();
+    let pr = (pitch as f64).to_radians();
     [
         -yr.sin() * pr.cos(),
         -pr.sin(),
         yr.cos() * pr.cos(),
     ]
 }
+
+/// Precomputed unit direction vectors for the 1352 surface rays of an explosion.
+static EXPLOSION_RAYS: std::sync::LazyLock<Vec<[f64; 3]>> = std::sync::LazyLock::new(|| {
+    let mut rays = Vec::with_capacity(1352);
+    for ix in 0..16 {
+        for iy in 0..16 {
+            for iz in 0..16 {
+                if ix != 0 && ix != 15 && iy != 0 && iy != 15 && iz != 0 && iz != 15 {
+                    continue;
+                }
+                let mut vx = ix as f64 / 15.0 * 2.0 - 1.0;
+                let mut vy = iy as f64 / 15.0 * 2.0 - 1.0;
+                let mut vz = iz as f64 / 15.0 * 2.0 - 1.0;
+                let len = (vx * vx + vy * vy + vz * vz).sqrt();
+                vx /= len;
+                vy /= len;
+                vz /= len;
+                rays.push([vx, vy, vz]);
+            }
+        }
+    }
+    rays
+});
 
 impl World {
     /// Line of sight (mirrors `canEntitySee` → `rayTraceBlocks` with
@@ -615,9 +638,10 @@ impl World {
                 let (dx, dz) = (sx - b.pos[0], sz - b.pos[2]);
                 let d = (dx * dx + dz * dz).sqrt();
                 if d > 1e-6 {
-                    b.motion[0] = b.motion[0] * 0.5 - dx / d * 0.4;
+                    let inv = 0.4 / d;
+                    b.motion[0] = b.motion[0] * 0.5 - dx * inv;
                     b.motion[1] = (b.motion[1] * 0.5 + 0.4).min(0.4);
-                    b.motion[2] = b.motion[2] * 0.5 - dz / d * 0.4;
+                    b.motion[2] = b.motion[2] * 0.5 - dz * inv;
                 }
             }
             if let Some(Entity::Snowball(s)) = self.entities.get_mut(id) {
@@ -943,8 +967,8 @@ impl World {
         // Face of travel (smoothed like the snowball tail).
         if let Some(Entity::FishHook(f)) = self.entities.get_mut(id) {
             let horizontal = (mx * mx + mz * mz).sqrt();
-            let yaw = (mx.atan2(mz) * 180.0 / std::f64::consts::PI) as f32;
-            let pitch = (my.atan2(horizontal) * 180.0 / std::f64::consts::PI) as f32;
+            let yaw = mx.atan2(mz).to_degrees() as f32;
+            let pitch = my.atan2(horizontal).to_degrees() as f32;
             f.body.yaw = f.body.prev_yaw + (yaw - f.body.prev_yaw) * 0.2;
             f.body.pitch = f.body.prev_pitch + (pitch - f.body.prev_pitch) * 0.2;
         }
@@ -1104,13 +1128,13 @@ impl World {
         };
         let (mut dx, mut dy, mut dz) =
             (tp[0] - sp[0], tp[1] - (sp[1] + eye), tp[2] - sp[2]);
-        let len = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
         // Vanilla spread: gaussian-ish jitter via rand draws.
         dx += self.rng.next_double() * 0.2 - 0.1;
         dy += self.rng.next_double() * 0.2 - 0.1;
         dz += self.rng.next_double() * 0.2 - 0.1;
         let nlen = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
-        let motion = [dx / nlen * 1.2, dy / nlen * 1.2, dz / nlen * 1.2];
+        let inv = 1.2 / nlen;
+        let motion = [dx * inv, dy * inv, dz * inv];
         let nid = self.entities.alloc_id();
         let mut b = Body::new(nid, 1.0, 1.0, 0.0);
         b.set_position(sp[0], sp[1] + eye, sp[2]);
@@ -1121,7 +1145,6 @@ impl World {
             ticks_in_air: 0,
         }));
         self.stamp_dim(nid);
-        let _ = len;
     }
 
     /// Skeleton volley (mirrors `EntitySkeleton.java:30-53`): loose an arrow
@@ -1150,7 +1173,7 @@ impl World {
                 }
                 self.spawn_skeleton_arrow(id, target);
             }
-            snap.yaw = (dz.atan2(dx) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
+            snap.yaw = dz.atan2(dx).to_degrees() as f32 - 90.0;
             snap.has_attacked = true;
         }
         Some(target)
@@ -1413,7 +1436,7 @@ impl World {
         is_flaming: bool,
     ) {
         // Phase 1: living victims and items in the blast radius.
-        let mut victims: Vec<EntityId> = Vec::new();
+        let mut victims: Vec<(EntityId, f32, f64, f64, f64)> = Vec::new();
         for oid in self.entities.alive_ids() {
             let is_victim = match self.entities.get(oid) {
                 Some(Entity::Mob(m)) if !m.living.body.dead => true,
@@ -1433,28 +1456,18 @@ impl World {
                 None => continue,
             };
             let (dx, dy, dz) = (qx - px, qy - py, qz - pz);
-            let d = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
-            if d > radius {
+            let d_sq = (dx * dx + dy * dy + dz * dz) as f32;
+            if d_sq > radius * radius {
                 continue;
             }
-            victims.push(oid);
+            victims.push((oid, d_sq.sqrt(), dx, dy, dz));
         }
-        victims.sort_unstable();
-        for v in victims {
-            let (qx, qy, qz, bbox) = match self.entities.get(v) {
-                Some(e) => (
-                    e.body().pos[0],
-                    e.body().pos[1],
-                    e.body().pos[2],
-                    e.body().bounding_box,
-                ),
+        victims.sort_unstable_by_key(|&(oid, _, _, _, _)| oid);
+        for (v, d, dx, dy, dz) in victims {
+            let bbox = match self.entities.get(v) {
+                Some(e) => e.body().bounding_box,
                 None => continue,
             };
-            let (dx, dy, dz) = (qx - px, qy - py, qz - pz);
-            let d = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
-            if d > radius {
-                continue;
-            }
             // Exposure factor (`World.func_675_a`): fraction of sample
             // rays from the blast center onto the victim's box that are
             // unobstructed. Replaces the old single-eye all-or-nothing
@@ -1474,12 +1487,13 @@ impl World {
                 // Explosion.java:103-106: attackEntity runs FIRST, then the blast
                 // velocity is added on top of post-hit motion.
                 self.attack_living(v, damage.max(1), attacker);
-                let len = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
+                let len = (d as f64).max(0.001);
+                let inv = var41 / len;
                 if let Some(e) = self.entities.get_mut(v) {
                     let b = e.body_mut();
-                    b.motion[0] += dx / len * var41;
-                    b.motion[1] += dy / len * var41;
-                    b.motion[2] += dz / len * var41;
+                    b.motion[0] += dx * inv;
+                    b.motion[1] += dy * inv;
+                    b.motion[2] += dz * inv;
                     let m = b.motion;
                     self.velocity_events.push((v, m));
                 }
@@ -1489,22 +1503,10 @@ impl World {
         // Hardening: stop starting new rays once the cell cap is hit
         // (single blasts never reach it; TNT fields can't lag the tick).
         let mut destroyed = std::collections::BTreeSet::new();
-        'rays: for ix in 0..16 {
-            for iy in 0..16 {
-                for iz in 0..16 {
-                    if destroyed.len() >= MAX_BLAST_CELLS {
-                        break 'rays;
-                    }
-                    if ix != 0 && ix != 15 && iy != 0 && iy != 15 && iz != 0 && iz != 15 {
-                        continue;
-                    }
-                    let mut vx = ix as f64 / 15.0 * 2.0 - 1.0;
-                    let mut vy = iy as f64 / 15.0 * 2.0 - 1.0;
-                    let mut vz = iz as f64 / 15.0 * 2.0 - 1.0;
-                    let len = (vx * vx + vy * vy + vz * vz).sqrt();
-                    vx /= len;
-                    vy /= len;
-                    vz /= len;
+        'rays: for &[vx, vy, vz] in EXPLOSION_RAYS.iter() {
+            if destroyed.len() >= MAX_BLAST_CELLS {
+                break 'rays;
+            }
 
                     let mut power = radius * (0.7 + self.rng.next_float() * 0.6);
                     let mut rx = px;
@@ -1530,8 +1532,6 @@ impl World {
                         rz += vz * 0.3;
                         power -= 0.3 * 0.75;
                     }
-                }
-            }
         }
         let cells: Vec<(i32, i32, i32)> = destroyed.iter().copied().collect();
         self.explosion_events.push((px, py, pz, radius, cells.clone()));
@@ -1917,8 +1917,8 @@ impl World {
             _ => return,
         };
         let horizontal = sqrt_float((mx * mx + mz * mz) as f32);
-        let mut yaw = (mx.atan2(mz) * 180.0 / std::f64::consts::PI) as f32;
-        let mut pitch = (my.atan2(horizontal as f64) * 180.0 / std::f64::consts::PI) as f32;
+        let mut yaw = mx.atan2(mz).to_degrees() as f32;
+        let mut pitch = my.atan2(horizontal as f64).to_degrees() as f32;
         let (prev_yaw, prev_pitch) = match self.entities.get(id) {
             Some(Entity::Arrow(a)) => (a.body.prev_yaw, a.body.prev_pitch),
             _ => return,

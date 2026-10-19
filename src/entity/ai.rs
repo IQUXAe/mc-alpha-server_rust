@@ -33,8 +33,8 @@ pub fn ai_clamp_angle(current: f32, target: f32, max_delta: f32) -> f32 {
 /// negation.
 pub fn face_run(dx: f64, dz: f64, dy: f64, cur_yaw: f32, cur_pitch: f32, max_turn: f32) -> (f32, f32) {
     let dist = crate::math_helper::sqrt_double(dx * dx + dz * dz);
-    let yaw = (dz.atan2(dx) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
-    let pitch = (dy.atan2(dist as f64) * 180.0 / std::f64::consts::PI) as f32;
+    let yaw = dz.atan2(dx).to_degrees() as f32 - 90.0;
+    let pitch = dy.atan2(dist as f64).to_degrees() as f32;
     (clamp_inner(cur_yaw, yaw, max_turn), -clamp_inner(cur_pitch, pitch, max_turn))
 }
 
@@ -99,7 +99,7 @@ pub struct SteerIn {
 pub fn steer_run(v: SteerIn) -> SteerOut {
     let (dx, dy, dz) = (v.delta[0], v.delta[1], v.delta[2]);
     let (tgt_dx, tgt_dz) = (v.target[0], v.target[1]);
-    let target_yaw = (dz.atan2(dx) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
+    let target_yaw = dz.atan2(dx).to_degrees() as f32 - 90.0;
     let mut yaw_delta = target_yaw - v.cur_yaw;
     while yaw_delta < -180.0 {
         yaw_delta += 360.0;
@@ -113,8 +113,8 @@ pub fn steer_run(v: SteerIn) -> SteerOut {
     let (mut strafe, mut forward) = (0.0f32, v.forward_in);
     if v.attacking && v.has_target {
         let backup_yaw = new_yaw;
-        let face_yaw = (tgt_dz.atan2(tgt_dx) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
-        let strafe_angle = (backup_yaw - face_yaw + 90.0) * (std::f32::consts::PI / 180.0);
+        let face_yaw = tgt_dz.atan2(tgt_dx).to_degrees() as f32 - 90.0;
+        let strafe_angle = (backup_yaw - face_yaw + 90.0).to_radians();
         strafe = -sin(strafe_angle) * v.forward_in;
         forward = cos(strafe_angle) * v.forward_in;
     }

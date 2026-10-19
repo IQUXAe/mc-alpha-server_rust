@@ -514,21 +514,23 @@ impl MapGenCavesHell {
                         }
                     }
                     if !wet {
+                        let inv_rad2 = 1.0 / (rad * rad);
+                        let inv_vert = 1.0 / vert;
                         for lx in x0..x1 {
                             let nx = (lx + cx * 16) as f64 + 0.5 - x;
+                            let nx2 = nx * nx * inv_rad2;
                             for lz in z0..z1 {
                                 let nz = (lz + cz * 16) as f64 + 0.5 - z;
+                                let horiz = nx2 + nz * nz * inv_rad2;
+                                if horiz >= 1.0 {
+                                    continue;
+                                }
                                 for ly in (y0..y1).rev() {
                                     if !(0..128).contains(&ly) {
                                         continue;
                                     }
-                                    let ny = (ly as f64 + 0.5 - y) / vert;
-                                    if ny > -0.7
-                                        && nx * nx / (rad * rad)
-                                            + ny * ny
-                                            + nz * nz / (rad * rad)
-                                            < 1.0
-                                    {
+                                    let ny = (ly as f64 + 0.5 - y) * inv_vert;
+                                    if ny > -0.7 && horiz + ny * ny < 1.0 {
                                         let bi = ((lx * 16 + lz) * 128 + ly) as usize;
                                         let b = blocks[bi];
                                         if b == BLOOD_STONE || b == 3 || b == 2 {

@@ -20,7 +20,7 @@ fn grad(hash: i32, x: f64, y: f64, z: f64) -> f64 {
 
 fn grad2(hash: i32, x: f64, z: f64) -> f64 {
     let h = hash & 15;
-    let u = (1.0 - ((h & 8) >> 3) as f64) * x;
+    let u = if (h & 8) == 0 { x } else { 0.0 };
     let v = if h < 4 { 0.0 } else if h != 12 && h != 14 { z } else { x };
     let res_u = if (h & 1) == 0 { u } else { -u };
     let res_v = if (h & 2) == 0 { v } else { -v };

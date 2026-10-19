@@ -21,7 +21,7 @@ pub fn tracker_encode_pos(pos: f64) -> i32 {
 /// packets (`Packet20:26, Packet24:25, Packet34:23`) use a truncating
 /// `(int)` cast instead — see `tracker_encode_rot_spawn`.
 pub fn tracker_encode_rot(degrees: f32) -> i8 {
-    let v = (degrees * 256.0 / 360.0).floor() as i32 & 0xFF;
+    let v = (degrees * (256.0 / 360.0)).floor() as i32 & 0xFF;
     v as u8 as i8
 }
 
@@ -29,7 +29,7 @@ pub fn tracker_encode_rot(degrees: f32) -> i8 {
 ///
 /// Truncation toward zero (Java float->int cast), then low 8 bits.
 pub fn tracker_encode_rot_spawn(degrees: f32) -> i8 {
-    let v = (degrees * 256.0 / 360.0) as i32 & 0xFF;
+    let v = (degrees * (256.0 / 360.0)) as i32 & 0xFF;
     v as u8 as i8
 }
 

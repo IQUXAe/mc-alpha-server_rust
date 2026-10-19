@@ -533,17 +533,16 @@ impl World {
             }
         }
 
-        let len = (total_vec.x_coord * total_vec.x_coord
+        let len_sq = total_vec.x_coord * total_vec.x_coord
             + total_vec.y_coord * total_vec.y_coord
-            + total_vec.z_coord * total_vec.z_coord)
-            .sqrt();
-        if len > 0.0 {
-            let norm = total_vec.normalize();
-            let d = 0.004;
+            + total_vec.z_coord * total_vec.z_coord;
+        if len_sq > 0.0 {
+            let len = len_sq.sqrt();
+            let factor = 0.004 / len;
             if let Some(Entity::Item(e)) = self.entities.get_mut(id) {
-                e.body.motion[0] += norm.x_coord * d;
-                e.body.motion[1] += norm.y_coord * d;
-                e.body.motion[2] += norm.z_coord * d;
+                e.body.motion[0] += total_vec.x_coord * factor;
+                e.body.motion[1] += total_vec.y_coord * factor;
+                e.body.motion[2] += total_vec.z_coord * factor;
             }
         }
         flag
@@ -805,9 +804,9 @@ impl World {
         // Crash: eject, drop, die.
         let crash = match self.entities.get(id) {
             Some(Entity::Boat(b)) => {
-                let speed =
-                    (b.body.motion[0] * b.body.motion[0] + b.body.motion[2] * b.body.motion[2]).sqrt();
-                b.body.collided_horiz && speed > 0.15
+                b.body.collided_horiz
+                    && (b.body.motion[0] * b.body.motion[0] + b.body.motion[2] * b.body.motion[2])
+                        > 0.15 * 0.15
             }
             _ => return,
         };
@@ -1165,8 +1164,7 @@ impl World {
         // Yaw follows travel.
         if let Some(Entity::Minecart(c)) = self.entities.get_mut(id) {
             if c.body.motion[0] != 0.0 || c.body.motion[2] != 0.0 {
-                c.body.yaw = (c.body.motion[2].atan2(c.body.motion[0]) * 180.0
-                    / std::f64::consts::PI) as f32
+                c.body.yaw = c.body.motion[2].atan2(c.body.motion[0]).to_degrees() as f32
                     - 90.0;
             }
         }

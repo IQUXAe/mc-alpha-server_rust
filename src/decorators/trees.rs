@@ -148,7 +148,7 @@ impl WorldGenBigTree {
         } else if dist.abs() >= half_h {
             0.0_f32
         } else {
-            (((half_h as f64).powi(2) - (dist.abs() as f64).powi(2)).sqrt()) as f32
+            (half_h * half_h - dist * dist).sqrt()
         };
         result *= 0.5_f32;
         result
@@ -243,7 +243,9 @@ impl WorldGenBigTree {
         axis: usize,
         block_id: u8,
     ) {
-        let int_radius = (radius as f64 + 0.618) as i32;
+        let r_f64 = radius as f64;
+        let r_sq = r_f64 * r_f64;
+        let int_radius = (r_f64 + 0.618) as i32;
         let ax1 = OTHER_COORD_PAIRS[axis] as usize;
         let ax2 = OTHER_COORD_PAIRS[axis + 3] as usize;
         let mut pos = [0; 3];
@@ -251,9 +253,11 @@ impl WorldGenBigTree {
 
         for i in -int_radius..=int_radius {
             pos[ax1] = center[ax1] + i;
+            let di = (i.abs() as f64) + 0.5;
+            let di_sq = di * di;
             for j in -int_radius..=int_radius {
-                let dist = (((i.abs() as f64) + 0.5).powi(2) + ((j.abs() as f64) + 0.5).powi(2)).sqrt();
-                if dist > radius as f64 {
+                let dj = (j.abs() as f64) + 0.5;
+                if di_sq + dj * dj > r_sq {
                     continue;
                 }
                 pos[ax2] = center[ax2] + j;
@@ -320,7 +324,9 @@ impl WorldGenBigTree {
 
                 if self.check_block_line(&mut *accessor, &b_from, &b_to) == -1 {
                     let mut trunk = [self.base_pos[0], self.base_pos[1], self.base_pos[2]];
-                    let h_dist = (((self.base_pos[0] - bx).abs() as f64).powi(2) + ((self.base_pos[2] - bz).abs() as f64).powi(2)).sqrt();
+                    let dx = (self.base_pos[0] - bx) as f64;
+                    let dz = (self.base_pos[2] - bz) as f64;
+                    let h_dist = (dx * dx + dz * dz).sqrt();
                     let branch_y = h_dist * self.branch_slope;
                     if (b_from[1] as f64) - branch_y > (base_y as f64) {
                         trunk[1] = base_y;

@@ -154,7 +154,7 @@ pub fn boat_steer(delta_x: f64, delta_z: f64, cur_yaw: f32, out_yaw: &mut f32) -
     if delta_x * delta_x + delta_z * delta_z <= 0.001 {
         return false;
     }
-    let target = (delta_z.atan2(delta_x) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
+    let target = delta_z.atan2(delta_x).to_degrees() as f32 - 90.0;
     let mut delta = target - cur_yaw;
     while delta >= 180.0 {
         delta -= 360.0;
@@ -170,7 +170,7 @@ pub fn boat_steer(delta_x: f64, delta_z: f64, cur_yaw: f32, out_yaw: &mut f32) -
 /// Rider seat offset (mirrors `EntityBoat::updateRiderPosition` geometry;
 /// rider lookup and positioning stay in C++). Plain `std` trig like C++.
 pub fn boat_rider_offset(yaw: f32, out_x: &mut f64, out_z: &mut f64) -> bool {
-    let radians = yaw as f64 * std::f64::consts::PI / 180.0;
+    let radians = (yaw as f64).to_radians();
     *out_x = radians.cos() * 0.4;
     *out_z = radians.sin() * 0.4;
     true
@@ -192,7 +192,8 @@ pub fn arrow_shoot_run(
     if length < 1.0e-7 {
         return None;
     }
-    let (mut nx, mut ny, mut nz) = (vx / length, vy / length, vz / length);
+    let inv = 1.0 / length;
+    let (mut nx, mut ny, mut nz) = (vx * inv, vy * inv, vz * inv);
     let jitter = 0.0075 * inaccuracy as f64;
     nx += (next_f01() - next_f01()) * jitter;
     ny += (next_f01() - next_f01()) * jitter;
@@ -211,8 +212,8 @@ pub fn arrow_face_velocity(
     out_pitch: &mut f32,
 ) -> bool {
     let horizontal = crate::math_helper::sqrt_float((mx * mx + mz * mz) as f32);
-    *out_yaw = (mx.atan2(mz) * 180.0 / std::f64::consts::PI) as f32;
-    *out_pitch = (my.atan2(horizontal as f64) * 180.0 / std::f64::consts::PI) as f32;
+    *out_yaw = mx.atan2(mz).to_degrees() as f32;
+    *out_pitch = my.atan2(horizontal as f64).to_degrees() as f32;
     true
 }
 

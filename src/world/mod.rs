@@ -533,7 +533,7 @@ impl World {
     }
 
     pub(crate) fn chunk_of(x: i32, z: i32) -> (i32, i32, i32, i32) {
-        (x.div_euclid(16), z.div_euclid(16), x.rem_euclid(16), z.rem_euclid(16))
+        (x >> 4, z >> 4, x & 15, z & 15)
     }
 
     pub fn get_block_id(&self, x: i32, y: i32, z: i32) -> u8 {

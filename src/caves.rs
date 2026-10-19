@@ -230,15 +230,22 @@ impl MapGenCaves {
                     }
 
                     if !var56 {
+                        let inv_var27 = 1.0 / var27;
+                        let inv_var29 = 1.0 / var29;
                         for var40 in var53..var34 {
-                            let var57 = (((var40 + var1 * 16) as f64) + 0.5 - var4) / var27;
+                            let var57 = (((var40 + var1 * 16) as f64) + 0.5 - var4) * inv_var27;
+                            let var57_sq = var57 * var57;
                             for var43 in var55..var38 {
-                                let var44 = (((var43 + var2 * 16) as f64) + 0.5 - var8) / var27;
+                                let var44 = (((var43 + var2 * 16) as f64) + 0.5 - var8) * inv_var27;
+                                let horiz = var57_sq + var44 * var44;
+                                if horiz >= 1.0 {
+                                    continue;
+                                }
                                 let mut var46 = ((var40 * 16 + var43) * 128 + var36) as usize;
                                 let mut var47 = false;
                                 for var48 in (var54..var36).rev() {
-                                    let var49 = ((var48 as f64) + 0.5 - var6) / var29;
-                                    if var49 > -0.7 && var57 * var57 + var49 * var49 + var44 * var44 < 1.0 {
+                                    let var49 = ((var48 as f64) + 0.5 - var6) * inv_var29;
+                                    if var49 > -0.7 && horiz + var49 * var49 < 1.0 {
                                         let var51 = var3[var46];
                                         if var51 == 2 {
                                             var47 = true;
@@ -258,9 +265,9 @@ impl MapGenCaves {
                                 }
                             }
                         }
-                        if var52 {
-                            break;
-                        }
+                    }
+                    if var52 {
+                        break;
                     }
                 }
             }

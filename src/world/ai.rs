@@ -440,12 +440,12 @@ impl World {
             // In multiplayer server (EntityPlayerMP.java:39: yOffset = 0.0F),
             // player.posY and mob.posY are both at ground level (minY), so dy = tp[1] - sp[1].
             let (dx, dy, dz) = (tp[0] - sp[0], tp[1] - sp[1], tp[2] - sp[2]);
-            let dist = sqrt_float((dx * dx + dy * dy + dz * dz) as f32);
             let self_eye = snap.height as f64 * 0.85;
             let from = [sp[0], sp[1] + self_eye, sp[2]];
             let to = [tp[0], tp[1] + teye, tp[2]];
             if self.ray_trace_clear(from, to) {
                 attacked_in_los = true;
+                let dist = sqrt_float((dx * dx + dy * dy + dz * dz) as f32);
                 target = self.mob_attack(id, kind, t, dist, snap);
             }
         }
@@ -540,7 +540,7 @@ impl World {
                 });
                 snap.yaw = steer.new_yaw;
                 if snap.has_attacked && target.is_some() {
-                    snap.yaw = (tdz.atan2(tdx) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
+                    snap.yaw = tdz.atan2(tdx).to_degrees() as f32 - 90.0;
                 }
                 *strafe = steer.strafe;
                 *forward = steer.forward;
@@ -916,7 +916,7 @@ impl World {
             if let (Some(me), Some(t)) = (self.entities.get(id), target.and_then(|t| self.entities.get(t))) {
                 let (dx, dz) = (t.body().pos[0] - me.body().pos[0], t.body().pos[2] - me.body().pos[2]);
                 if dx * dx + dz * dz > 1e-6 {
-                    let yaw = (dz.atan2(dx) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
+                    let yaw = dz.atan2(dx).to_degrees() as f32 - 90.0;
                     if let Some(e) = self.entities.get_mut(id) {
                         e.body_mut().yaw = yaw;
                     }
@@ -999,8 +999,8 @@ impl World {
                     m.waypoint[1] - py,
                     m.waypoint[2] - pz,
                 );
-                let d = (dx * dx + dy * dy + dz * dz).sqrt();
-                !(1.0..=60.0).contains(&d)
+                let d2 = dx * dx + dy * dy + dz * dz;
+                !(1.0..=3600.0).contains(&d2)
             }
             _ => true,
         };
@@ -1018,12 +1018,12 @@ impl World {
         if let Some(Entity::Mob(m)) = self.entities.get_mut(id) {
             let (dx, dy, dz) = (m.waypoint[0] - px, m.waypoint[1] - py, m.waypoint[2] - pz);
             let d = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
-            m.living.body.motion[0] += dx / d * 0.1;
-            m.living.body.motion[1] += dy / d * 0.1;
-            m.living.body.motion[2] += dz / d * 0.1;
+            let inv = 0.1 / d;
+            m.living.body.motion[0] += dx * inv;
+            m.living.body.motion[1] += dy * inv;
+            m.living.body.motion[2] += dz * inv;
             if m.living.body.motion[0] != 0.0 || m.living.body.motion[2] != 0.0 {
-                m.living.body.yaw = (m.living.body.motion[2].atan2(m.living.body.motion[0]) * 180.0
-                    / std::f64::consts::PI) as f32
+                m.living.body.yaw = m.living.body.motion[2].atan2(m.living.body.motion[0]).to_degrees() as f32
                     - 90.0;
             }
         }
