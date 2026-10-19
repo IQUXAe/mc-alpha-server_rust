@@ -324,6 +324,17 @@ pub struct World {
     pub(crate) entity_grid: HashMap<(i32, i32), Vec<EntityId>>,
     /// Scratch buffer for colliding bounding boxes across ticks.
     pub(crate) colliding_boxes_scratch: Vec<crate::aabb::AxisAlignedBB>,
+    /// Scratch buffer for boat-neighbor scans (avoids a `Vec` alloc per
+    /// boat per tick; drained and returned every call).
+    pub(crate) boat_scratch: Vec<EntityId>,
+    /// Scratch buffer for minecart-shover scans (same as `boat_scratch`).
+    pub(crate) shover_scratch: Vec<EntityId>,
+    /// Full-chunk skylight regenerations allowed per world tick (budget).
+    /// Defaults to [`MAX_LIGHT_REGENS_PER_TICK`]; the server overwrites it
+    /// from settings so low-power boxes (S912) can run 4 while desktops
+    /// keep 16. Gameplay is timing-only: over-budget chunks refresh next
+    /// tick instead of this one.
+    pub light_regens_per_tick: usize,
 }
 
 impl std::fmt::Debug for World {
@@ -396,6 +407,9 @@ impl World {
             random_tick_to_tick: Vec::new(),
             entity_grid: HashMap::new(),
             colliding_boxes_scratch: Vec::with_capacity(16),
+            boat_scratch: Vec::new(),
+            shover_scratch: Vec::new(),
+            light_regens_per_tick: MAX_LIGHT_REGENS_PER_TICK,
         }
     }
 
@@ -660,7 +674,7 @@ impl World {
     /// Regenerate skylight once per dirty chunk and propagate light across
     /// loaded chunk borders. Runs at the end of the world tick so chunk
     /// packets go out with fresh light. At most
-    /// [`MAX_LIGHT_REGENS_PER_TICK`] full-chunk regenerations run per
+    /// `self.light_regens_per_tick` full-chunk regenerations run per
     /// tick; the remainder stays dirty and refreshes next tick (light
     /// lag of a tick or two is invisible next to the freeze a
     /// 9-regens-per-edit storm used to cause).
@@ -701,7 +715,7 @@ impl World {
             let mut it = regen_set.iter().copied();
             let mut regen_done = 0usize;
             for (cx, cz) in it.by_ref() {
-                if regen_done >= MAX_LIGHT_REGENS_PER_TICK {
+                if regen_done >= self.light_regens_per_tick {
                     break;
                 }
                 if let Some(c) = self.chunks.get_mut(&(cx, cz)) {

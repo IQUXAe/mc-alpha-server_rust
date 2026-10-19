@@ -863,7 +863,8 @@ impl World {
             (boat_pos[0].floor() as i32).div_euclid(16),
             (boat_pos[2].floor() as i32).div_euclid(16),
         );
-        let mut boats: Vec<EntityId> = Vec::new();
+        let mut boats: Vec<EntityId> = std::mem::take(&mut self.boat_scratch);
+        boats.clear();
         let check_boat = |oid: EntityId, e: &Entity, boats: &mut Vec<EntityId>| {
             if oid != id
                 && !e.body().dead
@@ -893,7 +894,7 @@ impl World {
                 check_boat(oid, e, &mut boats);
             }
         }
-        for oid in boats {
+        for oid in boats.drain(..) {
             let (ax, az, bx, bz) = match (self.entities.get(id), self.entities.get(oid)) {
                 (Some(a), Some(b)) => (a.body().pos[0], a.body().pos[2], b.body().pos[0], b.body().pos[2]),
                 _ => continue,
@@ -912,6 +913,7 @@ impl World {
                 o.body.motion[2] += push.dvz2;
             }
         }
+        self.boat_scratch = boats;
         self.entities.update_rider_position(id);
     }
 
@@ -1077,7 +1079,8 @@ impl World {
             (cart_pos[0].floor() as i32).div_euclid(16),
             (cart_pos[2].floor() as i32).div_euclid(16),
         );
-        let mut shovers: Vec<EntityId> = Vec::new();
+        let mut shovers: Vec<EntityId> = std::mem::take(&mut self.shover_scratch);
+        shovers.clear();
         let check_shover = |oid: EntityId, e: &Entity, shovers: &mut Vec<EntityId>| {
             if oid != id
                 && oid != rider
@@ -1114,7 +1117,7 @@ impl World {
                 check_shover(oid, e, &mut shovers);
             }
         }
-        for oid in shovers {
+        for oid in shovers.drain(..) {
             let (ax, az, bx, bz, pmx, pmz, is_player_moving) =
                 match (self.entities.get(id), self.entities.get(oid)) {
                     (Some(a), Some(b)) => (
@@ -1153,6 +1156,7 @@ impl World {
                 b.motion[2] += push.dvz2;
             }
         }
+        self.shover_scratch = shovers;
         let motion = match self.entities.get(id) {
             Some(e) => (e.body().motion[0], e.body().motion[1], e.body().motion[2]),
             None => return,
