@@ -27,6 +27,30 @@ A custom Minecraft Alpha (v1.2.3_04 through v1.2.6 / Protocol Version 6) server 
 
 ---
 
+## Public Beta Test Server
+
+A public test instance runs 24/7 on an ultra-budget ARM TV Box to demonstrate real-world server performance and memory efficiency:
+
+- **Hardware**: Amlogic S912 (8x ARM Cortex-A53 @ 1.5 GHz), 3 GB RAM
+- **Target Version**: Minecraft Alpha 1.2.6 (Protocol 6)
+- **Authentication**: `online-mode=true` (Official Mojang / Microsoft account required)
+- **Address**: `qnskk.top:25565`
+
+### Connecting
+
+Because unpatched Alpha clients cannot negotiate modern TLS endpoints for Mojang authentication, connecting to an `online-mode=true` Alpha server requires one of the following:
+
+- **BetaCraft Launcher** (Recommended): [betacraft.uk](https://betacraft.uk/) — handles legacy authentication and skin proxies out of the box.
+- **Third-Party / Official Launchers** (Prism, MultiMC, Official): Requires an authentication fix such as [LegacyFix](https://github.com/betacraftuk/legacyfix).
+
+### Testing Policy & Feedback
+
+- **Security Audits**: Unauthorized penetration testing, vulnerability scanning, and denial-of-service attempts against the host or network infrastructure are strictly prohibited without prior permission.
+- **Cheats & Exploits**: Hacked clients and gameplay modifications (fly, speed, noclip, reach, digging exploits) are explicitly permitted to help stress-test server physics, movement validation, and anti-cheat boundaries.
+- **Feedback**: Please report reproducible bugs, server crashes, or working anti-cheat bypasses via [GitHub Issues](https://github.com/IQUXAe/mc-alpha-server_rust/issues) or on Telegram: `@iquxae`.
+
+---
+
 ## Quick Start
 
 ### Requirements
