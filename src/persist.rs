@@ -318,10 +318,13 @@ pub fn encode_chunk_blob(
     chunk.fill_arrays(&mut blocks, &mut meta);
     let mut meta_packed = [0u8; CHUNK_NIBBLE_BYTES];
     for (i, b) in meta.iter().enumerate() {
-        if i % 2 == 0 {
-            meta_packed[i / 2] = b & 0xF;
+        // `i` is a Vec index (always >= 0): bit ops are exactly
+        // equivalent to `% 2` / `/ 2` here, without integer division
+        // (slow on in-order ARM like Cortex-A53, still helps x86).
+        if i & 1 == 0 {
+            meta_packed[i >> 1] = b & 0xF;
         } else {
-            meta_packed[i / 2] |= (b & 0xF) << 4;
+            meta_packed[i >> 1] |= (b & 0xF) << 4;
         }
     }
     let mut sky = [0u8; CHUNK_NIBBLE_BYTES];
