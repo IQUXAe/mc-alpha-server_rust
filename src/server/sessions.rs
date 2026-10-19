@@ -396,17 +396,18 @@ impl Server {
         let _ = self.waker.wake();
     }
 
-    /// Poll network events with a given timeout.
-    pub fn poll_network(&mut self, timeout: std::time::Duration) {
+    /// Poll network events with a given timeout. Returns true if any socket had readable data or accepted connections.
+    pub fn poll_network(&mut self, timeout: std::time::Duration) -> bool {
         match self.poll.poll(&mut self.events, Some(timeout)) {
             Ok(()) => {}
-            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => return,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => return false,
             Err(e) => {
                 log::severe(&format!("mio poll error: {e}"));
-                return;
+                return false;
             }
         }
 
+        let mut had_activity = false;
         let mut accepted = Vec::new();
         for event in self.events.iter() {
             let token = event.token();
@@ -416,6 +417,7 @@ impl Server {
                         match listener.accept() {
                             Ok((stream, _)) => {
                                 accepted.push(stream);
+                                had_activity = true;
                             }
                             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                             Err(_) => break,
@@ -429,6 +431,7 @@ impl Server {
                 if let Some(sess) = self.sessions.get(&cid) {
                     if event.is_readable() {
                         sess.conn.poll_read();
+                        had_activity = true;
                     }
                     if event.is_writable() && sess.conn.has_pending_outbound() {
                         sess.conn.flush_outbound();
@@ -439,6 +442,7 @@ impl Server {
         for s in accepted {
             self.accept_mio(s);
         }
+        had_activity
     }
 
     /// Is this connection authenticated play?
@@ -663,13 +667,34 @@ impl Server {
     /// Pump one connection: feed inbound packets, run the session leg,
     /// flush replies, fan out, stream chunks, apply outcomes.
     pub(crate) fn pump_one(&mut self, cid: ConnId) {
+        self.pump_one_with_tick(cid, true);
+    }
+
+    /// Process newly arrived packets for all connections with inbound data
+    /// and immediately flush replies without advancing tick simulation.
+    pub fn pump_inbound(&mut self) {
+        self.cids_scratch.clear();
+        for (&cid, sess) in &self.sessions {
+            if sess.conn.has_inbound() {
+                self.cids_scratch.push(cid);
+            }
+        }
+        for i in 0..self.cids_scratch.len() {
+            let cid = self.cids_scratch[i];
+            self.pump_one_with_tick(cid, false);
+        }
+    }
+
+    pub(crate) fn pump_one_with_tick(&mut self, cid: ConnId, is_tick: bool) {
         let mut sess = match self.sessions.remove(&cid) {
             Some(s) => s,
             None => return,
         };
         let events = sess.conn.drain();
         if events.is_empty() {
-            sess.idle = sess.idle.saturating_add(1);
+            if is_tick {
+                sess.idle = sess.idle.saturating_add(1);
+            }
         } else {
             sess.idle = 0;
         }
@@ -799,7 +824,7 @@ impl Server {
                 self.join(cid, sess, username);
                 if !remaining_packets.is_empty() {
                     if let Some(s) = self.sessions.remove(&cid) {
-                        self.play_leg(cid, s, remaining_packets, dropped);
+                        self.play_leg(cid, s, remaining_packets, dropped, is_tick);
                     }
                 }
                 return;
@@ -807,7 +832,7 @@ impl Server {
             self.sessions.insert(cid, sess);
             return;
         }
-        self.play_leg(cid, sess, packets, dropped);
+        self.play_leg(cid, sess, packets, dropped, is_tick);
     }
 
     /// In vanilla Alpha 1.2.6 SMP, portal collision does not teleport
@@ -1318,7 +1343,14 @@ impl Server {
     /// Authenticated packet leg: dispatch, keep-alive, idle timeout,
     /// streaming, then outcome handling. Dim-aware: the packet handlers
     /// run against the world that owns the player row.
-    fn play_leg(&mut self, cid: ConnId, mut sess: Session, packets: Vec<PacketData>, dropped: bool) {
+    fn play_leg(
+        &mut self,
+        cid: ConnId,
+        mut sess: Session,
+        packets: Vec<PacketData>,
+        dropped: bool,
+        is_tick: bool,
+    ) {
         let mut outcome = if dropped { Some(SessionOutcome::Gone) } else { None };
         let mut bcast = Vec::new();
         let mut hell_respawn_eid = None;
@@ -1357,7 +1389,7 @@ impl Server {
                             break;
                         }
                     }
-                    if outcome.is_none() && hell_respawn_eid.is_none() {
+                    if outcome.is_none() && hell_respawn_eid.is_none() && is_tick {
                         let hell = self.hell.as_mut().unwrap();
                         let mut ctx = SessionCtx {
                             world: hell,
@@ -1382,7 +1414,7 @@ impl Server {
                             break;
                         }
                     }
-                    if outcome.is_none() {
+                    if outcome.is_none() && is_tick {
                         let mut ctx = SessionCtx {
                             world: &mut self.world,
                             ops: &self.ops,
@@ -1400,7 +1432,7 @@ impl Server {
         }
         // Idle timeout mirrors the read timeout (applies to all idle sessions,
         // including players sitting on the death screen without sending packets).
-        if outcome.is_none() && sess.idle >= READ_TIMEOUT_TICKS {
+        if outcome.is_none() && is_tick && sess.idle >= READ_TIMEOUT_TICKS {
             if let SessionState::Play(play, _) = &mut sess.state {
                 play.outbox.push(pkt_kick("Timed out"));
             }
@@ -1409,7 +1441,7 @@ impl Server {
         sess.flush();
         self.fan_out(&mut sess, bcast);
         let still_play = matches!(sess.state, SessionState::Play(_, _));
-        if still_play && outcome.is_none() {
+        if still_play && outcome.is_none() && is_tick {
             // Portal dwell check (custom travel; vanilla Alpha servers
             // never travel — the portal collision is singleplayer-only).
             // Runs before streaming so the new dimension streams this tick.

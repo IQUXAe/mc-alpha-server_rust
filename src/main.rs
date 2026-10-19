@@ -186,7 +186,9 @@ fn main() {
 
         let now = Instant::now();
         let poll_timeout = next_tick.saturating_duration_since(now);
-        server.poll_network(poll_timeout);
+        if server.poll_network(poll_timeout) {
+            server.pump_inbound();
+        }
     }
     log::info("Waiting for background threads to finish saving...");
     log::flush();

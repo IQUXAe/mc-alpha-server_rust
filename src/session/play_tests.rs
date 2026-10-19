@@ -2539,6 +2539,41 @@
     }
 
     #[test]
+    fn test_status_3_accepted_by_wall_clock_time_even_if_packet_damage_delayed() {
+        let mut w = floor_world();
+        let ops = no_ops();
+        let player = spawn_player(&mut w, "Steve", 3.5, 64.0, 4.5);
+        if let Some(e) = w.entities.get_mut(player) {
+            e.body_mut().on_ground = true;
+        }
+        w.set_block_id(3, 64, 4, 3); // dirt: takes 15 ticks = 750ms bare hands
+        let mut sess = PlaySession::new(player);
+        let mut bc = Vec::new();
+
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 0, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        // Dig for only 5 ticks -> damage reaches only ~0.33 (< 0.70)
+        for _ in 0..5 {
+            sess.tick(&mut ctx(&mut w, &ops, &mut bc));
+        }
+        assert!(sess.dig.cur_damage < 0.70);
+
+        // Simulate wall-clock time indicating 600ms have elapsed (750ms * 0.70 = 525ms min threshold)
+        sess.dig.start_time = Some(std::time::Instant::now() - std::time::Duration::from_millis(600));
+
+        // Status 3 arrives: packet damage is below 0.70, but wall-clock confirms legitimate time spent
+        sess.pump(
+            &mut ctx(&mut w, &ops, &mut bc),
+            PacketData::BlockDig { status: 3, x: 3, y: 64, z: 4, face: 1 },
+        );
+
+        assert_eq!(w.get_block_id(3, 64, 4), 0, "block must be harvested because wall-clock time confirms legitimate mining");
+    }
+
+    #[test]
     fn test_status_3_jumping_player_no_false_rollback() {
         let mut w = floor_world();
         let ops = no_ops();

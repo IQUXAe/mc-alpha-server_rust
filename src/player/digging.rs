@@ -27,6 +27,7 @@ pub struct DigState {
     pub target_y: i32,
     pub target_z: i32,
     pub has_target: bool,
+    pub start_time: Option<std::time::Instant>,
 }
 
 /// Everything the digging simulation needs for one decision.
@@ -50,6 +51,7 @@ pub fn dig_state_new() -> DigState {
         target_y: 0,
         target_z: 0,
         has_target: false,
+        start_time: None,
     }
 }
 
@@ -60,6 +62,7 @@ pub fn dig_cancel(s: &mut DigState) {
     s.initial_cooldown = 0;
     s.overtime_packets = 0;
     s.has_target = false;
+    s.start_time = None;
 }
 
 /// Start-of-dig predicate (mirrors `ItemInWorldManager::onBlockClicked`).
@@ -113,7 +116,10 @@ pub fn dig_on_tick(
         s.target_y = y;
         s.target_z = z;
         s.has_target = true;
+        s.start_time = Some(std::time::Instant::now());
         return false;
+    } else if s.start_time.is_none() {
+        s.start_time = Some(std::time::Instant::now());
     }
 
     if input.block_id <= 0 {

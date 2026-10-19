@@ -128,6 +128,9 @@ impl PlaySession {
                     self.dig.target_y = y;
                     self.dig.target_z = z;
                     self.dig.has_target = true;
+                    self.dig.start_time = Some(std::time::Instant::now());
+                } else if self.dig.start_time.is_none() {
+                    self.dig.start_time = Some(std::time::Instant::now());
                 }
             }
         } else if status == 2 {
@@ -185,6 +188,9 @@ impl PlaySession {
                         self.dig.target_y = y;
                         self.dig.target_z = z;
                         self.dig.has_target = true;
+                        self.dig.start_time = Some(std::time::Instant::now());
+                    } else if self.dig.start_time.is_none() {
+                        self.dig.start_time = Some(std::time::Instant::now());
                     }
                     if same_target && (self.dig.cur_damage >= 1.0 || self.dig.ground_damage >= 1.0) {
                         // Client did not send status 3, but continued sending status 1 past completion.
@@ -231,10 +237,28 @@ impl PlaySession {
                         false,
                         true,
                     );
-                    let ok = self.dig.cur_damage >= 0.70
+                    let ok_damage = self.dig.cur_damage >= 0.70
                         || self.dig.ground_damage >= 0.70
                         || (hardness_tick > 0.0 && self.dig.cur_damage + hardness_tick >= 0.70)
                         || (ground_hardness_tick > 0.0 && self.dig.ground_damage + ground_hardness_tick >= 0.70);
+
+                    // Dual check: validate by wall-clock time if packet damage was slightly
+                    // delayed by network packet bundling/jitter. Fastbreak cheats (< 100ms)
+                    // are still strictly rejected because elapsed time will be way below required.
+                    let max_speed = hardness_tick.max(ground_hardness_tick);
+                    let ok_time = if max_speed > 0.0 {
+                        if let Some(start) = self.dig.start_time {
+                            let req_ticks = (1.0 / max_speed).ceil();
+                            let min_ms = (req_ticks * 50.0 * 0.70) as u128;
+                            start.elapsed().as_millis() >= min_ms
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    let ok = ok_damage || ok_time;
                     if ok {
                         self.harvest(ctx, x, y, z);
                         crate::player::digging::dig_cancel(&mut self.dig);
@@ -407,6 +431,9 @@ impl PlaySession {
             true,
         );
         if hardness_tick > 0.0 {
+            if self.dig.start_time.is_none() {
+                self.dig.start_time = Some(std::time::Instant::now());
+            }
             // Keep damage progressing during network jitter up to 0.80 without
             // ever harvesting in the background. Harvesting must be driven by
             // client packet synchronization (status 1 / status 3) so that

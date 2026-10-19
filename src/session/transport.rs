@@ -261,6 +261,12 @@ impl Conn {
         self.inner.borrow_mut().poll_read();
     }
 
+    /// True if there are decoded inbound events or pending unread bytes in the receive buffer.
+    pub fn has_inbound(&self) -> bool {
+        let inner = self.inner.borrow();
+        !inner.inbound.is_empty() || !inner.recv_buf.is_empty()
+    }
+
     /// Flush queued outbound bytes to the socket.
     pub fn flush_outbound(&self) {
         self.inner.borrow_mut().flush_outbound();
