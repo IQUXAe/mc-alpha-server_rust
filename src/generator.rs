@@ -4,6 +4,13 @@ use crate::biome::{BiomeType, MobSpawnerBase, get_biome_from_lookup};
 use crate::caves::MapGenCaves;
 use crate::decorators::{BlockAccess, CanvasAccess, decorate_chunk};
 
+// Per-thread scratch for `climate_into` (16x16 = 256 f64 ≈ 2KB).
+// Avoids one allocator round-trip per generated chunk on every
+// thread. Fully overwritten by `fill2_default` before use.
+thread_local! {
+    static CLIMATE_SCRATCH: std::cell::RefCell<Vec<f64>> = std::cell::RefCell::new(Vec::new());
+}
+
 pub struct ChunkProvider {
     pub world_seed: i64,
     pub min_noise: Box<NoiseGeneratorOctaves>,
@@ -78,30 +85,36 @@ pub fn climate_into(
     gen.temp_noise_gen.fill2_default(temperatures, x0 as f64, z0 as f64, w, h, 0.025f32 as f64, 0.025f32 as f64, 0.25);
     gen.humid_noise_gen.fill2_default(humidities, x0 as f64, z0 as f64, w, h, 0.05f32 as f64, 0.05f32 as f64, 1.0 / 3.0);
 
-    let mut scratch = vec![0.0; n];
-    gen.noise_gen3.fill2_default(&mut scratch, x0 as f64, z0 as f64, w, h, 0.25, 0.25, 0.5882352941176471);
+    CLIMATE_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        if scratch.len() < n {
+            scratch.resize(n, 0.0);
+        }
+        let scratch = &mut scratch[..n];
+        gen.noise_gen3.fill2_default(scratch, x0 as f64, z0 as f64, w, h, 0.25, 0.25, 0.5882352941176471);
 
-    for idx in 0..n {
-        let noise = scratch[idx] * 1.1 + 0.5;
+        for idx in 0..n {
+            let noise = scratch[idx] * 1.1 + 0.5;
 
-        let d1_t = 0.01;
-        let d2_t = 1.0 - d1_t;
-        let mut temp = (temperatures[idx] * 0.15 + 0.7) * d2_t + noise * d1_t;
+            let d1_t = 0.01;
+            let d2_t = 1.0 - d1_t;
+            let mut temp = (temperatures[idx] * 0.15 + 0.7) * d2_t + noise * d1_t;
 
-        let d1_h = 0.002;
-        let d2_h = 1.0 - d1_h;
-        let mut humid = (humidities[idx] * 0.15 + 0.5) * d2_h + noise * d1_h;
+            let d1_h = 0.002;
+            let d2_h = 1.0 - d1_h;
+            let mut humid = (humidities[idx] * 0.15 + 0.5) * d2_h + noise * d1_h;
 
-        temp = 1.0 - (1.0 - temp) * (1.0 - temp);
-        if temp < 0.0 { temp = 0.0; }
-        if humid < 0.0 { humid = 0.0; }
-        if temp > 1.0 { temp = 1.0; }
-        if humid > 1.0 { humid = 1.0; }
+            temp = 1.0 - (1.0 - temp) * (1.0 - temp);
+            if temp < 0.0 { temp = 0.0; }
+            if humid < 0.0 { humid = 0.0; }
+            if temp > 1.0 { temp = 1.0; }
+            if humid > 1.0 { humid = 1.0; }
 
-        temperatures[idx] = temp;
-        humidities[idx] = humid;
-        biomes[idx] = get_biome_from_lookup(temp, humid);
-    }
+            temperatures[idx] = temp;
+            humidities[idx] = humid;
+            biomes[idx] = get_biome_from_lookup(temp, humid);
+        }
+    });
 }
 
 /// Temperature-only slice (mirrors `WorldChunkManager.getTemperatures`),
@@ -160,7 +173,9 @@ pub fn generate_chunk(
     let var9 = 17;
     let var10 = var6 + 1;
 
-    let mut density_field = vec![0.0; (var8 * var9 * var10) as usize];
+    // Stack scratch (≈3.4KB): avoids a heap alloc + zero-fill per chunk
+    // on every thread. Passed as a slice; bit-identical results.
+    let mut density_field = [0.0f64; (5 * 17 * 5) as usize];
     crate::density::density_generate_field(
         &mut density_field,
         chunk_x * var6,
@@ -202,13 +217,14 @@ pub fn replace_blocks_for_biomes_and_caves(
     let var5_biome = 64;
     let var6_biome = 1.0 / 32.0;
 
-    let mut biome_r = vec![0.0; 256];
+    // Stack scratch (3x 256 f64 ≈ 6KB total): no heap churn per chunk.
+    let mut biome_r = [0.0f64; 256];
     gen.biome_noise.fill3_octaves(&mut biome_r, (chunk_x * 16) as f64, (chunk_z * 16) as f64, 0.0, 16, 16, 1, var6_biome, var6_biome, 1.0);
 
-    let mut biome_s = vec![0.0; 256];
+    let mut biome_s = [0.0f64; 256];
     gen.biome_noise.fill3_octaves(&mut biome_s, (chunk_z * 16) as f64, 109.0134, (chunk_x * 16) as f64, 16, 1, 16, var6_biome, 1.0, var6_biome);
 
-    let mut stone_t = vec![0.0; 256];
+    let mut stone_t = [0.0f64; 256];
     gen.stone_noise.fill3_octaves(&mut stone_t, (chunk_x * 16) as f64, (chunk_z * 16) as f64, 0.0, 16, 16, 1, var6_biome * 2.0, var6_biome * 2.0, var6_biome * 2.0);
 
     for var8_b in 0..16 {
@@ -419,7 +435,7 @@ pub fn generate_terrain_batch(
 
             for i in 0..n {
                 let (chunk_x, chunk_z) = coords[i];
-                let mut field = vec![0.0f64; 425];
+                let mut field = [0.0f64; 425];
                 crate::density::density_generate_field(
                     &mut field,
                     chunk_x * 4,
@@ -457,7 +473,7 @@ pub fn generate_terrain_batch(
 
     for i in 0..n {
         let (chunk_x, chunk_z) = coords[i];
-        let mut field = vec![0.0f64; 425];
+        let mut field = [0.0f64; 425];
         crate::density::density_generate_field(
             &mut field,
             chunk_x * 4,

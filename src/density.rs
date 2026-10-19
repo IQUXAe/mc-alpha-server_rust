@@ -3,7 +3,20 @@
 //! decompiled mapping. Allowed deliberately.
 #![allow(clippy::too_many_arguments)]
 
+use std::cell::RefCell;
+
 use crate::noise::NoiseGeneratorOctaves;
+
+// Per-thread scratch for the five noise planes. Terrain generation
+// always uses 2x(5x7) + 3x(5x17x5) cells (2x35 + 3x425 = 1345 f64 ≈ 10.5KB);
+// reusing the buffer across chunks avoids 5 allocator round-trips
+// per chunk on every thread (main + chunk worker). The buffer only
+// grows, never shrinks; contents are fully overwritten by each
+// `fill_*` call, so reuse is bit-identical. Other sizes (tests /
+// future callers) fall back to plain Vecs.
+thread_local! {
+    static DENSITY_SCRATCH: RefCell<Vec<f64>> = RefCell::new(Vec::new());
+}
 
 pub fn density_generate_field(
     field: &mut [f64],
@@ -21,20 +34,103 @@ pub fn density_generate_field(
     min_gen: &NoiseGeneratorOctaves,
     max_gen: &NoiseGeneratorOctaves,
 ) {
+    let plane = (var5 * var7) as usize;
+    let volume = (var5 * var6 * var7) as usize;
+    // Fast path: the only sizes used by terrain gen (35 / 425).
+    if plane == 35 && volume == 425 {
+        DENSITY_SCRATCH.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            const NEED: usize = 35 + 35 + 425 * 3;
+            if buf.len() < NEED {
+                buf.resize(NEED, 0.0);
+            }
+            let (noise_depth, rest) = buf.split_at_mut(35);
+            let (noise_scale, rest) = rest.split_at_mut(35);
+            let (noise_main, rest) = rest.split_at_mut(425);
+            let (noise_min, rest) = rest.split_at_mut(425);
+            let noise_max = &mut rest[..425];
+            density_fill(
+                field,
+                var2,
+                var3,
+                var4,
+                var5,
+                var6,
+                var7,
+                temperatures,
+                humidities,
+                depth_gen,
+                scale_gen,
+                main_gen,
+                min_gen,
+                max_gen,
+                noise_depth,
+                noise_scale,
+                noise_main,
+                noise_min,
+                noise_max,
+            );
+        });
+        return;
+    }
+    let mut noise_depth = vec![0.0; plane];
+    let mut noise_scale = vec![0.0; plane];
+    let mut noise_main = vec![0.0; volume];
+    let mut noise_min = vec![0.0; volume];
+    let mut noise_max = vec![0.0; volume];
+    density_fill(
+        field,
+        var2,
+        var3,
+        var4,
+        var5,
+        var6,
+        var7,
+        temperatures,
+        humidities,
+        depth_gen,
+        scale_gen,
+        main_gen,
+        min_gen,
+        max_gen,
+        &mut noise_depth,
+        &mut noise_scale,
+        &mut noise_main,
+        &mut noise_min,
+        &mut noise_max,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn density_fill(
+    field: &mut [f64],
+    var2: i32,
+    var3: i32,
+    var4: i32,
+    var5: i32,
+    var6: i32,
+    var7: i32,
+    temperatures: &[f64],
+    humidities: &[f64],
+    depth_gen: &NoiseGeneratorOctaves,
+    scale_gen: &NoiseGeneratorOctaves,
+    main_gen: &NoiseGeneratorOctaves,
+    min_gen: &NoiseGeneratorOctaves,
+    max_gen: &NoiseGeneratorOctaves,
+    noise_depth: &mut [f64],
+    noise_scale: &mut [f64],
+    noise_main: &mut [f64],
+    noise_min: &mut [f64],
+    noise_max: &mut [f64],
+) {
     let var8 = 684.412;
     let var10 = 684.412;
 
-    let mut noise_depth = vec![0.0; (var5 * var7) as usize];
-    let mut noise_scale = vec![0.0; (var5 * var7) as usize];
-    let mut noise_main = vec![0.0; (var5 * var6 * var7) as usize];
-    let mut noise_min = vec![0.0; (var5 * var6 * var7) as usize];
-    let mut noise_max = vec![0.0; (var5 * var6 * var7) as usize];
-
-    depth_gen.fill_slice(&mut noise_depth, var2, var4, var5 as usize, var7 as usize, 1.121, 1.121);
-    scale_gen.fill_slice(&mut noise_scale, var2, var4, var5 as usize, var7 as usize, 200.0, 200.0);
-    main_gen.fill3_octaves(&mut noise_main, var2 as f64, var3 as f64, var4 as f64, var5 as usize, var6 as usize, var7 as usize, var8 / 80.0, var10 / 160.0, var8 / 80.0);
-    min_gen.fill3_octaves(&mut noise_min, var2 as f64, var3 as f64, var4 as f64, var5 as usize, var6 as usize, var7 as usize, var8, var10, var8);
-    max_gen.fill3_octaves(&mut noise_max, var2 as f64, var3 as f64, var4 as f64, var5 as usize, var6 as usize, var7 as usize, var8, var10, var8);
+    depth_gen.fill_slice(noise_depth, var2, var4, var5 as usize, var7 as usize, 1.121, 1.121);
+    scale_gen.fill_slice(noise_scale, var2, var4, var5 as usize, var7 as usize, 200.0, 200.0);
+    main_gen.fill3_octaves(noise_main, var2 as f64, var3 as f64, var4 as f64, var5 as usize, var6 as usize, var7 as usize, var8 / 80.0, var10 / 160.0, var8 / 80.0);
+    min_gen.fill3_octaves(noise_min, var2 as f64, var3 as f64, var4 as f64, var5 as usize, var6 as usize, var7 as usize, var8, var10, var8);
+    max_gen.fill3_octaves(noise_max, var2 as f64, var3 as f64, var4 as f64, var5 as usize, var6 as usize, var7 as usize, var8, var10, var8);
 
     let mut var14 = 0;
     let mut var15 = 0;

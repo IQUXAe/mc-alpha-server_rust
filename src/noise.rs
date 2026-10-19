@@ -398,6 +398,20 @@ pub struct NoiseGenerator2 {
 const F2: f64 = 0.3660254037844386; // 0.5 * (sqrt(3.0) - 1.0)
 const G2: f64 = 0.21132486540518713; // (3.0 - sqrt(3.0)) / 6.0
 
+/// `i % 12` for the 0..256 permutation values in simplex indexing.
+/// Integer division/modulo is the slowest ALU op on in-order ARM
+/// (Cortex-A53); a 256-entry table of `u8` fits in just 4 cache lines
+/// (256 bytes) and gives bit-identical results with plain L1 loads.
+const MOD12_256: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        t[i] = (i % 12) as u8;
+        i += 1;
+    }
+    t
+};
+
 impl NoiseGenerator2 {
     pub fn new(rand: &mut JavaRandom) -> Self {
         let x_coord = rand.next_double() * 256.0;
@@ -459,9 +473,9 @@ impl NoiseGenerator2 {
 
                 let ii = (i & 255) as usize;
                 let jj = (j & 255) as usize;
-                let gi0 = (self.perm[ii + self.perm[jj] as usize] % 12) as usize;
-                let gi1 = (self.perm[ii + i1 + self.perm[jj + j1] as usize] % 12) as usize;
-                let gi2 = (self.perm[ii + 1 + self.perm[jj + 1] as usize] % 12) as usize;
+                let gi0 = MOD12_256[self.perm[ii + self.perm[jj] as usize] as usize] as usize;
+                let gi1 = MOD12_256[self.perm[ii + i1 + self.perm[jj + j1] as usize] as usize] as usize;
+                let gi2 = MOD12_256[self.perm[ii + 1 + self.perm[jj + 1] as usize] as usize] as usize;
 
                 let mut t0 = 0.5 - x0 * x0 - y0 * y0;
                 let n0 = if t0 < 0.0 {
