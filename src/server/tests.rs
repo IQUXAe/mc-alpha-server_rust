@@ -721,6 +721,32 @@
     }
 
     #[test]
+    fn no_autosave_when_server_has_no_players() {
+        let mut srv = mk_server("auto-save-interval=5\n");
+        assert!(srv.players.is_empty());
+        // Tick 20 times with no players: autosave must NOT trigger
+        for _ in 0..20 {
+            srv.tick();
+        }
+        assert!(!srv.auto_save_active);
+        assert!(srv.auto_save_queue.is_empty());
+        assert_eq!(srv.auto_save_saved, 0);
+
+        // Connect a player: autosave should now run on intervals
+        let (mut a, _cid) = pair(&mut srv);
+        join(&mut srv, &mut a, "Steve");
+        for _ in 0..20 {
+            srv.tick();
+        }
+        // Player file was saved by the periodic autosave
+        let player_file = format!(
+            "{}/world/players/steve.dat",
+            srv.level_dir.rsplit_once('/').map(|(b, _)| b).unwrap_or("")
+        );
+        assert!(std::path::Path::new(&player_file).exists());
+    }
+
+    #[test]
     fn furnace_flips_reach_loaded_players() {
         let mut srv = mk_server("");
         let (mut a, _cid) = pair(&mut srv);

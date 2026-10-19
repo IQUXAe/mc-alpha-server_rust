@@ -628,6 +628,7 @@ impl Server {
         self.drain_death_events();
         self.push_health_changes();
         if self.settings.auto_save_interval > 0
+            && !self.players.is_empty()
             && self.tick_count.is_multiple_of(self.settings.auto_save_interval as u64)
             && !self.auto_save_active
         {

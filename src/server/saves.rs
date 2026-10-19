@@ -397,18 +397,20 @@ impl Server {
         }
         if self.auto_save_queue.is_empty() {
             self.auto_save_active = false;
-            if let Err(e) = self.store.flush() {
-                log::warning(&format!("Failed to flush chunk store to disk: {e}"));
-            }
-            if let Some(hs) = self.hell_store.as_mut() {
-                if let Err(e) = hs.flush() {
-                    log::warning(&format!("Failed to flush hell chunk store to disk: {e}"));
+            if self.auto_save_saved > 0 {
+                if let Err(e) = self.store.flush() {
+                    log::warning(&format!("Failed to flush chunk store to disk: {e}"));
                 }
+                if let Some(hs) = self.hell_store.as_mut() {
+                    if let Err(e) = hs.flush() {
+                        log::warning(&format!("Failed to flush hell chunk store to disk: {e}"));
+                    }
+                }
+                log::info(&format!(
+                    "Autosave completed; saved {} modified chunks and flushed stores to disk.",
+                    self.auto_save_saved
+                ));
             }
-            log::info(&format!(
-                "Autosave completed; saved {} modified chunks and flushed stores to disk.",
-                self.auto_save_saved
-            ));
             true
         } else {
             false
