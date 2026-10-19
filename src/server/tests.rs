@@ -421,6 +421,20 @@
         let s = load_settings(&mut cfg);
         assert_eq!(s.view_distance, 3);
         assert_eq!(s.spawn_protection, 0);
+
+        // Log file property parsing.
+        std::fs::write(&props, "log-file=custom.log\n").unwrap();
+        let mut cfg = ServerConfig::open(&props);
+        assert_eq!(load_settings(&mut cfg).log_file, "custom.log");
+        std::fs::write(&props, "log-file=true\n").unwrap();
+        let mut cfg = ServerConfig::open(&props);
+        assert_eq!(load_settings(&mut cfg).log_file, "server.log");
+        std::fs::write(&props, "log-to-file=true\n").unwrap();
+        let mut cfg = ServerConfig::open(&props);
+        assert_eq!(load_settings(&mut cfg).log_file, "server.log");
+        std::fs::write(&props, "log-file=false\n").unwrap();
+        let mut cfg = ServerConfig::open(&props);
+        assert_eq!(load_settings(&mut cfg).log_file, "");
     }
 
     #[test]

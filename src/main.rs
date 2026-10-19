@@ -40,9 +40,21 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let props_path = args.get(1).map(String::as_str).unwrap_or("server.properties");
 
+    // Initialize log file early if configured so all startup logs are captured
+    let mut initial_cfg = ServerConfig::open(props_path);
+    let initial_settings = alpha_server::server::load_settings(&mut initial_cfg);
+    if !initial_settings.log_file.is_empty() {
+        if let Err(e) = log::set_log_file_path(&initial_settings.log_file) {
+            log::warning(&format!(
+                "Cannot open log file '{}': {e}",
+                initial_settings.log_file
+            ));
+        }
+    }
+
     log::info("Starting Minecraft server version 0.2.8 (Alpha 1.2.6)");
     log::info("Loading properties");
-    let level_name = ServerConfig::open(props_path).get_string("level-name", "world");
+    let level_name = initial_settings.level_name;
     let world_dir = args
         .get(2)
         .cloned()

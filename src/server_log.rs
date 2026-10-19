@@ -157,6 +157,7 @@ enum LogCommand {
     Line(LogLevel, String),
     PrintConsole,
     Flush(std::sync::mpsc::SyncSender<()>),
+    SetFile(Option<std::fs::File>, std::sync::mpsc::SyncSender<()>),
 }
 
 fn log_channel() -> &'static std::sync::mpsc::SyncSender<LogCommand> {
@@ -166,6 +167,7 @@ fn log_channel() -> &'static std::sync::mpsc::SyncSender<LogCommand> {
         std::thread::Builder::new()
             .name("server-logger".to_string())
             .spawn(move || {
+                let mut log_file: Option<std::fs::File> = None;
                 while let Ok(cmd) = rx.recv() {
                     match cmd {
                         LogCommand::Line(level, line) => {
@@ -174,6 +176,10 @@ fn log_channel() -> &'static std::sync::mpsc::SyncSender<LogCommand> {
                                 LogLevel::Debug | LogLevel::Info => println!("{line}"),
                             }
                             print_console_line();
+                            if let Some(ref mut f) = log_file {
+                                let _ = writeln!(f, "{line}");
+                                let _ = f.flush();
+                            }
                         }
                         LogCommand::PrintConsole => {
                             print_console_line();
@@ -181,6 +187,16 @@ fn log_channel() -> &'static std::sync::mpsc::SyncSender<LogCommand> {
                         LogCommand::Flush(ack) => {
                             let _ = std::io::stdout().flush();
                             let _ = std::io::stderr().flush();
+                            if let Some(ref mut f) = log_file {
+                                let _ = f.flush();
+                            }
+                            let _ = ack.send(());
+                        }
+                        LogCommand::SetFile(file, ack) => {
+                            if let Some(ref mut old) = log_file {
+                                let _ = old.flush();
+                            }
+                            log_file = file;
                             let _ = ack.send(());
                         }
                     }
@@ -232,6 +248,44 @@ pub fn flush() {
     if log_channel().send(LogCommand::Flush(tx)).is_ok() {
         let _ = rx.recv();
     }
+}
+
+/// Configures a log file destination path. Creates parent directories if needed.
+/// Passing an empty path, "false", or "none" disables file logging.
+pub fn set_log_file_path(path: &str) -> std::io::Result<()> {
+    let trimmed = path.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("false")
+        || trimmed.eq_ignore_ascii_case("none")
+    {
+        disable_log_file();
+        return Ok(());
+    }
+    let p = std::path::Path::new(trimmed);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(p)?;
+    set_log_file(Some(file));
+    Ok(())
+}
+
+/// Sets or clears the log file directly.
+pub fn set_log_file(file: Option<std::fs::File>) {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    if log_channel().send(LogCommand::SetFile(file, tx)).is_ok() {
+        let _ = rx.recv();
+    }
+}
+
+/// Disables file logging.
+pub fn disable_log_file() {
+    set_log_file(None);
 }
 
 #[cfg(test)]
@@ -312,6 +366,24 @@ mod tests {
         clear_console_line_provider();
         refresh_console_line();
         flush();
+
+        // Test file logging
+        set_level(LogLevel::Info);
+        let tmp = format!(
+            "/tmp/test_log_{}_{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        assert!(set_log_file_path(&tmp).is_ok());
+        info("testing file log output");
+        flush();
+        disable_log_file();
+        let content = std::fs::read_to_string(&tmp).unwrap();
+        assert!(content.contains("[INFO] testing file log output"));
+        let _ = std::fs::remove_file(&tmp);
 
         set_level(LogLevel::Info);
         assert_eq!(get_level(), LogLevel::Info);

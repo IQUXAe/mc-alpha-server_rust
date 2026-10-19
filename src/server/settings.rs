@@ -56,6 +56,8 @@ pub struct Settings {
     /// are unaffected unless they opt in via `low-power=true` or
     /// `ALPHA_S912=1` / `ALPHA_LOW_POWER=1`.
     pub low_power: bool,
+    /// Optional log file destination (`log-file` or `log-to-file` in server.properties).
+    pub log_file: String,
 }
 
 /// Leading-integer seed parse (mirrors `std::stoll`: optional `-`,
@@ -211,6 +213,25 @@ pub fn load_settings(cfg: &mut ServerConfig) -> Settings {
             .get_int("autosave-batch", autosave_batch_default)
             .clamp(1, 64) as usize,
         low_power,
+        log_file: {
+            let log_file_raw = cfg.get_string("log-file", "");
+            let log_to_file = cfg.get_bool("log-to-file", false);
+            if !log_file_raw.is_empty() {
+                if log_file_raw.eq_ignore_ascii_case("false")
+                    || log_file_raw.eq_ignore_ascii_case("none")
+                {
+                    String::new()
+                } else if log_file_raw.eq_ignore_ascii_case("true") {
+                    "server.log".to_string()
+                } else {
+                    log_file_raw
+                }
+            } else if log_to_file {
+                "server.log".to_string()
+            } else {
+                std::env::var("ALPHA_LOG_FILE").unwrap_or_default()
+            }
+        },
     }
 }
 

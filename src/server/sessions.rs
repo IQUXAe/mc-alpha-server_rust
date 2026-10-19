@@ -65,6 +65,16 @@ impl Server {
     ) -> Result<Self, String> {
         let mut cfg = ServerConfig::open(props_path);
         let settings = load_settings(&mut cfg);
+        if !settings.log_file.is_empty() {
+            if let Err(e) = crate::server_log::set_log_file_path(&settings.log_file) {
+                crate::server_log::warning(&format!(
+                    "Cannot open log file '{}': {e}",
+                    settings.log_file
+                ));
+            } else {
+                crate::server_log::info(&format!("Logging to file: {}", settings.log_file));
+            }
+        }
         let seed = if settings.seed == 0 {
             use std::time::{SystemTime, UNIX_EPOCH};
             SystemTime::now()
