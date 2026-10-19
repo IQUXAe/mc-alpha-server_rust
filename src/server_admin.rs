@@ -139,6 +139,35 @@ fn say(sess: &mut PlaySession, text: &str) {
     sess.outbox.push(pkt_chat(text));
 }
 
+/// Parse a named time preset into ticks (0..24000) matching modern Minecraft.
+pub fn parse_time_preset(arg: &str) -> Option<i32> {
+    match arg.to_ascii_lowercase().as_str() {
+        "day" => Some(1000),
+        "noon" => Some(6000),
+        "sunset" => Some(12000),
+        "night" => Some(13000),
+        "midnight" => Some(18000),
+        "sunrise" => Some(23000),
+        _ => None,
+    }
+}
+
+/// Calculate the target world time for a `/time set <daytime>` command.
+/// Matches modern Minecraft: if the target daytime is less than the current
+/// daytime, advances to the next day instead of rolling back.
+pub fn calculate_set_time(current_time: i64, daytime: i32) -> i64 {
+    if daytime >= 24000 {
+        daytime as i64
+    } else {
+        let current_day = current_time.max(0) / 24000;
+        let mut target = current_day * 24000 + daytime as i64;
+        if target < current_time {
+            target += 24000;
+        }
+        target
+    }
+}
+
 /// Player `/give` + `/tp` dispatcher (mirrors
 /// `NetServerHandler::handleCommand`). `msg` must start with `/`; anything
 /// else is ignored. All user-facing strings match the C++ originals.
@@ -195,7 +224,7 @@ pub fn chat_command(
         });
         return;
     }
-    if !op && (cmd.eq_ignore_ascii_case("give") || cmd.eq_ignore_ascii_case("tp") || cmd.eq_ignore_ascii_case("seed") || cmd.eq_ignore_ascii_case("boost")) {
+    if !op && (cmd.eq_ignore_ascii_case("give") || cmd.eq_ignore_ascii_case("tp") || cmd.eq_ignore_ascii_case("seed") || cmd.eq_ignore_ascii_case("boost") || cmd.eq_ignore_ascii_case("time")) {
         say(sess, "You do not have permission to use this command");
         return;
     }
@@ -287,6 +316,68 @@ pub fn chat_command(
         }
     } else if cmd.eq_ignore_ascii_case("seed") {
         say(sess, &format!("Seed: {}", world.seed));
+    } else if cmd.eq_ignore_ascii_case("time") {
+        if args.len() < 2 {
+            say(sess, "Usage: /time <set|add|query> <value>");
+            return;
+        }
+        let sub = args[1].to_ascii_lowercase();
+        if sub == "set" {
+            if args.len() < 3 {
+                say(sess, "Usage: /time set <day|noon|sunset|night|midnight|sunrise|value>");
+                return;
+            }
+            let target_daytime = parse_time_preset(args[2])
+                .or_else(|| parse_command_int(args[2]).filter(|&v| v >= 0));
+            let Some(daytime) = target_daytime else {
+                say(sess, "Invalid time value");
+                return;
+            };
+            let new_time = calculate_set_time(world.time, daytime);
+            world.time = new_time;
+            world.update_skylight_subtracted();
+            broadcast.push(SessionBroadcast::TimeChanged(new_time));
+            say(sess, &format!("Set the time to {new_time}"));
+        } else if sub == "add" {
+            if args.len() < 3 {
+                say(sess, "Usage: /time add <value>");
+                return;
+            }
+            let Some(to_add) = parse_command_int(args[2]).filter(|&v| v > 0) else {
+                say(sess, "Invalid time value");
+                return;
+            };
+            world.time = world.time.saturating_add(to_add as i64);
+            world.update_skylight_subtracted();
+            broadcast.push(SessionBroadcast::TimeChanged(world.time));
+            say(sess, &format!("Added {to_add} to the time"));
+        } else if sub == "query" {
+            let query_type = args
+                .get(2)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_else(|| "daytime".to_string());
+            let value = match query_type.as_str() {
+                "daytime" => world.time.rem_euclid(24000),
+                "gametime" => world.time,
+                "day" => world.time.max(0) / 24000,
+                _ => {
+                    say(sess, "Usage: /time query <daytime|gametime|day>");
+                    return;
+                }
+            };
+            say(sess, &format!("The time is {value}"));
+        } else if let Some(daytime) =
+            parse_time_preset(&sub).or_else(|| parse_command_int(&sub).filter(|&v| v >= 0))
+        {
+            // Shorthand: `/time day`, `/time night`, `/time 1000`
+            let new_time = calculate_set_time(world.time, daytime);
+            world.time = new_time;
+            world.update_skylight_subtracted();
+            broadcast.push(SessionBroadcast::TimeChanged(new_time));
+            say(sess, &format!("Set the time to {new_time}"));
+        } else {
+            say(sess, "Usage: /time <set|add|query> <value>");
+        }
     } else {
         say(sess, &format!("Unknown command: {cmd}"));
     }
@@ -458,5 +549,71 @@ mod tests {
         let bc = run(&mut w, &mut sess, &ops, "/tell Notch hello there");
         assert!(bc.iter().any(|b| matches!(b, SessionBroadcast::Tell { target, text }
             if target == "Notch" && text.contains("whispers"))));
+    }
+
+    #[test]
+    fn test_time_command() {
+        // Permission check
+        let (mut w, mut sess, ops) = setup(false);
+        run(&mut w, &mut sess, &ops, "/time set day");
+        assert_eq!(chats(&sess), vec!["You do not have permission to use this command"]);
+
+        // Op can run /time set day
+        let (mut w, mut sess, ops) = setup(true);
+        let bc = run(&mut w, &mut sess, &ops, "/time set day");
+        assert_eq!(w.time, 1000);
+        assert_eq!(chats(&sess), vec!["Set the time to 1000"]);
+        assert!(bc.iter().any(|b| matches!(b, SessionBroadcast::TimeChanged(1000))));
+
+        // Day presets
+        run(&mut w, &mut sess, &ops, "/time set noon");
+        assert_eq!(w.time, 6000);
+        run(&mut w, &mut sess, &ops, "/time set sunset");
+        assert_eq!(w.time, 12000);
+        run(&mut w, &mut sess, &ops, "/time set night");
+        assert_eq!(w.time, 13000);
+        run(&mut w, &mut sess, &ops, "/time set midnight");
+        assert_eq!(w.time, 18000);
+        run(&mut w, &mut sess, &ops, "/time set sunrise");
+        assert_eq!(w.time, 23000);
+
+        // Next day advance: current is 23000, setting day (1000) advances to 25000
+        run(&mut w, &mut sess, &ops, "/time set day");
+        assert_eq!(w.time, 25000);
+        assert_eq!(chats(&sess), vec!["Set the time to 25000"]);
+
+        // Explicit ticks
+        run(&mut w, &mut sess, &ops, "/time set 50000");
+        assert_eq!(w.time, 50000);
+
+        // /time add
+        let bc = run(&mut w, &mut sess, &ops, "/time add 500");
+        assert_eq!(w.time, 50500);
+        assert_eq!(chats(&sess), vec!["Added 500 to the time"]);
+        assert!(bc.iter().any(|b| matches!(b, SessionBroadcast::TimeChanged(50500))));
+
+        // /time query
+        run(&mut w, &mut sess, &ops, "/time query daytime");
+        assert_eq!(chats(&sess), vec![format!("The time is {}", 50500 % 24000)]);
+        run(&mut w, &mut sess, &ops, "/time query gametime");
+        assert_eq!(chats(&sess), vec!["The time is 50500"]);
+        run(&mut w, &mut sess, &ops, "/time query day");
+        assert_eq!(chats(&sess), vec![format!("The time is {}", 50500 / 24000)]);
+
+        // Shorthand syntax
+        run(&mut w, &mut sess, &ops, "/time night");
+        assert_eq!(w.time.rem_euclid(24000), 13000);
+
+        // Error cases
+        run(&mut w, &mut sess, &ops, "/time");
+        assert_eq!(chats(&sess), vec!["Usage: /time <set|add|query> <value>"]);
+        run(&mut w, &mut sess, &ops, "/time set");
+        assert_eq!(chats(&sess), vec!["Usage: /time set <day|noon|sunset|night|midnight|sunrise|value>"]);
+        run(&mut w, &mut sess, &ops, "/time set invalid");
+        assert_eq!(chats(&sess), vec!["Invalid time value"]);
+        run(&mut w, &mut sess, &ops, "/time add -10");
+        assert_eq!(chats(&sess), vec!["Invalid time value"]);
+        run(&mut w, &mut sess, &ops, "/time query invalid");
+        assert_eq!(chats(&sess), vec!["Usage: /time query <daytime|gametime|day>"]);
     }
 }

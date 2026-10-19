@@ -20,6 +20,7 @@ pub enum ConsoleCommandTag {
     Tell,
     Boost,
     Seed,
+    Time,
     Unknown,
 }
 
@@ -159,6 +160,12 @@ pub fn parse_console_command(cmd: &str) -> ParsedCommand {
         arg1 = arg_of(cmd, 5);
     } else if verb == "seed" {
         tag = ConsoleCommandTag::Seed;
+    } else if verb == "time" {
+        tag = ConsoleCommandTag::Time;
+        let rest = arg_of(cmd, 4);
+        let (p1, p2) = split_two(rest);
+        arg1 = p1;
+        arg2 = p2;
     }
 
     ParsedCommand {
@@ -194,5 +201,27 @@ mod tests {
         let cmd = parse_console_command("op notch");
         assert_eq!(cmd.tag, ConsoleCommandTag::Op);
         assert_eq!(cmd.arg1, "notch");
+    }
+
+    #[test]
+    fn test_parse_time() {
+        let cmd = parse_console_command("time set day");
+        assert_eq!(cmd.tag, ConsoleCommandTag::Time);
+        assert_eq!(cmd.arg1, "set");
+        assert_eq!(cmd.arg2, "day");
+
+        let cmd = parse_console_command("TIME ADD 1000");
+        assert_eq!(cmd.tag, ConsoleCommandTag::Time);
+        assert_eq!(cmd.arg1, "ADD");
+        assert_eq!(cmd.arg2, "1000");
+
+        let cmd = parse_console_command("time query daytime");
+        assert_eq!(cmd.tag, ConsoleCommandTag::Time);
+        assert_eq!(cmd.arg1, "query");
+        assert_eq!(cmd.arg2, "daytime");
+
+        let cmd = parse_console_command("time night");
+        assert_eq!(cmd.tag, ConsoleCommandTag::Time);
+        assert_eq!(cmd.arg1, "night");
     }
 }

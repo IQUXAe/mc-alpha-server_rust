@@ -662,7 +662,12 @@
             sess.idle = READ_TIMEOUT_TICKS - 1;
         }
         srv.tick();
-        let (id, text) = next_pkt(&mut a);
+        let (mut id, mut text) = next_pkt(&mut a);
+        while id == 0 || id == 4 {
+            let p = next_pkt(&mut a);
+            id = p.0;
+            text = p.1;
+        }
         assert_eq!(id, 255);
         assert!(text.contains("Timed out"), "kick text: {text}");
         assert!(srv.players.is_empty());

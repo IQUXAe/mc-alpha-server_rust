@@ -48,6 +48,7 @@ pub enum SessionBroadcast {
     Tell { target: String, text: String },
     ArmSwing(EntityId),
     TileChanged(i32, i32, i32),
+    TimeChanged(i64),
 }
 
 /// Server services borrowed by one pump call (tests fake this; the

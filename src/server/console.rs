@@ -50,7 +50,7 @@ impl Server {
         match tag {
             ConsoleCommandTag::Help => {
                 log::info(
-                    "Console commands:\n   help  or  ?               shows this message\n   kick <player>             removes a player from the server\n   ban <player>              bans a player from the server\n   pardon <player>           pardons a banned player\n   ban-ip <ip>               bans an IP address\n   pardon-ip <ip>            pardons a banned IP address\n   op <player>               turns a player into an op\n   deop <player>             removes op status\n   tp <player1> <player2>    teleports player1 to player2\n   give <player> <id> [num]  gives a player a resource\n   summon <mob> [count] [player] spawns debug mobs near player\n   tell <player> <message>   sends a private message\n   stop                      gracefully stops the server\n   save-all                  forces a server-wide level save\n   list                      lists all connected players\n   say <message>             broadcasts a message\n   boost [on|off|status]     GPU acceleration status or toggle\n   seed                      shows the world seed",
+                    "Console commands:\n   help  or  ?               shows this message\n   kick <player>             removes a player from the server\n   ban <player>              bans a player from the server\n   pardon <player>           pardons a banned player\n   ban-ip <ip>               bans an IP address\n   pardon-ip <ip>            pardons a banned IP address\n   op <player>               turns a player into an op\n   deop <player>             removes op status\n   tp <player1> <player2>    teleports player1 to player2\n   give <player> <id> [num]  gives a player a resource\n   summon <mob> [count] [player] spawns debug mobs near player\n   tell <player> <message>   sends a private message\n   stop                      gracefully stops the server\n   save-all                  forces a server-wide level save\n   list                      lists all connected players\n   say <message>             broadcasts a message\n   boost [on|off|status]     GPU acceleration status or toggle\n   seed                      shows the world seed\n   time <set|add|query>      changes or queries world time",
                 );
             }
             ConsoleCommandTag::List => {
@@ -195,6 +195,9 @@ impl Server {
             }
             ConsoleCommandTag::Seed => {
                 log::info(&format!("Seed: {}", self.world.seed));
+            }
+            ConsoleCommandTag::Time => {
+                self.console_time(&arg1, &arg2);
             }
             ConsoleCommandTag::Unknown => {
                 log::info("Unknown console command. Type \"help\" for help.");
@@ -429,6 +432,74 @@ impl Server {
         }
         log::info(&format!("Spawned {count} {raw_name} near {anchor_name}."));
     }
+
+    fn console_time(&mut self, arg1: &str, arg2: &str) {
+        use crate::server_admin::{calculate_set_time, parse_command_int, parse_time_preset};
+        let sub = arg1.trim().to_lowercase();
+        if sub == "set" {
+            let val_str = arg2.trim();
+            if val_str.is_empty() {
+                log::info("Usage: time set <day|noon|sunset|night|midnight|sunrise|value>");
+                return;
+            }
+            let target_daytime = parse_time_preset(val_str)
+                .or_else(|| parse_command_int(val_str).filter(|&v| v >= 0));
+            let Some(daytime) = target_daytime else {
+                log::info("Invalid time value");
+                return;
+            };
+            let new_time = calculate_set_time(self.world.time, daytime);
+            self.set_server_time(new_time);
+            log::info(&format!("Set the time to {new_time}"));
+        } else if sub == "add" {
+            let val_str = arg2.trim();
+            let Some(to_add) = parse_command_int(val_str).filter(|&v| v > 0) else {
+                log::info("Usage: time add <value>");
+                return;
+            };
+            let new_time = self.world.time.saturating_add(to_add as i64);
+            self.set_server_time(new_time);
+            log::info(&format!("Added {to_add} to the time"));
+        } else if sub == "query" {
+            let query_type = if arg2.trim().is_empty() {
+                "daytime"
+            } else {
+                arg2.trim()
+            };
+            let value = match query_type {
+                "daytime" => self.world.time.rem_euclid(24000),
+                "gametime" => self.world.time,
+                "day" => self.world.time.max(0) / 24000,
+                _ => {
+                    log::info("Usage: time query <daytime|gametime|day>");
+                    return;
+                }
+            };
+            log::info(&format!("The time is {value}"));
+        } else if let Some(daytime) =
+            parse_time_preset(&sub).or_else(|| parse_command_int(&sub).filter(|&v| v >= 0))
+        {
+            let new_time = calculate_set_time(self.world.time, daytime);
+            self.set_server_time(new_time);
+            log::info(&format!("Set the time to {new_time}"));
+        } else {
+            log::info("Usage: time <set|add|query> <value>");
+        }
+    }
+
+    fn set_server_time(&mut self, time: i64) {
+        self.world.time = time;
+        self.world.update_skylight_subtracted();
+        let bytes = crate::session::pkt_time(time);
+        for other in self.sessions.values() {
+            if matches!(other.state, SessionState::Play(..)) {
+                other.conn.queue(&bytes);
+            }
+        }
+        if let Some(hell) = self.hell.as_mut() {
+            hell.time = time;
+        }
+    }
 }
 
 fn parse_console(line: &str) -> (ConsoleCommandTag, String, String, i32) {
@@ -444,5 +515,13 @@ mod tests {
     fn test_parse_console_seed() {
         let (tag, _, _, _) = parse_console("seed");
         assert_eq!(tag, ConsoleCommandTag::Seed);
+    }
+
+    #[test]
+    fn test_parse_console_time() {
+        let (tag, a1, a2, _) = parse_console("time set 12000");
+        assert_eq!(tag, ConsoleCommandTag::Time);
+        assert_eq!(a1, "set");
+        assert_eq!(a2, "12000");
     }
 }

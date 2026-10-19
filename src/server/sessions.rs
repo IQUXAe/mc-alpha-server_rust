@@ -619,6 +619,18 @@ impl Server {
                         }
                     }
                 }
+                SessionBroadcast::TimeChanged(time) => {
+                    let bytes = pkt_time(time);
+                    for other in self.sessions.values() {
+                        if matches!(other.state, SessionState::Play(..)) {
+                            other.conn.queue(&bytes);
+                        }
+                    }
+                    sess.conn.queue(&bytes);
+                    if let Some(hell) = self.hell.as_mut() {
+                        hell.time = time;
+                    }
+                }
             }
         }
     }
