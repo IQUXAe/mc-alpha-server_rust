@@ -13,18 +13,7 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# S912 / weak ARM box: same codegen, selected with
-#   cargo build --release --profile release-s912
-# plus RUSTFLAGS="-C target-cpu=cortex-a53" on an aarch64 host.
-# No source changes: all S912 behavior knobs stay at default values
-# unless `low-power=true` (or ALPHA_S912=1) is set in server.properties.
-[profile.release-s912]
-inherits = "release"
-opt-level = 3
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
+
 
 [dependencies]
 # Only for SIGINT/SIGTERM handling in main.rs; everything else is pure std.
